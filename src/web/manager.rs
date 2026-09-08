@@ -24,6 +24,9 @@ mod negotiation;
 mod learning;
 // Bootstrap credentials and idempotent session creation are isolated from queue accounting.
 mod credentials;
+// Authenticated bridge diagnostics remain isolated from session and carrier state.
+mod diagnostic;
+pub(crate) use diagnostic::BridgeDiagnosticEvent;
 // First-session admission and bounded carrier replacement share one state machine.
 mod session_creation;
 // Session admission remains separate from stream tuple ownership.

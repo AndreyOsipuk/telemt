@@ -107,14 +107,24 @@ async fn read_managed_config_exposes_web_without_runtime_or_access_secrets() {
 #[tokio::test]
 async fn patch_web_debug_is_hot_and_limits_are_process_deferred() {
     let (path, _directory) = temp_config("[web]\nenabled = false\n");
+    let active = ProxyConfig::load(&path).unwrap();
     let debug_patch: Json = serde_json::json!({
-        "web": {"debug": {"enabled": true, "capture_headers": false}}
+        "web": {"debug": {
+            "enabled": true,
+            "sideband": true,
+            "capture_headers": false
+        }}
     });
-    let debug = apply_patch_to_path(&path, &debug_patch, None)
+    let mut debug = apply_patch_to_path(&path, &debug_patch, None)
         .await
         .unwrap();
+    let desired = ProxyConfig::load(&path).unwrap();
+    reconcile_runtime_effect(&mut debug, &active, &desired).unwrap();
+    assert!(!debug.restart_required);
+    assert!(debug.runtime_reload_required);
     assert!(!debug.process_restart_required);
     assert!(debug.changed.iter().any(|section| section == "web"));
+    assert!(desired.web.debug.sideband);
 
     let limits_patch: Json = serde_json::json!({
         "web": {"limits": {"max_http_connections": 2049}}

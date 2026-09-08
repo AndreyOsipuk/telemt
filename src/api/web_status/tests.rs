@@ -22,6 +22,7 @@ fn html_escaping_covers_active_markup_characters() {
 async fn renderer_filters_groups_and_sets_control_plane_security_headers() {
     let policy = WebDebugConfig {
         enabled: true,
+        sideband: true,
         ..Default::default()
     };
     let limits = crate::config::WebLimitsConfig {
@@ -58,6 +59,7 @@ async fn renderer_filters_groups_and_sets_control_plane_security_headers() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let body = std::str::from_utf8(&body).unwrap();
     assert!(body.contains("session_created"));
+    assert!(body.contains("<th>sideband</th><td>yes</td>"));
     assert!(body.contains("0123456789abcdef"));
     assert!(body.contains("192.0.2.40"));
 }

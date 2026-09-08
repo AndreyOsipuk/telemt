@@ -23,6 +23,9 @@ pub struct WebDebugConfig {
     /// Enables process-owned WEB debug collection.
     #[serde(default)]
     pub enabled: bool,
+    /// Enables generated-bridge diagnostic reports over the HTTPS sideband.
+    #[serde(default)]
+    pub sideband: bool,
     /// Records typed bridge, session, stream, handshake, and relay events.
     #[serde(default = "default_true")]
     pub capture_lifecycle: bool,
@@ -56,6 +59,7 @@ impl Default for WebDebugConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            sideband: false,
             capture_lifecycle: true,
             capture_headers: true,
             capture_timings: true,
@@ -66,6 +70,13 @@ impl Default for WebDebugConfig {
             default_window_secs: default_window_secs(),
             max_window_secs: default_max_window_secs(),
         }
+    }
+}
+
+impl WebDebugConfig {
+    /// Returns whether newly issued bridges may report diagnostic lifecycle events.
+    pub(crate) const fn bridge_diagnostics_enabled(&self) -> bool {
+        self.enabled && self.sideband && self.capture_lifecycle
     }
 }
 

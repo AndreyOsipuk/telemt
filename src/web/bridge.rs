@@ -32,17 +32,92 @@ pub(crate) fn render(
     websocket_open_secs: u64,
     reconnect_grace_secs: u64,
     carrier_probe_coalesce_ms: u64,
+    bridge_diagnostics_enabled: bool,
     rng: &SecureRandom,
 ) -> BridgePage {
     let mut nonce = [0u8; 18];
     rng.fill(&mut nonce);
     let nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(nonce);
+    let diagnostic_script = if bridge_diagnostics_enabled {
+        format!("<script nonce=\"__NONCE__\">\n{DIAGNOSTIC_RUNTIME}\n</script>\n")
+    } else {
+        String::new()
+    };
+    let diagnostic_hook = |method: &str| {
+        bridge_diagnostics_enabled
+            .then(|| {
+                format!("if(clientDiagnostics)try{{clientDiagnostics.{method}()}}catch(error){{}}")
+            })
+            .unwrap_or_default()
+    };
+    let diagnostic_runtime_started = if bridge_diagnostics_enabled {
+        format!("{}\n", diagnostic_hook("runtimeStarted"))
+    } else {
+        String::new()
+    };
     let body = DOCUMENT
+        .replace("__DIAGNOSTIC_RUNTIME__\n", &diagnostic_script)
         .replace("__RESPONSE_RUNTIME__", RESPONSE_RUNTIME)
         .replace("__REQUEST_RUNTIME__", REQUEST_RUNTIME)
         .replace("__BUFFER_RUNTIME__", BUFFER_RUNTIME)
         .replace("__RECOVERY_RUNTIME__", RECOVERY_RUNTIME)
         .replace("__RUNTIME__", RUNTIME)
+        .replace(
+            "__DIAGNOSTIC_BINDING__;\n",
+            if bridge_diagnostics_enabled {
+                "const clientDiagnostics=globalThis.TelemtBridgeDiagnostics;\n"
+            } else {
+                ""
+            },
+        )
+        .replace(
+            "__DIAGNOSTIC_RUNTIME_STARTED__;\n",
+            &diagnostic_runtime_started,
+        )
+        .replace(
+            "__DIAGNOSTIC_BOUNDARY_ACTIVATED__;",
+            &diagnostic_hook("boundaryActivated"),
+        )
+        .replace(
+            "__STATUS_FUNCTION__",
+            if bridge_diagnostics_enabled {
+                "state=>{if(port&&!closed){port.postMessage({t:'status',state});if(clientDiagnostics)try{clientDiagnostics.statusPosted()}catch(error){}}}"
+            } else {
+                "state=>{if(port&&!closed)port.postMessage({t:'status',state})}"
+            },
+        )
+        .replace(
+            "__DIAGNOSTIC_HELLO_RECEIVED__;",
+            &diagnostic_hook("helloReceived"),
+        )
+        .replace(
+            "__HELLO_TIMEOUT_CALLBACK__",
+            if bridge_diagnostics_enabled {
+                "()=>{if(clientDiagnostics)try{clientDiagnostics.helloTimeout()}catch(error){}fail('timeout')}"
+            } else {
+                "()=>fail('timeout')"
+            },
+        )
+        .replace(
+            "__DIAGNOSTIC_CLIENT_CLOSE__;",
+            &diagnostic_hook("clientCloseBeforeHello"),
+        )
+        .replace(
+            "__PAGEHIDE_CALLBACK__",
+            if bridge_diagnostics_enabled {
+                "()=>{if(clientDiagnostics)try{clientDiagnostics.documentUnloadedBeforeHello()}catch(error){}fail('navigation')}"
+            } else {
+                "()=>fail('navigation')"
+            },
+        )
+        .replace(
+            "__DIAGNOSTIC_BOOTSTRAP_REPLACED__;",
+            if bridge_diagnostics_enabled {
+                "if(clientDiagnostics)try{clientDiagnostics.setBootstrap(bootstrap)}catch(error){}"
+            } else {
+                ""
+            },
+        )
         .replace("__NONCE__", &nonce)
         .replace("__HOST__", host)
         .replace("__BOOTSTRAP__", bootstrap)
@@ -88,6 +163,7 @@ pub(crate) fn render(
 }
 
 const DOCUMENT: &str = include_str!("bridge/document.html");
+const DIAGNOSTIC_RUNTIME: &str = include_str!("bridge/diagnostic.js");
 const RESPONSE_RUNTIME: &str = include_str!("bridge/response.js");
 const REQUEST_RUNTIME: &str = include_str!("bridge/request.js");
 const BUFFER_RUNTIME: &str = include_str!("bridge/buffers.js");

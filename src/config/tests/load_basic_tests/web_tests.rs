@@ -301,16 +301,30 @@ fn web_carrier_learning_capacity_must_remain_nonzero() {
 
 #[test]
 fn web_debug_table_uses_debug_name_and_bounded_defaults() {
+    assert!(!crate::config::WebDebugConfig::default().sideband);
+    let mut ineffective = crate::config::WebDebugConfig {
+        enabled: true,
+        sideband: true,
+        ..Default::default()
+    };
+    ineffective.capture_lifecycle = false;
+    assert!(!ineffective.bridge_diagnostics_enabled());
+
     let configured = WEB_CONFIG.replace(
         "[[web.vhosts]]",
-        "[web.debug]\nenabled = true\nbody_capture = \"prefix\"\nbody_prefix_bytes = 2048\ndefault_window_secs = 180\nmax_window_secs = 900\n\n[[web.vhosts]]",
+        "[web.debug]\nenabled = true\nsideband = true\nbody_capture = \"prefix\"\nbody_prefix_bytes = 2048\ndefault_window_secs = 180\nmax_window_secs = 900\n\n[[web.vhosts]]",
     );
     let config = load_config_from_temp_toml(&configured);
     assert!(config.web.debug.enabled);
+    assert!(config.web.debug.sideband);
+    assert!(config.web.debug.bridge_diagnostics_enabled());
     assert_eq!(config.web.debug.body_capture, WebDebugBodyCapture::Prefix);
     assert_eq!(config.web.debug.body_prefix_bytes, 2048);
     assert_eq!(config.web.debug.default_window_secs, 180);
     assert_eq!(config.web.debug.max_window_secs, 900);
+
+    let strict = format!("[general]\nconfig_strict = true\n{configured}");
+    assert!(load_config_from_temp_toml(&strict).web.debug.sideband);
 
     let old_name = format!(
         "[general]\nconfig_strict = true\n{}",
@@ -321,6 +335,16 @@ fn web_debug_table_uses_debug_name_and_bounded_defaults() {
     );
     let error = load_config_error_from_temp_toml(&old_name);
     assert!(error.contains("web.trace"));
+
+    let old_parameter = format!(
+        "[general]\nconfig_strict = true\n{}",
+        WEB_CONFIG.replace(
+            "[[web.vhosts]]",
+            "[web.debug]\nbridge_diagnostics = true\n\n[[web.vhosts]]",
+        )
+    );
+    let error = load_config_error_from_temp_toml(&old_parameter);
+    assert!(error.contains("web.debug.bridge_diagnostics"));
 }
 
 #[test]

@@ -30,6 +30,8 @@ mod body;
 mod capability;
 // Decoy routing and upstream proxying are isolated from carrier authentication.
 mod decoy;
+// Authenticated generated-bridge diagnostics remain outside carrier framing.
+mod diagnostic;
 // Downlink long-poll handling remains isolated from request routing.
 mod down;
 // Canonical request parsing rejects ambiguous credentials before routing.
@@ -69,7 +71,12 @@ type BoxError = Box<dyn Error + Send + Sync>;
 type HttpBody = UnsyncBoxBody<Bytes, BoxError>;
 type HttpResponse = Response<HttpBody>;
 
-const TRANSPORT_PATHS: [&str; 3] = ["/api/v1/session", "/api/v1/up", "/api/v1/down"];
+const TRANSPORT_PATHS: [&str; 4] = [
+    "/api/v1/session",
+    "/api/v1/up",
+    "/api/v1/down",
+    "/api/v1/diagnostic",
+];
 const WEBSOCKET_PATH: &str = "/api/v1/ws";
 
 /// Serves one bounded HTTP/1.1 connection accepted from an external TLS terminator.
@@ -377,6 +384,7 @@ async fn handle_root(
         config.web.timeouts.websocket_open_secs,
         config.web.timeouts.reconnect_grace_secs,
         config.web.timeouts.carrier_probe_coalesce_ms,
+        config.web.debug.bridge_diagnostics_enabled(),
         &generation.rng,
     );
     let mut response = full_response(StatusCode::OK, Bytes::from(page.body));
@@ -436,6 +444,9 @@ async fn handle_api(
         "/api/v1/session" => handle_session(request, runtime, vhost, token_hash, client_ip).await,
         "/api/v1/up" => handle_up(request, runtime, vhost, token_hash).await,
         "/api/v1/down" => handle_down(request, runtime, vhost, token_hash).await,
+        "/api/v1/diagnostic" => {
+            diagnostic::handle(request, runtime, vhost, token_hash, client_ip).await
+        }
         _ => serve_decoy(request, vhost, true, &runtime).await,
     }
 }

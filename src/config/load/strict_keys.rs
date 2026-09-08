@@ -326,6 +326,7 @@ const WEB_LIMITS_CONFIG_KEYS: &[&str] = &[
 
 const WEB_DEBUG_CONFIG_KEYS: &[&str] = &[
     "enabled",
+    "sideband",
     "capture_lifecycle",
     "capture_headers",
     "capture_timings",

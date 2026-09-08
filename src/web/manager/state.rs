@@ -46,6 +46,10 @@ pub(super) struct Bootstrap {
     pub(super) timeouts: WebTimeoutsConfig,
     /// Process-unique non-secret identifier shared by bootstrap and session traces.
     pub(super) trace_session_id: u64,
+    /// Whether this bridge was issued with the diagnostic sideband enabled.
+    pub(super) bridge_diagnostics_enabled: bool,
+    /// Fixed event slots already claimed by this bootstrap chain.
+    pub(super) bridge_diagnostic_events: u16,
     /// Bounded display form of the issuing User-Agent.
     pub(super) user_agent: Option<Arc<str>>,
     /// Opaque non-secret identifier used for exact User-Agent filtering.
