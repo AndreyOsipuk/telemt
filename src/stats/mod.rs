@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
-pub(crate) use self::quota_store::QuotaStore;
+pub(crate) use self::quota_store::{QuotaReservation, QuotaStore};
 #[allow(unused_imports)]
 pub use self::replay::{ReplayChecker, ReplayStats};
 use self::telemetry::TelemetryPolicy;
@@ -392,11 +392,6 @@ impl UserStats {
         self.quota.used()
     }
 
-    #[inline]
-    pub(crate) fn refund_quota(&self, bytes: u64) {
-        self.quota.refund(bytes);
-    }
-
     /// Attempts one CAS reservation step against the quota counter.
     ///
     /// Callers control retry/yield policy. This primitive intentionally does
@@ -404,6 +399,18 @@ impl UserStats {
     /// with their own contention strategy.
     #[inline]
     pub fn quota_try_reserve(&self, bytes: u64, limit: u64) -> Result<u64, QuotaReserveError> {
+        self.quota
+            .try_reserve(bytes, limit)
+            .map(QuotaReservation::commit)
+    }
+
+    /// Reserves quota until a direct I/O attempt is settled.
+    #[inline]
+    pub(crate) fn quota_reserve(
+        &self,
+        bytes: u64,
+        limit: u64,
+    ) -> Result<QuotaReservation, QuotaReserveError> {
         self.quota.try_reserve(bytes, limit)
     }
 }

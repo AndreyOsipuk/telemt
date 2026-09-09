@@ -5,6 +5,7 @@ impl TrafficLimiter {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             policy: ArcSwap::from_pointee(PolicySnapshot::default()),
+            policy_update: ParkingMutex::new(()),
             user_buckets: ShardedRegistry::new(REGISTRY_SHARDS),
             cidr_buckets: ShardedRegistry::new(REGISTRY_SHARDS),
             user_scope: ScopeMetrics::default(),
@@ -18,6 +19,11 @@ impl TrafficLimiter {
         user_limits: HashMap<String, RateLimitBps>,
         cidr_limits: HashMap<CidrRateLimitKey, RateLimitBps>,
     ) {
+        let policy_update = self.policy_update.lock();
+        // Revision wrap could otherwise let an old lease restore stale rates.
+        let Some(revision) = self.policy.load().revision.checked_add(1) else {
+            return;
+        };
         let filtered_users = user_limits
             .into_iter()
             .filter(|(_, limit)| limit.up_bps > 0 || limit.down_bps > 0)
@@ -78,6 +84,7 @@ impl TrafficLimiter {
             .store(cidr_policy_entries as u64, Ordering::Relaxed);
 
         self.policy.store(Arc::new(PolicySnapshot {
+            revision,
             user_limits: filtered_users,
             cidr_rules_v4,
             cidr_rules_v6,
@@ -86,6 +93,7 @@ impl TrafficLimiter {
             cidr_rule_keys,
         }));
 
+        drop(policy_update);
         self.maybe_cleanup();
     }
 
@@ -99,12 +107,12 @@ impl TrafficLimiter {
         if let Some(limit) = policy.user_limits.get(user).copied() {
             let bucket = self.user_buckets.get_or_insert_with(
                 user,
-                || UserBucket::new(limit),
+                || UserBucket::new(policy.revision, limit),
                 |bucket| {
                     bucket.active_leases.fetch_add(1, Ordering::Relaxed);
                 },
             );
-            bucket.set_rates(limit);
+            bucket.set_rates(policy.revision, limit);
             self.user_scope
                 .active_leases
                 .fetch_add(1, Ordering::Relaxed);
@@ -121,12 +129,12 @@ impl TrafficLimiter {
             };
             let bucket = self.cidr_buckets.get_or_insert_with(
                 key,
-                || CidrBucket::new(limits),
+                || CidrBucket::new(policy.revision, limits),
                 |bucket| {
                     bucket.active_leases.fetch_add(1, Ordering::Relaxed);
                 },
             );
-            bucket.set_rates(limits);
+            bucket.set_rates(policy.revision, limits);
             self.cidr_scope
                 .active_leases
                 .fetch_add(1, Ordering::Relaxed);

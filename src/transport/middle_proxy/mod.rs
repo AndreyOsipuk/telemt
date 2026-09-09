@@ -33,6 +33,9 @@ mod pool_runtime_api;
 mod pool_status;
 mod pool_writer;
 #[cfg(test)]
+#[path = "tests/pool_writer_publication_tests.rs"]
+mod pool_writer_publication_tests;
+#[cfg(test)]
 #[path = "tests/pool_writer_security_tests.rs"]
 mod pool_writer_security_tests;
 mod reader;

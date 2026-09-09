@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use crate::protocol::constants::{RPC_CLOSE_EXT_U32, RPC_PING_U32};
 
 use super::codec::{RpcWriter, WriterCommand, build_control_payload};
 use super::pool::{MePool, MeWriter, WriterContour};
+use super::pool_lifecycle::MeTaskRegistration;
 use super::reader::reader_loop;
 use super::wire::build_proxy_req_payload;
 

@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use ipnetwork::IpNetwork;
+use parking_lot::Mutex as ParkingMutex;
 
 use crate::config::RateLimitBps;
 
@@ -32,6 +33,9 @@ const REGISTRY_SHARDS: usize = 64;
 const FAIR_EPOCH_MS: u64 = 20;
 const MAX_BORROW_CHUNK_BYTES: u64 = 32 * 1024;
 const CLEANUP_INTERVAL_SECS: u64 = 60;
+const PACKED_USAGE_BITS: u32 = 28;
+const PACKED_USAGE_MASK: u64 = (1u64 << PACKED_USAGE_BITS) - 1;
+const PACKED_EPOCH_MAX: u64 = (1u64 << (u64::BITS - PACKED_USAGE_BITS)) - 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RateDirection {
@@ -76,12 +80,12 @@ struct ScopeMetrics {
 struct AtomicRatePair {
     up_bps: AtomicU64,
     down_bps: AtomicU64,
+    revision: ParkingMutex<u64>,
 }
 
 #[derive(Default)]
 struct DirectionBucket {
-    epoch: AtomicU64,
-    used: AtomicU64,
+    state: AtomicU64,
 }
 
 struct UserBucket {
@@ -93,15 +97,13 @@ struct UserBucket {
 
 #[derive(Default)]
 struct CidrDirectionBucket {
-    epoch: AtomicU64,
-    used: AtomicU64,
-    active_users: AtomicU64,
+    used: DirectionBucket,
+    active_users: DirectionBucket,
 }
 
 #[derive(Default)]
 struct CidrUserDirectionState {
-    epoch: AtomicU64,
-    used: AtomicU64,
+    used: DirectionBucket,
 }
 
 struct CidrUserShare {
@@ -139,6 +141,7 @@ enum CidrPolicyMatch<'a> {
 
 #[derive(Default)]
 struct PolicySnapshot {
+    revision: u64,
     user_limits: HashMap<String, RateLimitBps>,
     cidr_rules_v4: Vec<CidrRule>,
     cidr_rules_v6: Vec<CidrRule>,
@@ -162,9 +165,25 @@ pub struct TrafficLease {
 
 pub struct TrafficLimiter {
     policy: ArcSwap<PolicySnapshot>,
+    policy_update: ParkingMutex<()>,
     user_buckets: ShardedRegistry<UserBucket>,
     cidr_buckets: ShardedRegistry<CidrBucket>,
     user_scope: ScopeMetrics,
     cidr_scope: ScopeMetrics,
     last_cleanup_epoch_secs: AtomicU64,
+}
+
+struct DirectionDebit<'a> {
+    bucket: &'a DirectionBucket,
+    epoch: u64,
+    refundable: u64,
+}
+
+/// Refunds uncommitted shaping budget when an I/O attempt is cancelled.
+#[must_use = "traffic reservations must be settled after the I/O attempt"]
+pub(crate) struct TrafficReservation<'a> {
+    result: TrafficConsumeResult,
+    user: Option<DirectionDebit<'a>>,
+    cidr: Option<DirectionDebit<'a>>,
+    cidr_user: Option<DirectionDebit<'a>>,
 }

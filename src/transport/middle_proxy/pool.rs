@@ -88,14 +88,6 @@ impl WritersState {
         }
     }
 
-    pub(super) async fn update<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&mut Vec<MeWriter>) -> R,
-    {
-        let mut guard = self.write().await;
-        f(&mut guard)
-    }
-
     fn debug_assert_store_guarded(&self) {
         debug_assert!(
             self.writers_write_guard.try_lock().is_err(),

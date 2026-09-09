@@ -290,6 +290,20 @@ fn test_quota_used_is_authoritative_and_independent_from_octets_telemetry() {
 }
 
 #[test]
+fn old_quota_reservation_refund_does_not_reduce_post_reset_usage() {
+    let stats = Stats::new();
+    let user = "quota-reset-generation-user";
+    let user_stats = stats.get_or_create_user_stats_handle(user);
+    let reservation = user_stats.quota_reserve(80, 100).unwrap();
+
+    stats.reset_user_quota(user);
+    stats.quota_charge_post_write(user_stats.as_ref(), 40);
+    drop(reservation);
+
+    assert_eq!(stats.get_user_quota_used(user), 40);
+}
+
+#[test]
 fn test_cached_handle_survives_map_cleanup_until_last_drop() {
     let stats = Stats::new();
     let user = "quota-handle-lifetime-user";

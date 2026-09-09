@@ -16,10 +16,7 @@ mod quota;
 pub(super) use self::combined::CombinedStream;
 pub(super) use self::counters::SharedCounters;
 pub(super) use self::quota::is_quota_io_error;
-use self::quota::{
-    QUOTA_RESERVE_MAX_ROUNDS, QUOTA_RESERVE_SPIN_RETRIES, quota_io_error,
-    refund_reserved_quota_bytes,
-};
+use self::quota::{QUOTA_RESERVE_MAX_ROUNDS, QUOTA_RESERVE_SPIN_RETRIES, quota_io_error};
 pub(super) use self::quota::{quota_adaptive_interval_bytes, should_immediate_quota_check};
 
 /// Transparent I/O wrapper that tracks per-user statistics and activity.
@@ -213,7 +210,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for StatsIo<S> {
         }
 
         let mut remaining_before = None;
-        let mut reserved_read_bytes = 0u64;
+        let mut quota_reservation = None;
         let mut read_limit = buf.remaining();
         if let Some(limit) = this.quota_limit {
             let used_before = this.user_stats.quota_used();
@@ -231,11 +228,11 @@ impl<S: AsyncRead + Unpin> AsyncRead for StatsIo<S> {
 
             let desired = read_limit as u64;
             let mut reserve_rounds = 0usize;
-            while reserved_read_bytes == 0 {
+            while quota_reservation.is_none() {
                 for _ in 0..QUOTA_RESERVE_SPIN_RETRIES {
-                    match this.user_stats.quota_try_reserve(desired, limit) {
-                        Ok(_) => {
-                            reserved_read_bytes = desired;
+                    match this.user_stats.quota_reserve(desired, limit) {
+                        Ok(reservation) => {
+                            quota_reservation = Some(reservation);
                             break;
                         }
                         Err(crate::stats::QuotaReserveError::LimitExceeded) => {
@@ -248,7 +245,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for StatsIo<S> {
                     }
                 }
 
-                if reserved_read_bytes == 0 {
+                if quota_reservation.is_none() {
                     reserve_rounds = reserve_rounds.saturating_add(1);
                     if reserve_rounds >= QUOTA_RESERVE_MAX_ROUNDS {
                         this.stats.increment_quota_contention_timeout_total();
@@ -287,9 +284,9 @@ impl<S: AsyncRead + Unpin> AsyncRead for StatsIo<S> {
 
         match read_result {
             Poll::Ready(Ok(n)) => {
-                if reserved_read_bytes > n as u64 {
-                    let refund_bytes = reserved_read_bytes - n as u64;
-                    refund_reserved_quota_bytes(this.user_stats.as_ref(), refund_bytes);
+                if let Some(reservation) = quota_reservation.take() {
+                    let refund_bytes = reservation.reserved_bytes().saturating_sub(n as u64);
+                    reservation.settle(n as u64);
                     this.stats.add_quota_refund_bytes_total(refund_bytes);
                 }
                 if n > 0 {
@@ -333,16 +330,16 @@ impl<S: AsyncRead + Unpin> AsyncRead for StatsIo<S> {
                 Poll::Ready(Ok(()))
             }
             Poll::Pending => {
-                if reserved_read_bytes > 0 {
-                    refund_reserved_quota_bytes(this.user_stats.as_ref(), reserved_read_bytes);
-                    this.stats.add_quota_refund_bytes_total(reserved_read_bytes);
+                if let Some(reservation) = quota_reservation.take() {
+                    this.stats
+                        .add_quota_refund_bytes_total(reservation.reserved_bytes());
                 }
                 Poll::Pending
             }
             Poll::Ready(Err(err)) => {
-                if reserved_read_bytes > 0 {
-                    refund_reserved_quota_bytes(this.user_stats.as_ref(), reserved_read_bytes);
-                    this.stats.add_quota_refund_bytes_total(reserved_read_bytes);
+                if let Some(reservation) = quota_reservation.take() {
+                    this.stats
+                        .add_quota_refund_bytes_total(reservation.reserved_bytes());
                 }
                 Poll::Ready(Err(err))
             }
@@ -361,14 +358,15 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StatsIo<S> {
             return Poll::Ready(Err(quota_io_error()));
         }
 
-        let mut shaper_reserved_bytes = 0u64;
+        let mut shaper_reservation = None;
         let mut write_buf = buf;
         if let Some(lease) = this.traffic_lease.as_ref() {
             if !buf.is_empty() {
                 loop {
-                    let consume = lease.try_consume(RateDirection::Down, buf.len() as u64);
+                    let reservation = lease.try_reserve(RateDirection::Down, buf.len() as u64);
+                    let consume = reservation.result();
                     if consume.granted > 0 {
-                        shaper_reserved_bytes = consume.granted;
+                        shaper_reservation = Some(reservation);
                         if consume.granted < buf.len() as u64 {
                             write_buf = &buf[..consume.granted as usize];
                         }
@@ -398,17 +396,14 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StatsIo<S> {
         }
 
         let mut remaining_before = None;
-        let mut reserved_bytes = 0u64;
+        let mut quota_reservation = None;
         if let Some(limit) = this.quota_limit {
             if !write_buf.is_empty() {
                 let mut reserve_rounds = 0usize;
-                while reserved_bytes == 0 {
+                while quota_reservation.is_none() {
                     let used_before = this.user_stats.quota_used();
                     let remaining = limit.saturating_sub(used_before);
                     if remaining == 0 {
-                        if let Some(lease) = this.traffic_lease.as_ref() {
-                            lease.refund(RateDirection::Down, shaper_reserved_bytes);
-                        }
                         this.quota_exceeded.store(true, Ordering::Release);
                         return Poll::Ready(Err(quota_io_error()));
                     }
@@ -417,9 +412,9 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StatsIo<S> {
                     let desired = remaining.min(write_buf.len() as u64);
                     let mut saw_contention = false;
                     for _ in 0..QUOTA_RESERVE_SPIN_RETRIES {
-                        match this.user_stats.quota_try_reserve(desired, limit) {
-                            Ok(_) => {
-                                reserved_bytes = desired;
+                        match this.user_stats.quota_reserve(desired, limit) {
+                            Ok(reservation) => {
+                                quota_reservation = Some(reservation);
                                 write_buf = &write_buf[..desired as usize];
                                 break;
                             }
@@ -433,14 +428,13 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StatsIo<S> {
                         }
                     }
 
-                    if reserved_bytes == 0 {
+                    if quota_reservation.is_none() {
                         reserve_rounds = reserve_rounds.saturating_add(1);
                         if reserve_rounds >= QUOTA_RESERVE_MAX_ROUNDS {
                             this.stats.increment_quota_contention_timeout_total();
-                            if let Some(lease) = this.traffic_lease.as_ref() {
-                                lease.refund(RateDirection::Down, shaper_reserved_bytes);
-                            }
-                            let _ = this.arm_quota_wait(cx);
+                            Self::arm_wait(&mut this.quota_wait, false, false);
+                            let _ =
+                                Self::poll_wait(&mut this.quota_wait, cx, None, RateDirection::Up);
                             return Poll::Pending;
                         } else if saw_contention {
                             std::hint::spin_loop();
@@ -451,9 +445,6 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StatsIo<S> {
                 let used_before = this.user_stats.quota_used();
                 let remaining = limit.saturating_sub(used_before);
                 if remaining == 0 {
-                    if let Some(lease) = this.traffic_lease.as_ref() {
-                        lease.refund(RateDirection::Down, shaper_reserved_bytes);
-                    }
                     this.quota_exceeded.store(true, Ordering::Release);
                     return Poll::Ready(Err(quota_io_error()));
                 }
@@ -463,15 +454,13 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StatsIo<S> {
 
         match Pin::new(&mut this.inner).poll_write(cx, write_buf) {
             Poll::Ready(Ok(n)) => {
-                if reserved_bytes > n as u64 {
-                    let refund_bytes = reserved_bytes - n as u64;
-                    refund_reserved_quota_bytes(this.user_stats.as_ref(), refund_bytes);
+                if let Some(reservation) = quota_reservation.take() {
+                    let refund_bytes = reservation.reserved_bytes().saturating_sub(n as u64);
+                    reservation.settle(n as u64);
                     this.stats.add_quota_refund_bytes_total(refund_bytes);
                 }
-                if shaper_reserved_bytes > n as u64
-                    && let Some(lease) = this.traffic_lease.as_ref()
-                {
-                    lease.refund(RateDirection::Down, shaper_reserved_bytes - n as u64);
+                if let Some(reservation) = shaper_reservation.take() {
+                    reservation.settle_written(n as u64);
                 }
                 if n > 0 {
                     if let Some(lease) = this.traffic_lease.as_ref() {
@@ -513,26 +502,16 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StatsIo<S> {
                 Poll::Ready(Ok(n))
             }
             Poll::Ready(Err(err)) => {
-                if reserved_bytes > 0 {
-                    refund_reserved_quota_bytes(this.user_stats.as_ref(), reserved_bytes);
-                    this.stats.add_quota_refund_bytes_total(reserved_bytes);
-                }
-                if shaper_reserved_bytes > 0
-                    && let Some(lease) = this.traffic_lease.as_ref()
-                {
-                    lease.refund(RateDirection::Down, shaper_reserved_bytes);
+                if let Some(reservation) = quota_reservation.take() {
+                    this.stats
+                        .add_quota_refund_bytes_total(reservation.reserved_bytes());
                 }
                 Poll::Ready(Err(err))
             }
             Poll::Pending => {
-                if reserved_bytes > 0 {
-                    refund_reserved_quota_bytes(this.user_stats.as_ref(), reserved_bytes);
-                    this.stats.add_quota_refund_bytes_total(reserved_bytes);
-                }
-                if shaper_reserved_bytes > 0
-                    && let Some(lease) = this.traffic_lease.as_ref()
-                {
-                    lease.refund(RateDirection::Down, shaper_reserved_bytes);
+                if let Some(reservation) = quota_reservation.take() {
+                    this.stats
+                        .add_quota_refund_bytes_total(reservation.reserved_bytes());
                 }
                 Poll::Pending
             }

@@ -104,8 +104,7 @@ pub(super) async fn handle(
         };
         let runtime_cfg = config_rx.borrow().clone();
         data.in_runtime = runtime_cfg.access.users.contains_key(&data.username);
-        let newly_disabled = shared.proxy_shared.set_user_enabled(base_user, false);
-        let cancelled = shared.proxy_shared.cancel_user_sessions(base_user);
+        let (newly_disabled, cancelled) = shared.proxy_shared.set_user_enabled(base_user, false);
         shared.runtime_events.record(
             "api.user.disable.ok",
             format!(
@@ -290,11 +289,10 @@ pub(super) async fn handle(
             let runtime_cfg = config_rx.borrow().clone();
             data.in_runtime = runtime_cfg.access.users.contains_key(&data.username);
             if let Some(enabled) = enabled_update {
-                shared
+                let (_, cancelled) = shared
                     .proxy_shared
                     .set_user_enabled(&data.username, enabled);
                 if !enabled {
-                    let cancelled = shared.proxy_shared.cancel_user_sessions(&data.username);
                     shared.runtime_events.record(
                         "api.user.disable.runtime",
                         format!(

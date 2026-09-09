@@ -196,6 +196,13 @@ pub(super) fn validate(config: &mut ProxyConfig) -> Result<()> {
                 "access.user_rate_limits.{user} must set at least one non-zero direction"
             )));
         }
+        for (direction, value) in [("up_bps", limit.up_bps), ("down_bps", limit.down_bps)] {
+            if value > MAX_RATE_LIMIT_BPS {
+                return Err(ProxyError::Config(format!(
+                    "access.user_rate_limits.{user}.{direction} must be within [0, {MAX_RATE_LIMIT_BPS}]"
+                )));
+            }
+        }
     }
 
     for (cidr, limit) in &config.access.cidr_rate_limits {
@@ -203,6 +210,13 @@ pub(super) fn validate(config: &mut ProxyConfig) -> Result<()> {
             return Err(ProxyError::Config(format!(
                 "access.cidr_rate_limits.{cidr} must set at least one non-zero direction"
             )));
+        }
+        for (direction, value) in [("up_bps", limit.up_bps), ("down_bps", limit.down_bps)] {
+            if value > MAX_RATE_LIMIT_BPS {
+                return Err(ProxyError::Config(format!(
+                    "access.cidr_rate_limits.{cidr}.{direction} must be within [0, {MAX_RATE_LIMIT_BPS}]"
+                )));
+            }
         }
     }
     let mut cidr_auto_templates = HashSet::new();

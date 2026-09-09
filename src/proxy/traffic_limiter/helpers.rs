@@ -56,7 +56,7 @@ pub(super) fn auto_cidr_bucket_key(ip: IpAddr, prefix_len: u8) -> Option<String>
 pub(super) fn current_epoch() -> u64 {
     let start = limiter_epoch_start();
     let elapsed_ms = start.elapsed().as_millis() as u64;
-    elapsed_ms / FAIR_EPOCH_MS
+    elapsed_ms / FAIR_EPOCH_MS + 1
 }
 
 pub(super) fn limiter_epoch_start() -> &'static Instant {

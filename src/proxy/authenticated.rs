@@ -79,7 +79,11 @@ where
 
     let route_snapshot = deps.route_runtime.snapshot();
     let session_id = deps.rng.u64();
-    let user_session = deps.shared.register_user_session(&user, session_id);
+    let Some(user_session) = deps.shared.register_user_session(&user, session_id) else {
+        user_reservation.release_deferred();
+        warn!(user = %user, "Disabled user rejected during final admission");
+        return Err(ProxyError::UserDisabled { user });
+    };
     let session_cancel = user_session.token();
     let selected_me_pool = if deps.config.general.use_middle_proxy
         && matches!(route_snapshot.mode, RelayRouteMode::Middle)
@@ -245,6 +249,18 @@ impl UserConnectionReservation {
             self.ip_tracker.remove_ip(&self.user, self.ip).await;
         }
         self.stats.decrement_user_curr_connects(&self.user);
+    }
+
+    /// Defers IP cleanup when admission fails after the asynchronous reservation step.
+    pub(crate) fn release_deferred(mut self) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+        self.stats.decrement_user_curr_connects(&self.user);
+        if self.tracks_ip {
+            self.ip_tracker.enqueue_cleanup(self.user.clone(), self.ip);
+        }
     }
 }
 

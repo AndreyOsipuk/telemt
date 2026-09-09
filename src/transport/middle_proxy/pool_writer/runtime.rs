@@ -132,16 +132,6 @@ impl MePool {
             drain_deadline_epoch_secs: drain_deadline_epoch_secs.clone(),
             allow_drain_fallback: allow_drain_fallback.clone(),
         };
-        self.writers
-            .update(|writers| writers.push(writer.clone()))
-            .await;
-        self.registry
-            .register_writer(writer_id, tx.clone(), byte_budget)
-            .await;
-        self.registry.mark_writer_idle(writer_id).await;
-        self.conn_count.fetch_add(1, Ordering::Relaxed);
-        self.notify_writer_epoch();
-
         let reg = self.registry.clone();
         let writers_arc = self.writers_arc();
         let ping_tracker = Arc::new(tokio::sync::Mutex::new(HashMap::<i64, Instant>::new()));
@@ -177,8 +167,10 @@ impl MePool {
         let route_fairshare_enabled = self.transport_policy.me_route_fairshare_enabled.clone();
         let reader_route_data_wait_ms = self.transport_policy.me_reader_route_data_wait_ms.clone();
 
-        self.lifecycle
-            .spawn_registered_writer(task_registration, async move {
+        let writer_task = {
+            // Keep transport ownership behind a stable-size pointer while publication waits for
+            // locks.
+            Box::pin(async move {
                 // Reader MUST be the first branch in biased select! to avoid read starvation.
                 let exit = tokio::select! {
                     biased;
@@ -269,9 +261,39 @@ impl MePool {
 
                 let remaining = writers_arc.read().await.len();
                 debug!(writer_id, remaining, "ME writer lifecycle task finished");
-            });
+            })
+        };
+
+        self.publish_prepared_writer(writer, tx, byte_budget, task_registration, writer_task)
+            .await;
 
         Ok(())
+    }
+
+    /// Commits writer visibility and lifecycle ownership after all cancellation points.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::transport::middle_proxy) async fn publish_prepared_writer<F>(
+        self: &Arc<Self>,
+        writer: MeWriter,
+        tx: mpsc::Sender<WriterCommand>,
+        byte_budget: Arc<tokio::sync::Semaphore>,
+        task_registration: MeTaskRegistration<'_>,
+        writer_task: F,
+    ) where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let (mut writers, mut registry_registration) = tokio::join!(
+            self.writers.write(),
+            self.registry.prepare_writer_registration()
+        );
+        registry_registration.install(writer.id, tx, byte_budget);
+        writers.push(writer);
+        self.conn_count.fetch_add(1, Ordering::Relaxed);
+        self.lifecycle
+            .spawn_registered_writer(task_registration, writer_task);
+        drop(writers);
+        drop(registry_registration);
+        self.notify_writer_epoch();
     }
 
     pub(crate) async fn remove_writer_and_close_clients(self: &Arc<Self>, writer_id: u64) {
@@ -337,7 +359,12 @@ impl MePool {
                     self.stats.increment_me_writer_removed_unexpected_total();
                 }
                 close_tx = Some(w.tx.clone());
-                self.conn_count.fetch_sub(1, Ordering::Relaxed);
+                // Teardown remains idempotent if the advisory count was already reconciled.
+                let _ =
+                    self.conn_count
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                            count.checked_sub(1)
+                        });
                 removed = true;
             }
         }

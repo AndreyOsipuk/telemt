@@ -58,28 +58,16 @@ impl ConnRegistry {
     }
 
     /// Registers one writer command route and its matching memory budget atomically.
+    #[allow(dead_code)]
     pub async fn register_writer(
         &self,
         writer_id: u64,
         tx: mpsc::Sender<WriterCommand>,
         byte_budget: Arc<tokio::sync::Semaphore>,
     ) {
-        let mut binding = self.binding.inner.lock().await;
-        binding
-            .conns_for_writer
-            .entry(writer_id)
-            .or_insert_with(HashSet::new);
-        self.binding
-            .bound_clients_by_writer
-            .entry(writer_id)
-            .or_insert(0);
-        self.binding
-            .writer_idle_since_epoch_secs
-            .entry(writer_id)
-            .or_insert_with(Self::now_epoch_secs);
-        self.writers
-            .map
-            .insert(writer_id, super::WriterRoute { tx, byte_budget });
+        self.prepare_writer_registration()
+            .await
+            .install(writer_id, tx, byte_budget);
     }
 
     /// Unregister connection, returning associated writer_id if any.
@@ -344,20 +332,6 @@ impl ConnRegistry {
             .map
             .insert(conn_id, HotConnBinding { writer_id, meta });
         true
-    }
-
-    pub async fn mark_writer_idle(&self, writer_id: u64) {
-        let mut binding = self.binding.inner.lock().await;
-        binding
-            .conns_for_writer
-            .entry(writer_id)
-            .or_insert_with(HashSet::new);
-        let count = binding
-            .conns_for_writer
-            .get(&writer_id)
-            .map(|set| set.len())
-            .unwrap_or(0);
-        self.set_writer_bound_count(writer_id, count);
     }
 
     pub async fn get_last_writer_meta(&self, writer_id: u64) -> Option<ConnMeta> {

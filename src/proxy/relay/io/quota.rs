@@ -1,4 +1,3 @@
-use crate::stats::UserStats;
 use std::io;
 
 #[derive(Debug)]
@@ -45,11 +44,4 @@ pub(in crate::proxy::relay) fn should_immediate_quota_check(
     charge_bytes: u64,
 ) -> bool {
     remaining_before <= QUOTA_NEAR_LIMIT_BYTES || charge_bytes >= QUOTA_LARGE_CHARGE_BYTES
-}
-
-pub(super) fn refund_reserved_quota_bytes(user_stats: &UserStats, reserved_bytes: u64) {
-    if reserved_bytes == 0 {
-        return;
-    }
-    user_stats.refund_quota(reserved_bytes);
 }

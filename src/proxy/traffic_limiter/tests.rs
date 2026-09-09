@@ -74,3 +74,185 @@ fn auto_cidr_bucket_key_canonicalizes_network_address() {
         "auto:6:2001:db8::/64"
     );
 }
+
+#[test]
+fn refund_from_an_old_epoch_does_not_reduce_the_current_epoch() {
+    let bucket = DirectionBucket::default();
+    let old_debit = bucket.try_reserve_at(7, 100, 80).unwrap();
+    let current_debit = bucket.try_reserve_at(8, 100, 60).unwrap();
+
+    drop(old_debit);
+
+    assert_eq!(bucket.used_at(8), Some(60));
+    drop(current_debit);
+}
+
+#[test]
+fn concurrent_rollover_cannot_publish_multiple_epoch_budgets() {
+    const CONTENDERS: usize = 32;
+
+    let bucket = Arc::new(DirectionBucket::default());
+    let barrier = Arc::new(std::sync::Barrier::new(CONTENDERS));
+    let mut threads = Vec::with_capacity(CONTENDERS);
+    for _ in 0..CONTENDERS {
+        let bucket = Arc::clone(&bucket);
+        let barrier = Arc::clone(&barrier);
+        threads.push(std::thread::spawn(move || {
+            barrier.wait();
+            bucket
+                .try_reserve_at(9, 100, 100)
+                .map(|mut debit| debit.commit_all())
+                .unwrap_or(0)
+        }));
+    }
+
+    let granted = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .sum::<u64>();
+    assert_eq!(granted, 100);
+    assert_eq!(bucket.used_at(9), Some(100));
+}
+
+#[test]
+fn scheduler_pressure_never_exceeds_a_packed_epoch_budget() {
+    const CONTENDERS: usize = 4;
+    const EPOCHS: usize = 10_000;
+
+    let bucket = Arc::new(DirectionBucket::default());
+    let barrier = Arc::new(std::sync::Barrier::new(CONTENDERS));
+    let mut threads = Vec::with_capacity(CONTENDERS);
+    for _ in 0..CONTENDERS {
+        let bucket = Arc::clone(&bucket);
+        let barrier = Arc::clone(&barrier);
+        threads.push(std::thread::spawn(move || {
+            let mut grants = Vec::with_capacity(EPOCHS);
+            for epoch in 1..=EPOCHS as u64 {
+                barrier.wait();
+                let granted = bucket
+                    .try_reserve_at(epoch, 100, 100)
+                    .map(|mut debit| debit.commit_all())
+                    .unwrap_or(0);
+                grants.push(granted);
+                barrier.wait();
+            }
+            grants
+        }));
+    }
+
+    let grants = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect::<Vec<_>>();
+    for epoch_index in 0..EPOCHS {
+        let granted = grants
+            .iter()
+            .map(|thread_grants| thread_grants[epoch_index])
+            .sum::<u64>();
+        assert_eq!(granted, 100);
+    }
+}
+
+#[test]
+fn stale_policy_revision_cannot_restore_an_old_rate() {
+    let bucket = UserBucket::new(2, rate(2_000, 3_000));
+
+    bucket.set_rates(3, rate(4_000, 5_000));
+    bucket.set_rates(2, rate(6_000, 7_000));
+
+    assert_eq!(bucket.rates.get(RateDirection::Up), 4_000);
+    assert_eq!(bucket.rates.get(RateDirection::Down), 5_000);
+}
+
+#[test]
+fn dropped_debit_refunds_only_its_packed_epoch() {
+    let bucket = DirectionBucket::default();
+    let debit = bucket.try_reserve_at(11, 100, 80).unwrap();
+
+    drop(debit);
+
+    assert_eq!(bucket.used_at(11), Some(0));
+    assert!(
+        bucket
+            .try_reserve_at(PACKED_EPOCH_MAX + 1, 100, 1)
+            .is_none()
+    );
+}
+
+#[test]
+fn concurrent_first_use_counts_one_active_cidr_user() {
+    const CONTENDERS: usize = 32;
+
+    let bucket = Arc::new(CidrDirectionBucket::default());
+    let user = Arc::new(CidrUserDirectionState::default());
+    let barrier = Arc::new(std::sync::Barrier::new(CONTENDERS));
+    let mut threads = Vec::with_capacity(CONTENDERS);
+    for _ in 0..CONTENDERS {
+        let bucket = Arc::clone(&bucket);
+        let user = Arc::clone(&user);
+        let barrier = Arc::clone(&barrier);
+        threads.push(std::thread::spawn(move || {
+            barrier.wait();
+            assert!(user.ensure_active(13, &bucket.active_users));
+        }));
+    }
+    for thread in threads {
+        thread.join().unwrap();
+    }
+
+    assert_eq!(bucket.active_users.used_at(13), Some(1));
+}
+
+#[test]
+fn configured_rate_maximum_fits_the_packed_epoch_budget() {
+    assert_eq!(bytes_per_epoch(100_000_000_000), 250_000_000);
+    assert!(bytes_per_epoch(100_000_000_000) <= PACKED_USAGE_MASK);
+}
+
+#[test]
+fn dropped_traffic_reservation_refunds_user_and_cidr_debits() {
+    let limiter = TrafficLimiter::new();
+    let mut user_limits = HashMap::new();
+    user_limits.insert("alice".to_string(), rate(400_000, 400_000));
+    let mut cidr_limits = HashMap::new();
+    cidr_limits.insert(
+        CidrRateLimitKey::Network("203.0.113.0/24".parse().unwrap()),
+        rate(400_000, 400_000),
+    );
+    limiter.apply_policy(user_limits, cidr_limits);
+    let lease = limiter
+        .acquire_lease("alice", "203.0.113.7".parse().unwrap())
+        .unwrap();
+
+    let reservation = lease.try_reserve(RateDirection::Down, 800);
+    assert_eq!(reservation.result().granted, 800);
+    let epoch = reservation.user.as_ref().unwrap().epoch;
+    drop(reservation);
+
+    let user_bucket = lease.user_bucket.as_ref().unwrap();
+    let cidr_bucket = lease.cidr_bucket.as_ref().unwrap();
+    let cidr_user = lease.cidr_user_share.as_ref().unwrap();
+    assert_eq!(user_bucket.down.used_at(epoch), Some(0));
+    assert_eq!(cidr_bucket.down.used.used_at(epoch), Some(0));
+    assert_eq!(cidr_user.down.used.used_at(epoch), Some(0));
+}
+
+#[test]
+fn partial_traffic_settlement_charges_only_committed_bytes() {
+    let limiter = TrafficLimiter::new();
+    let mut user_limits = HashMap::new();
+    user_limits.insert("alice".to_string(), rate(400_000, 400_000));
+    limiter.apply_policy(user_limits, HashMap::new());
+    let lease = limiter
+        .acquire_lease("alice", "203.0.113.7".parse().unwrap())
+        .unwrap();
+
+    let reservation = lease.try_reserve(RateDirection::Down, 800);
+    let epoch = reservation.user.as_ref().unwrap().epoch;
+    reservation.settle_written(300);
+
+    assert_eq!(
+        lease.user_bucket.as_ref().unwrap().down.used_at(epoch),
+        Some(300)
+    );
+}

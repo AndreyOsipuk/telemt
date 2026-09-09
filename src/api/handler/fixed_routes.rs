@@ -35,13 +35,10 @@ pub(super) async fn create_user_route(
     let runtime_cfg = config_rx.borrow().clone();
     data.user.in_runtime = runtime_cfg.access.users.contains_key(&data.user.username);
     if let Some(enabled) = requested_enabled {
-        shared
+        let (_, cancelled) = shared
             .proxy_shared
             .set_user_enabled(&data.user.username, enabled);
         if !enabled {
-            let cancelled = shared
-                .proxy_shared
-                .cancel_user_sessions(&data.user.username);
             if cancelled > 0 {
                 shared.runtime_events.record(
                     "api.user.disable.runtime",

@@ -31,7 +31,7 @@ mod web_debug;
 
 pub use access::{AccessConfig, CidrRateLimitKey, RateLimitBps};
 #[allow(unused_imports)]
-pub(crate) use access::{CidrAutoTemplate, CidrAutoTemplateFamily};
+pub(crate) use access::{CidrAutoTemplate, CidrAutoTemplateFamily, MAX_RATE_LIMIT_BPS};
 pub use api::{ApiConfig, ApiGrayAction};
 pub use censorship::{
     AntiCensorshipConfig, ExclusiveMaskTarget, TlsFetchConfig, TlsFetchProfile, UnknownSniAction,

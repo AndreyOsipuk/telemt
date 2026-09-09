@@ -288,8 +288,9 @@ pub(crate) async fn spawn_runtime_tasks(
                 break;
             }
             let cfg = config_rx_user_enabled.borrow_and_update().clone();
-            for user in shared_user_enabled.apply_user_enabled_config(&cfg.access.user_enabled) {
-                let cancelled = shared_user_enabled.cancel_user_sessions(&user);
+            for (user, cancelled) in
+                shared_user_enabled.apply_user_enabled_config(&cfg.access.user_enabled)
+            {
                 if cancelled > 0 {
                     info!(
                         user = %user,

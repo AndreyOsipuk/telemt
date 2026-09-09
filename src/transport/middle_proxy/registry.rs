@@ -18,6 +18,8 @@ const ROUTE_QUEUED_BYTE_PERMIT_UNIT: usize = 16 * 1024;
 const ROUTE_QUEUED_PERMITS_PER_SLOT: usize = 4;
 const ROUTE_QUEUED_MAX_FRAME_PERMITS: usize = 1024;
 
+// Transactional writer registry publication.
+mod publication;
 mod writer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
