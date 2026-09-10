@@ -391,16 +391,17 @@ function queueLane(value){
 }
 function openLaneSocket(lane){
  if(lane.socket||closed)return;lane.socket=new WebSocket(socketURL(),'tproxy-lane-v1.'+sessionToken+'.'+String(lane.id));lane.socket.binaryType='arraybuffer';
- const opened=lane.socket,openTimer=setTimeout(()=>{if(!closed&&lanes.get(lane.id)===lane&&lane.socket===opened)finishLane(lane,true)},websocketOpenMs);
- lane.socket.onopen=()=>{if(closed||lanes.get(lane.id)!==lane)return;lane.ready=true;status('connected');runLaneSocketUp(lane)};
+ const opened=lane.socket;let upgraded=false,settled=false,openTimer=null;const finishSocket=reason=>{if(settled)return;settled=true;if(openTimer)clearTimeout(openTimer);openTimer=null;if(closed||lanes.get(lane.id)!==lane||lane.socket!==opened)return;lane.ready=false;if(!upgraded){lane.socket=null;opened.close();recoveryController.recover(reason,null);return}finishLane(lane,true)};
+ openTimer=setTimeout(()=>finishSocket('timeout'),websocketOpenMs);
+ lane.socket.onopen=()=>{if(closed||lanes.get(lane.id)!==lane||lane.socket!==opened){opened.close();return}upgraded=true;lane.ready=true;status('connected');runLaneSocketUp(lane)};
  lane.socket.onmessage=event=>{
-  clearTimeout(openTimer);
-  if(closed||lanes.get(lane.id)!==lane||!(event.data instanceof ArrayBuffer)){finishLane(lane,true);return}
+  if(openTimer)clearTimeout(openTimer);openTimer=null;
+  if(closed||lanes.get(lane.id)!==lane||lane.socket!==opened||!(event.data instanceof ArrayBuffer)){finishLane(lane,true);return}
   let values;try{values=splitFrames(event.data);for(const value of values)if(value.id!==lane.id)throw new Error('cross-lane frame')}catch(error){finishLane(lane,true);return}
   if(values.some(value=>value.type===3))lane.remoteClosed=true;
   observeServerFrames(event.data);port.postMessage({t:'traffic',up:0,down:event.data.byteLength});port.postMessage(event.data,[event.data]);status('connected');
  };
- lane.socket.onerror=()=>{};lane.socket.onclose=()=>{clearTimeout(openTimer);lane.ready=false;lane.socket=null;if(!closed)finishLane(lane,true)};
+ lane.socket.onerror=()=>{};lane.socket.onclose=()=>finishSocket(upgraded?'network':'upgrade');
 }
 async function runLaneSocketUp(lane){
  if(lane.running||!lane.ready)return;lane.running=true;let lease=null;

@@ -218,6 +218,39 @@ fn rendered_page_preserves_exact_v1_status_control_envelope() {
 }
 
 #[test]
+fn committed_websocket_lane_escalates_only_pre_upgrade_failure() {
+    let page = render_page("LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL", 4);
+
+    assert!(page.body.contains("let upgraded=false,settled=false"));
+    assert!(page.body.contains(
+        "if(settled)return;settled=true;if(openTimer)clearTimeout(openTimer);openTimer=null"
+    ));
+    assert!(page
+        .body
+        .contains("if(closed||lanes.get(lane.id)!==lane||lane.socket!==opened)return"));
+    assert!(page.body.contains(
+        "if(!upgraded){lane.socket=null;opened.close();recoveryController.recover(reason,null);return}"
+    ));
+    assert!(page
+        .body
+        .contains("recoveryController.recover(reason,null);return}finishLane(lane,true)"));
+    assert!(page
+        .body
+        .contains("openTimer=setTimeout(()=>finishSocket('timeout'),websocketOpenMs)"));
+    assert!(page.body.contains(
+        "if(closed||lanes.get(lane.id)!==lane||lane.socket!==opened){opened.close();return}"
+    ));
+    assert!(page.body.contains("upgraded=true;lane.ready=true"));
+    assert!(page
+        .body
+        .contains("lane.socket.onclose=()=>finishSocket(upgraded?'network':'upgrade')"));
+    assert!(page
+        .body
+        .contains("port.postMessage({t:'status',state})"));
+    assert!(!page.body.contains("port.postMessage({t:'status',state,"));
+}
+
+#[test]
 fn bridge_diagnostic_sideband_is_absent_by_default() {
     let page = render_page("IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII", 4);
 
