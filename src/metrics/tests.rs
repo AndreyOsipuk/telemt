@@ -87,6 +87,7 @@ async fn test_render_metrics_format() {
         None,
         &TlsFullCertBudget::new(),
         &test_web_publication(),
+        None,
     )
     .await;
 
@@ -223,6 +224,7 @@ async fn test_render_tls_front_profile_health() {
         Some(&cache),
         &TlsFullCertBudget::new(),
         &test_web_publication(),
+        None,
     )
     .await;
 
@@ -293,6 +295,7 @@ async fn process_tls_budget_metrics_survive_a_generation_without_tls_cache() {
         None,
         budget.as_ref(),
         &test_web_publication(),
+        None,
     )
     .await;
 
@@ -313,6 +316,7 @@ async fn test_render_empty_stats() {
         None,
         &TlsFullCertBudget::new(),
         &test_web_publication(),
+        None,
     )
     .await;
     assert!(output.contains("telemt_connections_total 0"));
@@ -346,6 +350,7 @@ async fn test_render_uses_global_each_unique_ip_limit() {
         None,
         &TlsFullCertBudget::new(),
         &test_web_publication(),
+        None,
     )
     .await;
 
@@ -367,6 +372,7 @@ async fn test_render_has_type_annotations() {
         None,
         &TlsFullCertBudget::new(),
         &test_web_publication(),
+        None,
     )
     .await;
     assert!(output.contains("# TYPE telemt_uptime_seconds gauge"));

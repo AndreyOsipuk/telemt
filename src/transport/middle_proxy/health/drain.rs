@@ -31,7 +31,7 @@ pub(in crate::transport::middle_proxy) async fn reap_draining_writers(
     let mut force_close_writer_ids = Vec::<u64>::new();
     let writers = pool.writers.read().await;
     for writer in writers.iter() {
-        if !writer.draining.load(std::sync::atomic::Ordering::Relaxed) {
+        if !writer.draining.load(std::sync::atomic::Ordering::Acquire) {
             continue;
         }
         if activity

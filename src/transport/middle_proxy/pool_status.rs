@@ -12,6 +12,9 @@ use crate::transport::upstream::IpPreference;
 mod status_snapshot;
 // ME runtime policy and coherent snapshot assembly.
 mod runtime_snapshot;
+// Hardswap ownership, coverage, and writer-replacement lifecycle state.
+mod hardswap_snapshot;
+pub(crate) use hardswap_snapshot::MeApiHardswapSnapshot;
 #[derive(Clone, Debug)]
 pub(crate) struct MeApiWriterStatusSnapshot {
     pub writer_id: u64,
@@ -98,6 +101,20 @@ pub(crate) struct MeApiRuntimeSnapshot {
     pub reinit_inflight: usize,
     pub reinit_max_concurrency_effective: usize,
     pub hardswap_enabled: bool,
+    /// Number of authoritative warm writers in the pending generation.
+    pub pending_writers_current: usize,
+    /// Number of writers still required to reach the pending generation floor.
+    pub pending_writer_deficit: usize,
+    /// Number of desired DC groups without pending-generation coverage.
+    pub pending_missing_dc_groups: usize,
+    /// Whether the pending generation targets the current desired endpoint map.
+    pub pending_map_current: Option<bool>,
+    /// Number of warm writers not owned by the current pending generation.
+    pub orphan_warm_writers_current: usize,
+    /// Number of writer replacements in the preparatory phase.
+    pub replacement_preparing_current: usize,
+    /// Number of replacement victims closed to new client binds.
+    pub replacement_retiring_current: usize,
     pub floor_mode: &'static str,
     pub adaptive_floor_idle_secs: u64,
     pub adaptive_floor_min_writers_single_endpoint: u8,

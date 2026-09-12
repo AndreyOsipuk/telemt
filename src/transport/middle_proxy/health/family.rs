@@ -47,6 +47,7 @@ pub(super) async fn check_family(
 
     let mut live_addr_counts = HashMap::<(i32, SocketAddr), usize>::new();
     let mut live_writer_ids_by_addr = HashMap::<(i32, SocketAddr), Vec<u64>>::new();
+    let active_generation = pool.current_generation();
     for writer in pool
         .writers
         .read()
@@ -60,6 +61,15 @@ pub(super) async fn check_family(
             ),
             crate::transport::middle_proxy::pool::WriterContour::Active
         ) {
+            continue;
+        }
+        if writer.generation != active_generation {
+            continue;
+        }
+        if !dc_endpoints
+            .get(&writer.writer_dc)
+            .is_some_and(|endpoints| endpoints.contains(&writer.addr))
+        {
             continue;
         }
         let key = (writer.writer_dc, writer.addr);
@@ -92,6 +102,13 @@ pub(super) async fn check_family(
         floor_plan.target_writers_total,
         floor_plan.active_writers_current,
         floor_plan.warm_writers_current,
+    );
+    let floor_targets_by_dc = Arc::new(
+        floor_plan
+            .by_dc
+            .iter()
+            .map(|(dc, entry)| (*dc, entry.target_required))
+            .collect::<HashMap<_, _>>(),
     );
     let live_writer_ids_by_addr = Arc::new(live_writer_ids_by_addr);
     let writer_idle_since = Arc::new(writer_idle_since);
@@ -162,22 +179,23 @@ pub(super) async fn check_family(
             );
         }
 
+        maybe_refresh_idle_writer_for_dc(
+            pool,
+            rng,
+            key,
+            dc,
+            family,
+            &endpoints,
+            alive,
+            required,
+            live_writer_ids_by_addr.as_ref(),
+            writer_idle_since.as_ref(),
+            bound_clients_by_writer.as_ref(),
+            idle_refresh_next_attempt,
+        )
+        .await;
+
         if alive >= required {
-            maybe_refresh_idle_writer_for_dc(
-                pool,
-                rng,
-                key,
-                dc,
-                family,
-                &endpoints,
-                alive,
-                required,
-                live_writer_ids_by_addr.as_ref(),
-                writer_idle_since.as_ref(),
-                bound_clients_by_writer.as_ref(),
-                idle_refresh_next_attempt,
-            )
-            .await;
             maybe_rotate_single_endpoint_shadow(
                 pool,
                 rng,
@@ -230,9 +248,11 @@ pub(super) async fn check_family(
             continue;
         }
         if pool
-            .has_refill_inflight_for_dc_key(crate::transport::middle_proxy::pool::RefillDcKey {
+            .has_refill_inflight_for_target(RefillTargetKey {
                 dc,
                 family,
+                generation: pool.current_generation(),
+                contour: WriterContour::Active,
             })
             .await
         {
@@ -254,6 +274,7 @@ pub(super) async fn check_family(
         let live_writer_ids_by_addr_for_dc = live_writer_ids_by_addr.clone();
         let writer_idle_since_for_dc = writer_idle_since.clone();
         let bound_clients_by_writer_for_dc = bound_clients_by_writer.clone();
+        let floor_targets_by_dc_for_reconnect = floor_targets_by_dc.clone();
         let active_cap_effective_total = floor_plan.active_cap_effective_total;
         reconnect_set.spawn(async move {
             let mut restored = 0usize;
@@ -261,6 +282,8 @@ pub(super) async fn check_family(
                 let Ok(reconnect_permit) = reconnect_sem_for_dc.clone().try_acquire_owned() else {
                     break;
                 };
+                let base_req = pool_for_reconnect
+                    .required_writers_for_dc_with_floor_mode(endpoints_for_dc.len(), false);
                 if pool_for_reconnect.active_contour_writer_count_total().await
                     >= active_cap_effective_total
                 {
@@ -270,6 +293,8 @@ pub(super) async fn check_family(
                         dc,
                         family,
                         &endpoints_for_dc,
+                        required,
+                        floor_targets_by_dc_for_reconnect.as_ref(),
                         live_writer_ids_by_addr_for_dc.as_ref(),
                         writer_idle_since_for_dc.as_ref(),
                         bound_clients_by_writer_for_dc.as_ref(),
@@ -283,8 +308,6 @@ pub(super) async fn check_family(
                         continue;
                     }
 
-                    let base_req = pool_for_reconnect
-                        .required_writers_for_dc_with_floor_mode(endpoints_for_dc.len(), false);
                     if alive + restored >= base_req {
                         pool_for_reconnect
                             .stats
@@ -304,12 +327,20 @@ pub(super) async fn check_family(
                     }
                 }
                 pool_for_reconnect.stats.increment_me_reconnect_attempt();
+                let intent = if alive + restored < base_req {
+                    WriterOpenIntent::Coverage
+                } else {
+                    WriterOpenIntent::Normal
+                };
                 let res = tokio::time::timeout(
                     pool_for_reconnect.reconnect_runtime.me_one_timeout,
-                    pool_for_reconnect.connect_endpoints_round_robin(
+                    pool_for_reconnect.connect_endpoints_round_robin_with_generation_contour(
                         dc,
                         &endpoints_for_dc,
                         rng_for_reconnect.as_ref(),
+                        pool_for_reconnect.current_generation(),
+                        WriterContour::Active,
+                        intent,
                     ),
                 )
                 .await;

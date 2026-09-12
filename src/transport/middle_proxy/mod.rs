@@ -64,6 +64,7 @@ pub use ping::{
     MePingFamily, MePingReport, MePingSample, format_me_route, format_sample_line, run_me_ping,
 };
 pub use pool::MePool;
+pub(crate) use pool_status::MeApiHardswapSnapshot;
 #[allow(unused_imports)]
 pub use pool_nat::{detect_public_ip, stun_probe};
 pub(crate) use registry::ConnLease;

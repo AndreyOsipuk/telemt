@@ -398,6 +398,7 @@ impl MePool {
             next_writer_id: AtomicU64::new(1),
             writer_connect_active_reserved: AtomicUsize::new(0),
             writer_connect_warm_reserved: AtomicUsize::new(0),
+            writer_replacement_open_reserved: AtomicUsize::new(0),
             rtt_stats: Arc::new(Mutex::new(HashMap::new())),
             refill_states: Arc::new(ParkingMutex::new(HashMap::new())),
             refill_running: AtomicUsize::new(0),

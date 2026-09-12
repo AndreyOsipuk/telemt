@@ -12,7 +12,7 @@ use tracing::{debug, warn};
 
 use super::MePool;
 use super::codec::{ProxyReqCommand, WriterBytePermit, WriterCommand};
-use super::registry::ConnMeta;
+use super::registry::{ConnMeta, WriterBindOutcome};
 use super::wire::{build_proxy_req_payload, proxy_req_payload_len};
 use crate::config::defaults::ME_WRITER_BYTE_PERMIT_UNIT_BYTES;
 use crate::config::{MeRouteNoWriterMode, MeWriterPickMode};
@@ -648,13 +648,30 @@ impl MePool {
                         // Keep the advertised proxy IP aligned with the selected ME writer source.
                         let effective_our_addr = SocketAddr::new(w.source_ip, our_addr.port());
                         let (payload, meta) = build_routed_payload(effective_our_addr);
-                        if !self.registry.bind_writer(conn_id, w.id, meta).await {
+                        let bind_outcome = self
+                            .registry
+                            .bind_writer_with_outcome(conn_id, w.id, meta)
+                            .await;
+                        if bind_outcome != WriterBindOutcome::Bound {
+                            drop(permit);
+                            if bind_outcome == WriterBindOutcome::WriterRetiring {
+                                debug!(
+                                    conn_id,
+                                    writer_id = w.id,
+                                    "ME writer entered replacement retirement before bind commit"
+                                );
+                                continue;
+                            }
+                            if bind_outcome == WriterBindOutcome::RouteMissing {
+                                return Err(ProxyError::Proxy(
+                                    "ME client route disappeared before writer bind".into(),
+                                ));
+                            }
                             debug!(
                                 conn_id,
                                 writer_id = w.id,
                                 "ME writer disappeared before bind commit, pruning stale writer"
                             );
-                            drop(permit);
                             self.remove_writer_and_close_clients(w.id).await;
                             continue;
                         }
@@ -742,13 +759,30 @@ impl MePool {
             // Keep the advertised proxy IP aligned with the selected ME writer source.
             let effective_our_addr = SocketAddr::new(w.source_ip, our_addr.port());
             let (payload, meta) = build_routed_payload(effective_our_addr);
-            if !self.registry.bind_writer(conn_id, w.id, meta).await {
+            let bind_outcome = self
+                .registry
+                .bind_writer_with_outcome(conn_id, w.id, meta)
+                .await;
+            if bind_outcome != WriterBindOutcome::Bound {
+                drop(permit);
+                if bind_outcome == WriterBindOutcome::WriterRetiring {
+                    debug!(
+                        conn_id,
+                        writer_id = w.id,
+                        "ME writer entered replacement retirement before fallback bind commit"
+                    );
+                    continue;
+                }
+                if bind_outcome == WriterBindOutcome::RouteMissing {
+                    return Err(ProxyError::Proxy(
+                        "ME client route disappeared before writer bind".into(),
+                    ));
+                }
                 debug!(
                     conn_id,
                     writer_id = w.id,
                     "ME writer disappeared before fallback bind commit, pruning stale writer"
                 );
-                drop(permit);
                 self.remove_writer_and_close_clients(w.id).await;
                 continue;
             }

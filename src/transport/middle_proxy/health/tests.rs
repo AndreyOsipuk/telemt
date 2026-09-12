@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::{ScheduledReconnects, reap_draining_writers};
+use super::{ScheduledReconnects, maybe_refresh_idle_writer_for_dc, reap_draining_writers};
 use crate::config::{GeneralConfig, MeRouteNoWriterMode, MeSocksKdfPolicy, MeWriterPickMode};
 use crate::crypto::SecureRandom;
 use crate::network::IpFamily;
@@ -224,6 +224,79 @@ async fn insert_live_writer(pool: &Arc<MePool>, writer_id: u64, writer_dc: i32) 
         .register_writer(writer_id, tx, byte_budget)
         .await;
     pool.conn_count.fetch_add(1, Ordering::Relaxed);
+}
+
+async fn insert_active_writer_at(
+    pool: &Arc<MePool>,
+    writer_id: u64,
+    writer_dc: i32,
+    addr: SocketAddr,
+) -> MeWriter {
+    let (tx, _writer_rx) = mpsc::channel::<WriterCommand>(8);
+    let byte_budget = pool.new_writer_byte_budget();
+    let writer = MeWriter {
+        id: writer_id,
+        addr,
+        source_ip: addr.ip(),
+        writer_dc,
+        generation: pool.current_generation(),
+        contour: Arc::new(AtomicU8::new(WriterContour::Active.as_u8())),
+        created_at: Instant::now(),
+        tx: tx.clone(),
+        byte_budget: byte_budget.clone(),
+        cancel: CancellationToken::new(),
+        degraded: Arc::new(AtomicBool::new(false)),
+        rtt_ema_ms_x10: Arc::new(AtomicU32::new(0)),
+        draining: Arc::new(AtomicBool::new(false)),
+        draining_started_at_epoch_secs: Arc::new(AtomicU64::new(0)),
+        drain_deadline_epoch_secs: Arc::new(AtomicU64::new(0)),
+        allow_drain_fallback: Arc::new(AtomicBool::new(false)),
+    };
+    pool.writers.write().await.push(writer.clone());
+    pool.registry
+        .register_writer(writer_id, tx, byte_budget)
+        .await;
+    pool.conn_count.fetch_add(1, Ordering::Relaxed);
+    writer
+}
+
+#[tokio::test]
+async fn under_floor_idle_writer_still_enters_transactional_refresh() {
+    let pool = make_pool(128).await;
+    let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    drop(listener);
+    let writer_id = 7001;
+    let writer = insert_active_writer_at(&pool, writer_id, 2, endpoint).await;
+    let key = (2, IpFamily::V4);
+    let live_writer_ids_by_addr = HashMap::from([((2, endpoint), vec![writer_id])]);
+    let writer_idle_since = HashMap::from([(
+        writer_id,
+        MePool::now_epoch_secs().saturating_sub(60),
+    )]);
+    let bound_clients_by_writer = HashMap::from([(writer_id, 0)]);
+    let mut next_attempt = HashMap::new();
+    let rng = Arc::new(SecureRandom::new());
+
+    maybe_refresh_idle_writer_for_dc(
+        &pool,
+        &rng,
+        key,
+        2,
+        IpFamily::V4,
+        &[endpoint],
+        1,
+        10,
+        &live_writer_ids_by_addr,
+        &writer_idle_since,
+        &bound_clients_by_writer,
+        &mut next_attempt,
+    )
+    .await;
+
+    assert!(next_attempt.contains_key(&key));
+    assert!(!writer.draining.load(Ordering::Acquire));
+    assert_eq!(pool.registry.writer_replacement_counts(), (0, 0));
 }
 
 #[tokio::test]

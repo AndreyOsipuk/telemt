@@ -1,7 +1,10 @@
 use super::*;
 
 impl MePool {
-    pub(super) fn desired_map_hash(desired_by_dc: &HashMap<i32, HashSet<SocketAddr>>) -> u64 {
+    /// Hashes the sorted desired endpoint map for generation authority checks.
+    pub(in crate::transport::middle_proxy) fn desired_map_hash(
+        desired_by_dc: &HashMap<i32, HashSet<SocketAddr>>,
+    ) -> u64 {
         let mut hasher = DefaultHasher::new();
         let mut dcs: Vec<i32> = desired_by_dc.keys().copied().collect();
         dcs.sort_unstable();
@@ -19,6 +22,7 @@ impl MePool {
         hasher.finish()
     }
 
+    /// Reserves one generation attempt and publishes its pending ownership snapshot.
     pub(super) fn reserve_reinit_attempt(
         self: &Arc<Self>,
         hardswap: bool,
@@ -85,8 +89,62 @@ impl MePool {
         }
     }
 
-    pub(super) fn commit_reinit_attempt(&self, attempt: &ReinitAttemptGuard) -> bool {
+    /// Revalidates coverage and commits generation ownership under the publication barrier.
+    pub(super) async fn commit_reinit_attempt(
+        &self,
+        attempt: &ReinitAttemptGuard,
+        desired_by_dc: &HashMap<i32, HashSet<SocketAddr>>,
+        min_ratio: f32,
+    ) -> std::result::Result<ReinitCommitOutcome, ReinitCommitFailure> {
+        let writers = self.writers.write().await;
+        let mut registry_registration = self.registry.prepare_writer_registration().await;
         let mut state = self.reinit.coordinator.lock();
+        let Some(record) = state.attempts.get(&attempt.attempt_id).copied() else {
+            return Err(ReinitCommitFailure::Superseded);
+        };
+        if record.generation != attempt.generation
+            || record.map_hash != state.desired_map_hash
+            || record.map_hash != attempt.map_hash
+            || (attempt.hardswap
+                && !state.pending.is_some_and(|pending| {
+                    pending.generation == attempt.generation
+                        && pending.map_hash == attempt.map_hash
+                }))
+        {
+            return Err(ReinitCommitFailure::Superseded);
+        }
+
+        let authoritative_writer_addrs = writers
+            .iter()
+            .filter(|writer| !writer.draining.load(Ordering::Acquire))
+            .filter(|writer| {
+                if attempt.hardswap {
+                    writer.generation == attempt.generation
+                } else {
+                    writer.generation == state.active_generation
+                        && WriterContour::from_u8(writer.contour.load(Ordering::Acquire))
+                            == WriterContour::Active
+                }
+            })
+            .map(|writer| (writer.writer_dc, writer.addr))
+            .collect::<HashSet<_>>();
+        let (coverage_ratio, missing_dc) =
+            Self::coverage_ratio(desired_by_dc, &authoritative_writer_addrs);
+        if coverage_ratio < min_ratio {
+            return Err(ReinitCommitFailure::Coverage {
+                coverage_ratio,
+                missing_dc,
+            });
+        }
+        if attempt.hardswap
+            && !missing_dc.is_empty()
+            && self.bind_stale_mode() == MeBindStaleMode::Never
+        {
+            return Err(ReinitCommitFailure::Redundancy {
+                coverage_ratio,
+                missing_dc,
+            });
+        }
         if !commit_reinit_state(
             &mut state,
             attempt.attempt_id,
@@ -94,12 +152,12 @@ impl MePool {
             attempt.map_hash,
             attempt.hardswap,
         ) {
-            return false;
+            return Err(ReinitCommitFailure::Superseded);
         }
+
         if attempt.hardswap {
-            let writers = self.writers.snapshot();
             for writer in writers.iter() {
-                if !writer.draining.load(Ordering::Relaxed)
+                if !writer.draining.load(Ordering::Acquire)
                     && writer.generation == attempt.generation
                 {
                     writer
@@ -108,10 +166,59 @@ impl MePool {
                 }
             }
         }
+
+        let desired_addrs = desired_by_dc
+            .iter()
+            .flat_map(|(dc, endpoints)| endpoints.iter().copied().map(|addr| (*dc, addr)))
+            .collect::<HashSet<_>>();
+        let missing_dc_set = missing_dc.iter().copied().collect::<HashSet<_>>();
+        let mut stale_writer_ids = Vec::<u64>::new();
+        let mut force_close_writer_ids = Vec::<u64>::new();
+        for writer in writers.iter() {
+            if writer.draining.load(Ordering::Acquire) {
+                continue;
+            }
+            let stale = if attempt.hardswap {
+                writer.generation < attempt.generation
+            } else {
+                !desired_addrs.contains(&(writer.writer_dc, writer.addr))
+            };
+            if !stale {
+                continue;
+            }
+
+            let preserve_fallback = attempt.hardswap
+                && missing_dc_set.contains(&writer.writer_dc);
+            if !preserve_fallback && attempt.hardswap {
+                registry_registration.retire(writer.id);
+            }
+            self.apply_writer_draining_state(
+                writer,
+                self.force_close_timeout(),
+                preserve_fallback || !attempt.hardswap,
+            );
+            stale_writer_ids.push(writer.id);
+            if (attempt.hardswap && !preserve_fallback)
+                || (!attempt.hardswap && missing_dc.is_empty())
+            {
+                force_close_writer_ids.push(writer.id);
+            }
+        }
         publish_reinit_state(self.reinit.as_ref(), &state);
-        true
+        drop(state);
+        drop(registry_registration);
+        drop(writers);
+        self.notify_writer_epoch();
+
+        Ok(ReinitCommitOutcome {
+            coverage_ratio,
+            missing_dc,
+            stale_writer_ids,
+            force_close_writer_ids,
+        })
     }
 
+    /// Computes desired DC-group coverage and returns missing groups in stable order.
     pub(super) fn coverage_ratio(
         desired_by_dc: &HashMap<i32, HashSet<SocketAddr>>,
         active_writer_addrs: &HashSet<(i32, SocketAddr)>,
@@ -146,6 +253,7 @@ impl MePool {
         (ratio, missing_dc)
     }
 
+    /// Restores at least one active writer for every enabled desired DC group.
     pub async fn reconcile_connections(self: &Arc<Self>, rng: &SecureRandom) {
         for family in self.family_order() {
             let map = self.proxy_map_for_family(family).await;
@@ -175,7 +283,10 @@ impl MePool {
         }
     }
 
-    pub(super) async fn desired_dc_endpoints(&self) -> HashMap<i32, HashSet<SocketAddr>> {
+    /// Returns the currently authoritative endpoint set for drain and coverage decisions.
+    pub(in crate::transport::middle_proxy) async fn desired_dc_endpoints(
+        &self,
+    ) -> HashMap<i32, HashSet<SocketAddr>> {
         let now_epoch_secs = Self::now_epoch_secs();
         let mut out: HashMap<i32, HashSet<SocketAddr>> = HashMap::new();
 
@@ -202,38 +313,63 @@ impl MePool {
         out
     }
 
-    pub(in crate::transport::middle_proxy) async fn has_non_draining_writer_per_desired_dc_group(
-        &self,
-    ) -> bool {
-        let desired_by_dc = self.desired_dc_endpoints().await;
-        let required_dcs: HashSet<i32> = desired_by_dc
-            .iter()
-            .filter_map(|(dc, endpoints)| {
-                if endpoints.is_empty() {
-                    None
-                } else {
-                    Some(*dc)
-                }
-            })
-            .collect();
-        if required_dcs.is_empty() {
-            return true;
-        }
+    /// Promotes authoritative warm writers and drains warm or active generation orphans.
+    pub(super) async fn reconcile_writer_generation_roles(&self) -> usize {
+        let writers = self.writers.write().await;
+        let mut registry_registration = self.registry.prepare_writer_registration().await;
+        let state = self.reinit.coordinator.lock();
+        let active_generation = state.active_generation;
+        let pending_generation = state.pending.map(|pending| pending.generation);
+        let preferred = self.preferred_endpoints_by_dc.load();
+        let now_epoch_secs = Self::now_epoch_secs();
+        let mut changed = 0usize;
 
-        let ws = self.writers.read().await;
-        let mut covered_dcs = HashSet::<i32>::with_capacity(required_dcs.len());
-        for writer in ws.iter() {
-            if writer.draining.load(Ordering::Relaxed) {
+        for writer in writers.iter() {
+            if writer.draining.load(Ordering::Acquire) {
                 continue;
             }
-            if required_dcs.contains(&writer.writer_dc) {
-                covered_dcs.insert(writer.writer_dc);
-                if covered_dcs.len() == required_dcs.len() {
-                    return true;
-                }
+            let contour = WriterContour::from_u8(writer.contour.load(Ordering::Acquire));
+            let family = if writer.addr.is_ipv4() {
+                IpFamily::V4
+            } else {
+                IpFamily::V6
+            };
+            let endpoint_is_current = self
+                .family_enabled_for_drain_coverage(family, now_epoch_secs)
+                && preferred
+                    .get(&writer.writer_dc)
+                    .is_some_and(|endpoints| endpoints.contains(&writer.addr));
+            if contour == WriterContour::Warm
+                && writer.generation == active_generation
+                && endpoint_is_current
+            {
+                writer
+                    .contour
+                    .store(WriterContour::Active.as_u8(), Ordering::Release);
+                changed = changed.saturating_add(1);
+                continue;
             }
+            let authoritative_warm = contour == WriterContour::Warm
+                && pending_generation == Some(writer.generation)
+                && endpoint_is_current;
+            let stale_active = contour == WriterContour::Active
+                && writer.generation != active_generation;
+            if authoritative_warm || (contour == WriterContour::Active && !stale_active) {
+                continue;
+            }
+
+            registry_registration.retire(writer.id);
+            self.apply_writer_draining_state(writer, self.force_close_timeout(), false);
+            changed = changed.saturating_add(1);
         }
-        false
+        drop(preferred);
+        drop(state);
+        drop(registry_registration);
+        drop(writers);
+        if changed > 0 {
+            self.notify_writer_epoch();
+        }
+        changed
     }
 
     pub(super) fn hardswap_warmup_connect_delay_ms(&self) -> u64 {
@@ -270,6 +406,7 @@ impl MePool {
         core.saturating_add(rand::rng().random_range(0..=jitter))
     }
 
+    /// Counts non-draining writers owned by one generation and desired DC endpoint set.
     pub(super) async fn fresh_writer_count_for_dc_endpoints(
         &self,
         generation: u64,
@@ -285,14 +422,21 @@ impl MePool {
             .count()
     }
 
+    /// Counts authoritative active writers for one desired DC endpoint set.
     pub(in crate::transport::middle_proxy) async fn active_writer_count_for_dc_endpoints(
         &self,
         dc: i32,
         endpoints: &HashSet<SocketAddr>,
     ) -> usize {
+        let generation = self.current_generation();
         let ws = self.writers.read().await;
         ws.iter()
             .filter(|w| !w.draining.load(Ordering::Relaxed))
+            .filter(|w| w.generation == generation)
+            .filter(|w| {
+                WriterContour::from_u8(w.contour.load(Ordering::Acquire))
+                    == WriterContour::Active
+            })
             .filter(|w| w.writer_dc == dc)
             .filter(|w| endpoints.contains(&w.addr))
             .count()

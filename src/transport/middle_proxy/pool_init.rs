@@ -9,7 +9,7 @@ use tracing::{debug, info, warn};
 use crate::crypto::SecureRandom;
 use crate::error::{ProxyError, Result};
 
-use super::pool::MePool;
+use super::pool::{MePool, WriterOpenIntent};
 
 impl MePool {
     pub async fn init(self: &Arc<Self>, pool_size: usize, rng: &Arc<SecureRandom>) -> Result<()> {
@@ -76,7 +76,7 @@ impl MePool {
                         target_writers,
                         rng_clone,
                         connect_concurrency,
-                        true,
+                        WriterOpenIntent::Coverage,
                     )
                     .await
                 });
@@ -125,7 +125,7 @@ impl MePool {
                                 target_writers,
                                 rng_clone_local,
                                 connect_concurrency,
-                                false,
+                                WriterOpenIntent::Normal,
                             )
                             .await
                     });
@@ -162,7 +162,7 @@ impl MePool {
         target_writers: usize,
         rng: Arc<SecureRandom>,
         connect_concurrency: usize,
-        allow_coverage_override: bool,
+        intent: WriterOpenIntent,
     ) -> bool {
         if addrs.is_empty() {
             return false;
@@ -204,7 +204,7 @@ impl MePool {
                         rng_clone.as_ref(),
                         generation,
                         super::pool::WriterContour::Active,
-                        allow_coverage_override,
+                        intent,
                     )
                     .await
                 });
@@ -238,7 +238,9 @@ impl MePool {
             if !progress {
                 let active_writers_current = self.active_contour_writer_count_total().await;
                 let active_cap_configured = self.adaptive_floor_active_cap_configured_total();
-                if !allow_coverage_override && active_writers_current >= active_cap_configured {
+                if intent != WriterOpenIntent::Coverage
+                    && active_writers_current >= active_cap_configured
+                {
                     info!(
                         dc = %dc,
                         alive = alive_after,

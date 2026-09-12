@@ -16,9 +16,13 @@ use crate::crypto::SecureRandom;
 use crate::network::IpFamily;
 
 use super::MePool;
-use super::pool::MeFamilyRuntimeState;
+use super::pool::{
+    MeFamilyRuntimeState, RefillTargetKey, WriterContour, WriterOpenIntent, WriterRole,
+};
+use super::pool_writer::WriterReplacementPurpose;
 
-const JITTER_FRAC_NUM: u64 = 2; // jitter up to 50% of backoff
+// Bounds reconnect jitter to at most half of the current backoff.
+const JITTER_FRAC_NUM: u64 = 2;
 #[allow(dead_code)]
 const MAX_CONCURRENT_PER_DC_DEFAULT: usize = 1;
 const SHADOW_ROTATE_RETRY_SECS: u64 = 30;

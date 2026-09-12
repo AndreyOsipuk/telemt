@@ -29,9 +29,25 @@ use super::pool_lifecycle::MePoolLifecycle;
 const ME_FORCE_CLOSE_SAFETY_FALLBACK_SECS: u64 = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct RefillDcKey {
+/// Exact lifecycle role used to coalesce refill work without cross-generation drift.
+pub(super) struct RefillTargetKey {
+    /// Telegram DC owning the writer.
     pub dc: i32,
+    /// Address family of the writer endpoint.
     pub family: IpFamily,
+    /// Generation that retains publication authority.
+    pub generation: u64,
+    /// Lifecycle contour that the replacement must preserve.
+    pub contour: WriterContour,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+/// Bounded queued-loss state for one exact refill target.
+pub(super) struct RefillTargetState {
+    /// Additional lost writers waiting behind the active refill producer.
+    pub(super) pending_count: usize,
+    /// Most recently lost endpoint, used as the next same-endpoint preference.
+    pub(super) next_addr: Option<SocketAddr>,
 }
 
 #[derive(Clone)]
@@ -121,6 +137,13 @@ impl DerefMut for WritersWriteGuard<'_> {
     }
 }
 
+impl WritersWriteGuard<'_> {
+    /// Publishes the current vector while retaining exclusive mutation ownership.
+    pub(super) fn publish_current(&self) {
+        self.state.store_guarded(self.writers.clone());
+    }
+}
+
 impl Drop for WritersWriteGuard<'_> {
     fn drop(&mut self) {
         let writers = std::mem::take(&mut self.writers);
@@ -128,24 +151,12 @@ impl Drop for WritersWriteGuard<'_> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub(super) enum WriterContour {
     Warm = 0,
     Active = 1,
     Draining = 2,
-}
-
-pub(super) struct WriterOpenReservation<'a> {
-    counter: Option<&'a AtomicUsize>,
-}
-
-impl Drop for WriterOpenReservation<'_> {
-    fn drop(&mut self) {
-        if let Some(counter) = self.counter {
-            counter.fetch_sub(1, Ordering::AcqRel);
-        }
-    }
 }
 
 impl WriterContour {
@@ -471,8 +482,9 @@ pub struct MePool {
     pub(super) next_writer_id: AtomicU64,
     pub(super) writer_connect_active_reserved: AtomicUsize,
     pub(super) writer_connect_warm_reserved: AtomicUsize,
+    pub(super) writer_replacement_open_reserved: AtomicUsize,
     pub(super) rtt_stats: Arc<Mutex<HashMap<u64, (f64, f64)>>>,
-    pub(super) refill_states: Arc<ParkingMutex<HashMap<RefillDcKey, Option<SocketAddr>>>>,
+    pub(super) refill_states: Arc<ParkingMutex<HashMap<RefillTargetKey, RefillTargetState>>>,
     pub(super) refill_running: AtomicUsize,
     pub(super) refill_pending: AtomicUsize,
     pub(super) conn_count: AtomicUsize,
@@ -508,5 +520,6 @@ mod transport_policy;
 mod selection_policy;
 // Bounded writer-open admission and coverage accounting.
 mod writer_admission;
+pub(super) use writer_admission::{WriterOpenIntent, WriterOpenReservation, WriterRole};
 // Endpoint-to-DC routing and health timing policy.
 mod routing;

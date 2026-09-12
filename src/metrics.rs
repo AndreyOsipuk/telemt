@@ -236,6 +236,10 @@ async fn handle<B>(
     let config = runtime.config();
 
     if req.uri().path() == "/metrics" {
+        let me_hardswap = match runtime.current_me_pool().await {
+            Some(pool) => Some(pool.api_hardswap_snapshot().await),
+            None => None,
+        };
         let body = render_metrics(
             stats,
             shared_state,
@@ -244,6 +248,7 @@ async fn handle<B>(
             tls_cache,
             tls_full_cert_budget,
             web_publication,
+            me_hardswap.as_ref(),
         )
         .await;
         let resp = Response::builder()

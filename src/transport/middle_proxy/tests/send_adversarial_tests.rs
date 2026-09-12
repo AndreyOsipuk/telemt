@@ -325,6 +325,36 @@ async fn send_proxy_req_does_not_replay_when_first_bind_commit_fails() {
 }
 
 #[tokio::test]
+async fn missing_client_route_does_not_prune_a_healthy_writer() {
+    let (pool, _rng) = make_pool().await;
+    let writer_id = 12;
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 12)), 443);
+    let _writer_rx = insert_writer(&pool, writer_id, 2, addr, true).await;
+
+    let result = pool
+        .send_proxy_req(
+            999_999,
+            2,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30005),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443),
+            b"cancelled-route",
+            0,
+            None,
+            None,
+        )
+        .await;
+
+    assert!(result.is_err());
+    assert!(
+        pool.writers
+            .read()
+            .await
+            .iter()
+            .any(|writer| writer.id == writer_id)
+    );
+}
+
+#[tokio::test]
 async fn send_proxy_req_prunes_iterative_stale_bind_failures_without_data_replay() {
     let (pool, _rng) = make_pool().await;
     pool.rr.store(0, Ordering::Relaxed);

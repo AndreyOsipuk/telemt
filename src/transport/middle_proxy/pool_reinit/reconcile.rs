@@ -56,7 +56,7 @@ impl MePool {
                             rng,
                             generation,
                             WriterContour::Warm,
-                            false,
+                            WriterOpenIntent::Normal,
                         )
                         .await;
                     debug!(
@@ -141,6 +141,15 @@ impl MePool {
         let attempt = reservation.attempt;
         let previous_generation = attempt.previous_generation;
         let generation = attempt.generation;
+        let reconciled_roles = self.reconcile_writer_generation_roles().await;
+        if reconciled_roles > 0 {
+            info!(
+                reconciled_roles,
+                active_generation = previous_generation,
+                pending_generation = generation,
+                "ME writer generation roles reconciled"
+            );
+        }
         if reservation.pending_reused {
             self.stats.increment_me_hardswap_pending_reuse_total();
             debug!(
@@ -180,14 +189,10 @@ impl MePool {
         );
         let (coverage_ratio, missing_dc) =
             Self::coverage_ratio(&desired_by_dc, &active_writer_addrs);
-        let mut route_quorum_ok = coverage_ratio >= min_ratio;
-        let mut redundancy_ok = missing_dc.is_empty();
-        let mut redundancy_missing_dc = missing_dc.clone();
-        let mut gate_coverage_ratio = coverage_ratio;
         if !hardswap && coverage_ratio < min_ratio {
             self.set_last_drain_gate(
                 false,
-                redundancy_ok,
+                missing_dc.is_empty(),
                 MeDrainGateReason::CoverageQuorum,
                 now_epoch_secs,
             );
@@ -211,14 +216,10 @@ impl MePool {
                 .collect();
             let (fresh_coverage_ratio, fresh_missing_dc) =
                 Self::coverage_ratio(&desired_by_dc, &fresh_writer_addrs);
-            route_quorum_ok = fresh_coverage_ratio >= min_ratio;
-            redundancy_ok = fresh_missing_dc.is_empty();
-            redundancy_missing_dc = fresh_missing_dc.clone();
-            gate_coverage_ratio = fresh_coverage_ratio;
             if fresh_coverage_ratio < min_ratio {
                 self.set_last_drain_gate(
                     false,
-                    redundancy_ok,
+                    fresh_missing_dc.is_empty(),
                     MeDrainGateReason::CoverageQuorum,
                     now_epoch_secs,
                 );
@@ -233,49 +234,77 @@ impl MePool {
             }
         }
 
+        drop(writers);
+        let commit = self
+            .commit_reinit_attempt(&attempt, &desired_by_dc, min_ratio)
+            .await;
+        let outcome = match commit {
+            Ok(outcome) => outcome,
+            Err(ReinitCommitFailure::Superseded) => {
+                debug!(
+                    previous_generation,
+                    generation,
+                    "ME reinit result discarded after a newer desired-map attempt"
+                );
+                return false;
+            }
+            Err(ReinitCommitFailure::Coverage {
+                coverage_ratio,
+                missing_dc,
+            }) => {
+                self.set_last_drain_gate(
+                    false,
+                    missing_dc.is_empty(),
+                    MeDrainGateReason::CoverageQuorum,
+                    now_epoch_secs,
+                );
+                warn!(
+                    previous_generation,
+                    generation,
+                    coverage_ratio = format_args!("{coverage_ratio:.3}"),
+                    min_ratio = format_args!("{min_ratio:.3}"),
+                    missing_dc = ?missing_dc,
+                    "ME reinit coverage changed before commit; keeping current generation"
+                );
+                return false;
+            }
+            Err(ReinitCommitFailure::Redundancy {
+                coverage_ratio,
+                missing_dc,
+            }) => {
+                self.set_last_drain_gate(
+                    true,
+                    false,
+                    MeDrainGateReason::Redundancy,
+                    now_epoch_secs,
+                );
+                warn!(
+                    previous_generation,
+                    generation,
+                    coverage_ratio = format_args!("{coverage_ratio:.3}"),
+                    min_ratio = format_args!("{min_ratio:.3}"),
+                    missing_dc = ?missing_dc,
+                    "ME hardswap weighted quorum requires stale-binding fallback"
+                );
+                return false;
+            }
+        };
         self.set_last_drain_gate(
-            route_quorum_ok,
-            redundancy_ok,
+            true,
+            outcome.missing_dc.is_empty(),
             MeDrainGateReason::Open,
             now_epoch_secs,
         );
-        if !redundancy_ok {
+        if !outcome.missing_dc.is_empty() {
             warn!(
-                missing_dc = ?redundancy_missing_dc,
-                coverage_ratio = format_args!("{gate_coverage_ratio:.3}"),
+                missing_dc = ?outcome.missing_dc,
+                coverage_ratio = format_args!("{:.3}", outcome.coverage_ratio),
                 min_ratio = format_args!("{min_ratio:.3}"),
-                "ME reinit proceeds with weighted quorum while some DC groups remain uncovered"
+                "ME reinit committed with bounded stale fallback for uncovered DC groups"
             );
         }
 
-        if !self.commit_reinit_attempt(&attempt) {
-            debug!(
-                previous_generation,
-                generation, "ME reinit result discarded after a newer desired-map attempt"
-            );
-            return false;
-        }
-
-        let desired_addrs: HashSet<(i32, SocketAddr)> = desired_by_dc
-            .iter()
-            .flat_map(|(dc, set)| set.iter().copied().map(|addr| (*dc, addr)))
-            .collect();
-
-        let stale_writer_ids: Vec<u64> = writers
-            .iter()
-            .filter(|w| !w.draining.load(Ordering::Relaxed))
-            .filter(|w| {
-                if hardswap {
-                    w.generation < generation
-                } else {
-                    !desired_addrs.contains(&(w.writer_dc, w.addr))
-                }
-            })
-            .map(|w| w.id)
-            .collect();
-        drop(writers);
-
-        if stale_writer_ids.is_empty() {
+        if outcome.stale_writer_ids.is_empty() {
             debug!("ME reinit cycle completed with no stale writers");
             return true;
         }
@@ -283,35 +312,20 @@ impl MePool {
         let drain_timeout = self.force_close_timeout();
         let drain_timeout_secs = drain_timeout.map(|d| d.as_secs()).unwrap_or(0);
         info!(
-            stale_writers = stale_writer_ids.len(),
+            stale_writers = outcome.stale_writer_ids.len(),
+            force_close_writers = outcome.force_close_writer_ids.len(),
             previous_generation,
             generation,
             hardswap,
-            coverage_ratio = format_args!("{coverage_ratio:.3}"),
+            coverage_ratio = format_args!("{:.3}", outcome.coverage_ratio),
             min_ratio = format_args!("{min_ratio:.3}"),
             drain_timeout_secs,
             "ME reinit cycle covered; processing stale writers"
         );
         self.stats.increment_pool_swap_total();
-        let can_drop_with_replacement = self.has_non_draining_writer_per_desired_dc_group().await;
-        if can_drop_with_replacement {
-            info!(
-                stale_writers = stale_writer_ids.len(),
-                "ME reinit stale writers: replacement coverage ready, force-closing clients for fast rebind"
-            );
-        } else {
-            warn!(
-                stale_writers = stale_writer_ids.len(),
-                "ME reinit stale writers: replacement coverage incomplete, keeping draining fallback"
-            );
-        }
-        for writer_id in stale_writer_ids {
-            self.mark_writer_draining_with_timeout(writer_id, drain_timeout, !hardswap)
-                .await;
-            if can_drop_with_replacement {
-                self.stats.increment_pool_force_close_total();
-                self.remove_writer_and_close_clients(writer_id).await;
-            }
+        for writer_id in outcome.force_close_writer_ids {
+            self.stats.increment_pool_force_close_total();
+            self.remove_writer_and_close_clients(writer_id).await;
         }
         true
     }

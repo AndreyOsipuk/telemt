@@ -7,9 +7,120 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::codec::WriterCommand;
-use super::pool::{MeWriter, WriterContour};
+use super::pool::{MeWriter, WriterContour, WriterOpenIntent};
 use super::pool_writer_security_tests::make_pool;
 use super::registry::ConnMeta;
+
+fn unregistered_writer(
+    pool: &Arc<super::pool::MePool>,
+    writer_id: u64,
+    addr: SocketAddr,
+    generation: u64,
+    contour: WriterContour,
+) -> MeWriter {
+    let (tx, _rx) = mpsc::channel::<WriterCommand>(8);
+    MeWriter {
+        id: writer_id,
+        addr,
+        source_ip: addr.ip(),
+        writer_dc: 2,
+        generation,
+        contour: Arc::new(AtomicU8::new(contour.as_u8())),
+        created_at: Instant::now(),
+        tx,
+        byte_budget: pool.new_writer_byte_budget(),
+        cancel: CancellationToken::new(),
+        degraded: Arc::new(AtomicBool::new(false)),
+        rtt_ema_ms_x10: Arc::new(AtomicU32::new(0)),
+        draining: Arc::new(AtomicBool::new(false)),
+        draining_started_at_epoch_secs: Arc::new(AtomicU64::new(0)),
+        drain_deadline_epoch_secs: Arc::new(AtomicU64::new(0)),
+        allow_drain_fallback: Arc::new(AtomicBool::new(false)),
+    }
+}
+
+#[tokio::test]
+async fn normal_warm_publication_cannot_race_past_the_dc_floor() {
+    let pool = make_pool().await;
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+    pool.preferred_endpoints_by_dc
+        .store(Arc::new(std::collections::HashMap::from([(2, vec![addr])])));
+    let generation = 2;
+    let writers = (1..=3)
+        .map(|writer_id| {
+            unregistered_writer(&pool, writer_id, addr, generation, WriterContour::Warm)
+        })
+        .collect::<Vec<_>>();
+    let candidate = unregistered_writer(&pool, 4, addr, generation, WriterContour::Warm);
+
+    assert!(
+        pool.authorize_writer_publication_capacity(
+            &candidate,
+            WriterContour::Warm,
+            WriterOpenIntent::Normal,
+            &writers[..2],
+        )
+        .is_ok()
+    );
+    assert!(
+        pool.authorize_writer_publication_capacity(
+            &candidate,
+            WriterContour::Warm,
+            WriterOpenIntent::Normal,
+            &writers,
+        )
+        .is_err()
+    );
+    assert!(
+        pool.authorize_writer_publication_capacity(
+            &candidate,
+            WriterContour::Warm,
+            WriterOpenIntent::Replacement,
+            &writers,
+        )
+        .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn normal_active_publication_cannot_race_past_the_family_floor() {
+    let pool = make_pool().await;
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+    pool.preferred_endpoints_by_dc
+        .store(Arc::new(std::collections::HashMap::from([(2, vec![addr])])));
+    let generation = pool.current_generation();
+    let writers = (1..=3)
+        .map(|writer_id| {
+            unregistered_writer(
+                &pool,
+                writer_id,
+                addr,
+                generation,
+                WriterContour::Active,
+            )
+        })
+        .collect::<Vec<_>>();
+    let candidate = unregistered_writer(&pool, 4, addr, generation, WriterContour::Active);
+
+    assert!(
+        pool.authorize_writer_publication_capacity(
+            &candidate,
+            WriterContour::Active,
+            WriterOpenIntent::Coverage,
+            &writers[..2],
+        )
+        .is_ok()
+    );
+    assert!(
+        pool.authorize_writer_publication_capacity(
+            &candidate,
+            WriterContour::Active,
+            WriterOpenIntent::Coverage,
+            &writers,
+        )
+        .is_err()
+    );
+}
 
 #[tokio::test]
 async fn successful_writer_publication_is_fully_visible_and_removable() {

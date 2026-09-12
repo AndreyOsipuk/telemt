@@ -35,7 +35,10 @@ pub(super) async fn make_pool() -> Arc<MePool> {
         HashMap::new(),
         HashMap::new(),
         None,
-        NetworkDecision::default(),
+        NetworkDecision {
+            ipv4_me: true,
+            ..NetworkDecision::default()
+        },
         None,
         Arc::new(SecureRandom::new()),
         Arc::new(Stats::new()),

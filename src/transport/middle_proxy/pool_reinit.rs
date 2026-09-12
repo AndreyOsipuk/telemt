@@ -11,11 +11,12 @@ use std::collections::hash_map::DefaultHasher;
 use tracing::{debug, info, warn};
 
 use crate::crypto::SecureRandom;
+use crate::config::MeBindStaleMode;
 use crate::network::IpFamily;
 
 use super::pool::{
     MeDrainGateReason, MePool, ReinitAttemptState, ReinitCoordinatorState, ReinitCore,
-    ReinitPendingState, ReinitStatusSnapshot, WriterContour,
+    ReinitPendingState, ReinitStatusSnapshot, WriterContour, WriterOpenIntent,
 };
 
 // Reinitialization admission, generation state, and coverage checks.
@@ -51,6 +52,26 @@ struct ReinitReservation {
     pending_age_secs: u64,
 }
 
+struct ReinitCommitOutcome {
+    coverage_ratio: f32,
+    missing_dc: Vec<i32>,
+    stale_writer_ids: Vec<u64>,
+    force_close_writer_ids: Vec<u64>,
+}
+
+#[derive(Debug)]
+enum ReinitCommitFailure {
+    Superseded,
+    Coverage {
+        coverage_ratio: f32,
+        missing_dc: Vec<i32>,
+    },
+    Redundancy {
+        coverage_ratio: f32,
+        missing_dc: Vec<i32>,
+    },
+}
+
 fn publish_reinit_state(reinit: &ReinitCore, state: &ReinitCoordinatorState) {
     let mut warm_generations = state
         .attempts
@@ -58,6 +79,9 @@ fn publish_reinit_state(reinit: &ReinitCore, state: &ReinitCoordinatorState) {
         .filter(|attempt| attempt.hardswap && !attempt.committed)
         .map(|attempt| attempt.generation)
         .collect::<Vec<_>>();
+    if let Some(pending) = state.pending {
+        warm_generations.push(pending.generation);
+    }
     warm_generations.sort_unstable();
     warm_generations.dedup();
     let pending = state.pending;

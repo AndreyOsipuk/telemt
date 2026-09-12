@@ -1,9 +1,11 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use tokio::sync::{MutexGuard, Semaphore, mpsc};
 
 use super::super::codec::WriterCommand;
-use super::{BindingInner, ConnRegistry, WriterRoute};
+use super::replacement::WriterReplacementReservation;
+use super::{BindingInner, ConnRegistry, WriterReplacementState, WriterRoute};
 
 /// Holds registry binding ownership until pool writer visibility is published.
 pub(in crate::transport::middle_proxy) struct WriterRegistrationGuard<'a> {
@@ -24,6 +26,73 @@ impl ConnRegistry {
 }
 
 impl WriterRegistrationGuard<'_> {
+    /// Prevents new bindings while preserving all existing writer associations.
+    pub(in crate::transport::middle_proxy) fn retire(&mut self, writer_id: u64) -> bool {
+        let Some(state) = self
+            .registry
+            .writers
+            .map
+            .get(&writer_id)
+            .map(|route| Arc::clone(&route.replacement_state))
+        else {
+            return false;
+        };
+        loop {
+            let current = state.load(Ordering::Acquire);
+            if current == WriterReplacementState::Retiring as u8
+                || current == WriterReplacementState::Draining as u8
+            {
+                return true;
+            }
+            if state
+                .compare_exchange_weak(
+                    current,
+                    WriterReplacementState::Draining as u8,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+
+    /// Revalidates an idle replacement victim and prevents subsequent client bindings.
+    pub(in crate::transport::middle_proxy) fn prepare_replacement_commit(
+        &mut self,
+        reservation: &WriterReplacementReservation<'_>,
+    ) -> bool {
+        let Some(route_state) = self
+            .registry
+            .writers
+            .map
+            .get(&reservation.writer_id())
+            .map(|route| Arc::clone(&route.replacement_state))
+        else {
+            return false;
+        };
+        if !std::ptr::eq(self.registry, reservation.registry())
+            || !Arc::ptr_eq(&route_state, reservation.state())
+            || reservation.requires_idle()
+                && self
+                .binding
+                .conns_for_writer
+                .get(&reservation.writer_id())
+                .is_none_or(|conn_ids| !conn_ids.is_empty())
+        {
+            return false;
+        }
+        route_state
+            .compare_exchange(
+                WriterReplacementState::Preparing as u8,
+                WriterReplacementState::Retiring as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
     /// Installs registry state while retaining binding ownership for pool publication.
     pub(in crate::transport::middle_proxy) fn install(
         &mut self,
@@ -42,9 +111,13 @@ impl WriterRegistrationGuard<'_> {
             .writer_idle_since_epoch_secs
             .entry(writer_id)
             .or_insert_with(ConnRegistry::now_epoch_secs);
-        self.registry
-            .writers
-            .map
-            .insert(writer_id, WriterRoute { tx, byte_budget });
+        self.registry.writers.map.insert(
+            writer_id,
+            WriterRoute {
+                tx,
+                byte_budget,
+                replacement_state: Arc::new(AtomicU8::new(WriterReplacementState::Open as u8)),
+            },
+        );
     }
 }

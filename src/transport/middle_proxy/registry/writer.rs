@@ -12,6 +12,7 @@ use super::{
     BoundConn, ConnMeta, ConnRegistry, ConnWriter, HotConnBinding, RouteResult,
     WriterActivitySnapshot,
 };
+use super::replacement::WriterBindOutcome;
 
 impl ConnRegistry {
     fn set_writer_bound_count(&self, writer_id: u64, count: usize) {
@@ -286,17 +287,30 @@ impl ConnRegistry {
         }
     }
 
-    pub async fn bind_writer(&self, conn_id: u64, writer_id: u64, meta: ConnMeta) -> bool {
+    /// Atomically binds one client route while rejecting retiring writer generations.
+    pub(in crate::transport::middle_proxy) async fn bind_writer_with_outcome(
+        &self,
+        conn_id: u64,
+        writer_id: u64,
+        meta: ConnMeta,
+    ) -> WriterBindOutcome {
         let mut binding = self.binding.inner.lock().await;
         // ROUTING IS THE SOURCE OF TRUTH:
         // never keep/attach writer binding for a connection that is already
         // absent from the routing table.
         if !self.routing.map.contains_key(&conn_id) {
-            return false;
+            return WriterBindOutcome::RouteMissing;
         }
-        if !self.writers.map.contains_key(&writer_id) {
-            return false;
+        let Some(writer_route) = self.writers.map.get(&writer_id) else {
+            return WriterBindOutcome::WriterMissing;
+        };
+        let writer_state = writer_route.replacement_state.load(Ordering::Acquire);
+        if writer_state == super::WriterReplacementState::Retiring as u8
+            || writer_state == super::WriterReplacementState::Draining as u8
+        {
+            return WriterBindOutcome::WriterRetiring;
         }
+        drop(writer_route);
 
         let previous_writer_id = binding.writer_for_conn.insert(conn_id, writer_id);
         if let Some(previous_writer_id) = previous_writer_id
@@ -331,7 +345,15 @@ impl ConnRegistry {
         self.hot_binding
             .map
             .insert(conn_id, HotConnBinding { writer_id, meta });
-        true
+        WriterBindOutcome::Bound
+    }
+
+    pub async fn bind_writer(&self, conn_id: u64, writer_id: u64, meta: ConnMeta) -> bool {
+        matches!(
+            self.bind_writer_with_outcome(conn_id, writer_id, meta)
+                .await,
+            WriterBindOutcome::Bound
+        )
     }
 
     pub async fn get_last_writer_meta(&self, writer_id: u64) -> Option<ConnMeta> {

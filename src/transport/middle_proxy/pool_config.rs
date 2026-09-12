@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use tracing::warn;
 
-use super::pool::MePool;
+use super::pool::{MePool, WriterContour, WriterRole};
+use super::pool_writer::WriterReplacementPurpose;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotApplyOutcome {
@@ -113,11 +114,33 @@ impl MePool {
     pub async fn reconnect_all(self: &Arc<Self>) {
         let ws = self.writers.read().await.clone();
         for w in ws.iter() {
-            if let Ok(()) = self
-                .connect_one_for_dc(w.addr, w.writer_dc, self.rng.as_ref())
-                .await
+            let role = WriterRole::from_writer(w);
+            if w.draining.load(std::sync::atomic::Ordering::Acquire)
+                || role.contour == WriterContour::Draining
             {
-                self.mark_writer_draining(w.id).await;
+                continue;
+            }
+            let Some(mut reservation) = self
+                .registry
+                .try_reserve_writer_replacement_preserving_clients(w.id)
+                .await
+            else {
+                continue;
+            };
+            if self
+                .replace_writer_with_generation_contour_for_dc(
+                    w.addr,
+                    self.rng.as_ref(),
+                    role.generation,
+                    role.contour,
+                    role.dc,
+                    role,
+                    WriterReplacementPurpose::SecretRotation,
+                    &mut reservation,
+                )
+                .await
+                .is_ok()
+            {
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         }

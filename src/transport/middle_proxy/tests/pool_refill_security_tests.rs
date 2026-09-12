@@ -30,7 +30,10 @@ async fn make_pool() -> Arc<MePool> {
         HashMap::new(),
         HashMap::new(),
         None,
-        NetworkDecision::default(),
+        NetworkDecision {
+            ipv4_me: true,
+            ..NetworkDecision::default()
+        },
         None,
         Arc::new(SecureRandom::new()),
         Arc::new(Stats::default()),
@@ -162,12 +165,26 @@ async fn connectable_endpoints_releases_quarantine_lock_before_sleep() {
     assert_eq!(endpoints, vec![addr]);
 }
 
+#[tokio::test]
+async fn refill_does_not_queue_a_removed_dc_target() {
+    let pool = make_pool().await;
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 31, 0, 20)), 443);
+
+    pool.trigger_immediate_refill_for_dc(addr, 2);
+
+    assert!(pool.refill_states.lock().is_empty());
+    assert_eq!(pool.refill_running.load(Ordering::Acquire), 0);
+    assert_eq!(pool.refill_pending.load(Ordering::Acquire), 0);
+}
+
 #[tokio::test(flavor = "current_thread")]
-async fn refill_coalesces_one_pending_endpoint_and_cleans_up_before_first_poll() {
+async fn refill_preserves_bounded_pending_cardinality_and_cleans_up_before_first_poll() {
     let pool = make_pool().await;
     let first = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 31, 0, 21)), 443);
     let second = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 31, 0, 22)), 443);
     let latest = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 31, 0, 23)), 443);
+    pool.preferred_endpoints_by_dc
+        .store(Arc::new(HashMap::from([(2, vec![first, second, latest])])));
 
     pool.trigger_immediate_refill_for_dc(first, 2);
     pool.trigger_immediate_refill_for_dc(second, 2);
@@ -175,7 +192,16 @@ async fn refill_coalesces_one_pending_endpoint_and_cleans_up_before_first_poll()
 
     assert_eq!(pool.refill_states.lock().len(), 1);
     assert_eq!(pool.refill_running.load(Ordering::Acquire), 1);
-    assert_eq!(pool.refill_pending.load(Ordering::Acquire), 1);
+    assert_eq!(pool.refill_pending.load(Ordering::Acquire), 2);
+    let state = pool
+        .refill_states
+        .lock()
+        .values()
+        .copied()
+        .next()
+        .expect("refill state");
+    assert_eq!(state.pending_count, 2);
+    assert_eq!(state.next_addr, Some(latest));
 
     pool.begin_shutdown();
     tokio::time::timeout(Duration::from_secs(1), async {

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use super::pool::{MeDrainGateReason, MePool, RefillDcKey};
+use super::pool::{MeDrainGateReason, MePool, RefillTargetKey};
 use crate::network::IpFamily;
 
 #[derive(Clone, Debug)]
@@ -61,14 +61,17 @@ impl MePool {
         let refill_states = self.refill_states.lock();
         let inflight_endpoints_total = refill_states
             .values()
-            .map(|pending| 1usize + usize::from(pending.is_some()))
+            .map(|state| 1usize.saturating_add(state.pending_count))
             .sum();
         let running_dc_total = refill_states.len();
         let pending_dc_total = refill_states
             .values()
-            .filter(|pending| pending.is_some())
+            .filter(|state| state.pending_count > 0)
             .count();
-        let inflight_dc_keys = refill_states.keys().copied().collect::<Vec<RefillDcKey>>();
+        let inflight_dc_keys = refill_states
+            .keys()
+            .copied()
+            .collect::<Vec<RefillTargetKey>>();
         drop(refill_states);
 
         let mut by_dc_map = HashMap::<(i16, &'static str), usize>::new();

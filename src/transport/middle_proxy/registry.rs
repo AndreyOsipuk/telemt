@@ -20,7 +20,13 @@ const ROUTE_QUEUED_MAX_FRAME_PERMITS: usize = 1024;
 
 // Transactional writer registry publication.
 mod publication;
+// Cancellation-safe idle-writer replacement reservations.
+mod replacement;
 mod writer;
+
+pub(in crate::transport::middle_proxy) use replacement::{
+    WriterBindOutcome, WriterReplacementReservation,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteResult {
@@ -74,6 +80,7 @@ struct WriterTable {
 struct WriterRoute {
     tx: mpsc::Sender<WriterCommand>,
     byte_budget: Arc<Semaphore>,
+    replacement_state: Arc<AtomicU8>,
 }
 
 #[derive(Clone)]
@@ -92,6 +99,15 @@ struct BindingState {
     bound_clients_by_writer: DashMap<u64, usize>,
     active_sessions_by_target_dc: DashMap<i16, usize>,
     last_meta_for_writer: DashMap<u64, ConnMeta>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum WriterReplacementState {
+    Open = 0,
+    Preparing,
+    Retiring,
+    Draining,
 }
 
 struct BindingInner {

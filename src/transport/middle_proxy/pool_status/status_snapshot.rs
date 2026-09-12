@@ -16,10 +16,15 @@ impl MePool {
             return false;
         }
 
+        let active_generation = self.reinit.status.load().active_generation;
         let writers = self.writers.read().await.clone();
         let mut live_writers_by_dc = HashMap::<i16, usize>::new();
         for writer in writers.iter() {
-            if writer.draining.load(Ordering::Relaxed) {
+            if writer.draining.load(Ordering::Relaxed)
+                || writer.generation != active_generation
+                || WriterContour::from_u8(writer.contour.load(Ordering::Relaxed))
+                    != WriterContour::Active
+            {
                 continue;
             }
             if let Ok(dc) = i16::try_from(writer.writer_dc) {
@@ -53,10 +58,15 @@ impl MePool {
             return false;
         }
 
+        let active_generation = self.reinit.status.load().active_generation;
         let writers = self.writers.read().await.clone();
         let mut live_writers_by_dc = HashMap::<i16, usize>::new();
         for writer in writers.iter() {
-            if writer.draining.load(Ordering::Relaxed) {
+            if writer.draining.load(Ordering::Relaxed)
+                || writer.generation != active_generation
+                || WriterContour::from_u8(writer.contour.load(Ordering::Relaxed))
+                    != WriterContour::Active
+            {
                 continue;
             }
             if let Ok(dc) = i16::try_from(writer.writer_dc) {
@@ -127,7 +137,7 @@ impl MePool {
         for writer in writers.iter() {
             let endpoint = writer.addr;
             let dc = i16::try_from(writer.writer_dc).ok();
-            let draining = writer.draining.load(Ordering::Relaxed);
+            let draining = writer.draining.load(Ordering::Acquire);
             let degraded = writer.degraded.load(Ordering::Relaxed);
             let matches_active_generation = writer.generation == active_generation;
             let in_desired_map = dc
@@ -156,13 +166,18 @@ impl MePool {
                 && drain_ttl_secs > 0
                 && drain_started_at_epoch_secs
                     .is_some_and(|started| now_epoch_secs.saturating_sub(started) > drain_ttl_secs);
-            let state = match WriterContour::from_u8(writer.contour.load(Ordering::Relaxed)) {
+            let contour = WriterContour::from_u8(writer.contour.load(Ordering::Relaxed));
+            let state = match contour {
                 WriterContour::Warm => "warm",
                 WriterContour::Active => "active",
                 WriterContour::Draining => "draining",
             };
 
-            if !draining && let Some(dc_idx) = dc {
+            let authoritative_active = !draining
+                && contour == WriterContour::Active
+                && matches_active_generation
+                && in_desired_map;
+            if authoritative_active && let Some(dc_idx) = dc {
                 *live_writers_by_dc_endpoint
                     .entry((dc_idx, endpoint))
                     .or_insert(0) += 1;
@@ -172,9 +187,7 @@ impl MePool {
                     entry.0 += ema_ms;
                     entry.1 += 1;
                 }
-                if matches_active_generation && in_desired_map {
-                    *fresh_writers_by_dc.entry(dc_idx).or_insert(0) += 1;
-                }
+                *fresh_writers_by_dc.entry(dc_idx).or_insert(0) += 1;
             }
 
             writer_rows.push(MeApiWriterStatusSnapshot {
