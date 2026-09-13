@@ -1,5 +1,5 @@
 use std::borrow::Borrow;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
@@ -74,6 +74,7 @@ pub struct ReplayChecker {
     hits: AtomicU64,
     additions: AtomicU64,
     cleanups: AtomicU64,
+    next_claim_token: AtomicU64,
 }
 
 struct ReplayEntry {
@@ -82,6 +83,7 @@ struct ReplayEntry {
 
 struct ReplayShard {
     cache: LruCache<ReplayKey, ReplayEntry>,
+    pending: HashMap<ReplayKey, u64>,
     queue: VecDeque<(Instant, ReplayKey, u64)>,
     seq_counter: u64,
     capacity: usize,
@@ -91,6 +93,7 @@ impl ReplayShard {
     fn new(cap: NonZeroUsize) -> Self {
         Self {
             cache: LruCache::new(cap),
+            pending: HashMap::new(),
             queue: VecDeque::with_capacity(cap.get()),
             seq_counter: 0,
             capacity: cap.get(),
@@ -135,7 +138,7 @@ impl ReplayShard {
             return false;
         }
         self.cleanup(now, window);
-        self.cache.get(key).is_some()
+        self.cache.get(key).is_some() || self.pending.contains_key(key)
     }
 
     fn add_owned(&mut self, key: ReplayKey, now: Instant, window: Duration) {
@@ -143,7 +146,7 @@ impl ReplayShard {
             return;
         }
         self.cleanup(now, window);
-        if self.cache.peek(key.as_slice()).is_some() {
+        if self.cache.peek(key.as_slice()).is_some() || self.pending.contains_key(key.as_slice()) {
             return;
         }
         while self.queue.len() >= self.capacity {
@@ -155,8 +158,83 @@ impl ReplayShard {
         self.queue.push_back((now, key, seq));
     }
 
+    fn claim_owned(
+        &mut self,
+        key: ReplayKey,
+        now: Instant,
+        window: Duration,
+        token: u64,
+    ) -> bool {
+        if window.is_zero() {
+            return true;
+        }
+        self.cleanup(now, window);
+        if self.cache.peek(key.as_slice()).is_some() || self.pending.contains_key(key.as_slice()) {
+            return false;
+        }
+        while self.cache.len().saturating_add(self.pending.len()) >= self.capacity {
+            if self.queue.is_empty() {
+                return false;
+            }
+            self.evict_queue_front();
+        }
+        self.pending.insert(key, token);
+        true
+    }
+
+    fn remove_pending(&mut self, key: &[u8], token: u64) -> bool {
+        if self.pending.get(key).copied() != Some(token) {
+            return false;
+        }
+        self.pending.remove(key);
+        true
+    }
+
     fn len(&self) -> usize {
-        self.cache.len()
+        self.cache.len().saturating_add(self.pending.len())
+    }
+}
+
+/// Exclusive in-flight ownership of one TLS replay digest.
+#[must_use = "the claim must be committed after all TLS policy checks"]
+pub(crate) struct TlsReplayClaim<'a> {
+    checker: &'a ReplayChecker,
+    shard_idx: usize,
+    key: Option<ReplayKey>,
+    token: u64,
+    reserved: bool,
+}
+
+impl TlsReplayClaim<'_> {
+    /// Commits the claimed digest into the replay window.
+    pub(crate) fn commit(mut self) -> bool {
+        if !self.reserved {
+            return true;
+        }
+        let Some(key) = self.key.take() else {
+            return false;
+        };
+        let mut shard = self.checker.tls_shards[self.shard_idx].lock();
+        if !shard.remove_pending(key.as_slice(), self.token) {
+            return false;
+        }
+        shard.add_owned(key, Instant::now(), self.checker.tls_window);
+        self.checker.additions.fetch_add(1, Ordering::Relaxed);
+        self.reserved = false;
+        true
+    }
+}
+
+impl Drop for TlsReplayClaim<'_> {
+    fn drop(&mut self) {
+        if !self.reserved {
+            return;
+        }
+        if let Some(key) = self.key.as_ref() {
+            self.checker.tls_shards[self.shard_idx]
+                .lock()
+                .remove_pending(key.as_slice(), self.token);
+        }
     }
 }
 
@@ -184,6 +262,25 @@ impl ReplayChecker {
             hits: AtomicU64::new(0),
             additions: AtomicU64::new(0),
             cleanups: AtomicU64::new(0),
+            next_claim_token: AtomicU64::new(1),
+        }
+    }
+
+    fn reserve_claim_token(&self) -> Option<u64> {
+        let mut current = self.next_claim_token.load(Ordering::Relaxed);
+        loop {
+            if current == u64::MAX {
+                return None;
+            }
+            match self.next_claim_token.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Some(current),
+                Err(actual) => current = actual,
+            }
         }
     }
 
@@ -244,6 +341,36 @@ impl ReplayChecker {
 
     pub fn check_and_add_tls_digest(&self, data: &[u8]) -> bool {
         self.check_and_add_internal(data, &self.tls_shards, self.tls_window)
+    }
+
+    /// Claims one TLS digest until the policy-valid handshake commits or aborts.
+    pub(crate) fn claim_tls_digest(&self, data: &[u8]) -> Option<TlsReplayClaim<'_>> {
+        self.checks.fetch_add(1, Ordering::Relaxed);
+        let shard_idx = self.get_shard_idx(data);
+        let key = ReplayKey::from_slice(data);
+        if self.tls_window.is_zero() {
+            return Some(TlsReplayClaim {
+                checker: self,
+                shard_idx,
+                key: None,
+                token: 0,
+                reserved: false,
+            });
+        }
+        let token = self.reserve_claim_token()?;
+        let mut shard = self.tls_shards[shard_idx].lock();
+        if !shard.claim_owned(key.clone(), Instant::now(), self.tls_window, token) {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        drop(shard);
+        Some(TlsReplayClaim {
+            checker: self,
+            shard_idx,
+            key: Some(key),
+            token,
+            reserved: true,
+        })
     }
 
     pub fn check_handshake(&self, data: &[u8]) -> bool {

@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
 #[test]
@@ -77,4 +78,33 @@ fn replay_checker_stats_reflect_dual_shard_domains() {
         stats.num_shards, 128,
         "stats should expose both shard domains (handshake + TLS)"
     );
+}
+
+#[test]
+fn concurrent_tls_claim_allows_exactly_one_pending_handshake() {
+    const WORKERS: usize = 16;
+
+    let checker = Arc::new(ReplayChecker::new(128, Duration::from_secs(1)));
+    let start = Arc::new(Barrier::new(WORKERS));
+    let finish = Arc::new(Barrier::new(WORKERS));
+    let mut handles = Vec::with_capacity(WORKERS);
+
+    for _ in 0..WORKERS {
+        let checker = Arc::clone(&checker);
+        let start = Arc::clone(&start);
+        let finish = Arc::clone(&finish);
+        handles.push(std::thread::spawn(move || {
+            start.wait();
+            let claim = checker.claim_tls_digest(b"parallel-client-hello");
+            finish.wait();
+            claim.map(|claim| claim.commit()).unwrap_or(false)
+        }));
+    }
+
+    let accepted = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("TLS claim worker must not panic"))
+        .filter(|accepted| *accepted)
+        .count();
+    assert_eq!(accepted, 1, "only one concurrent TLS claim may commit");
 }
