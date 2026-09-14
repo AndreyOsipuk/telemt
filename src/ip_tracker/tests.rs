@@ -190,6 +190,39 @@ async fn test_clear_user_ips() {
 }
 
 #[tokio::test]
+async fn stale_incarnation_cleanup_cannot_release_recreated_user_ip() {
+    let tracker = UserIpTracker::new();
+    tracker.set_user_limit("test_user", 1).await;
+    let old_ip = test_ipv4(192, 168, 2, 1);
+    let current_ip = test_ipv4(192, 168, 2, 2);
+    let rejected_ip = test_ipv4(192, 168, 2, 3);
+
+    tracker
+        .check_and_add_for_incarnation("test_user", 1, old_ip)
+        .await
+        .unwrap();
+    tracker
+        .clear_user_ips_if_not_newer("test_user", 2)
+        .await;
+    tracker
+        .check_and_add_for_incarnation("test_user", 3, current_ip)
+        .await
+        .unwrap();
+
+    tracker
+        .remove_ip_for_incarnation("test_user", 1, old_ip)
+        .await;
+
+    assert!(tracker.is_ip_active("test_user", current_ip).await);
+    assert!(
+        tracker
+            .check_and_add_for_incarnation("test_user", 3, rejected_ip)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn test_is_ip_active() {
     let tracker = UserIpTracker::new();
     let ip1 = test_ipv4(192, 168, 1, 1);
