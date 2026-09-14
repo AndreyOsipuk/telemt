@@ -10,6 +10,7 @@ use zeroize::Zeroizing;
 use super::{CarrierRequest, ProfileKey, TOKEN_BYTES, TokenHash};
 use crate::config::{WebCarrier, WebRuntimeConfig, WebRuntimeProfile, WebTimeoutsConfig};
 use crate::maestro::generation::RuntimeGeneration;
+use crate::proxy::user_admission::UserSessionRegistration;
 use crate::web::session::WebSession;
 use crate::web::telemetry::WebCarrierSelectionDisposition;
 
@@ -34,6 +35,8 @@ impl CarrierChainPhase {
 
 /// One issued bootstrap and optional idempotent session-creation replay state.
 pub(super) struct Bootstrap {
+    /// User authority ownership retained for the credential lifetime.
+    pub(super) user_registration: UserSessionRegistration,
     /// Credential and replay-state expiry deadline.
     pub(super) expires_at: Instant,
     /// Stable ordering point used for bounded eviction.
@@ -273,6 +276,7 @@ pub(super) fn matching_profile(
             profile.host == expected.host
                 && profile.public_addr == expected.public_addr
                 && profile.user == expected.user
+                && profile.credential_id == expected.credential_id
                 && profile.secret_mode == expected.secret_mode
                 && profile.carrier == expected.carrier
                 && profile.carrier_negotiation_enabled == expected.carrier_negotiation_enabled

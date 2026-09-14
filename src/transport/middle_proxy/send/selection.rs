@@ -15,7 +15,8 @@ impl MePool {
         routed_dc: i32,
         include_warm: bool,
     ) -> Vec<usize> {
-        let preferred_snapshot = self.preferred_endpoints_by_dc.load();
+        let endpoint_snapshot = self.endpoint_snapshot.load();
+        let preferred_snapshot = &endpoint_snapshot.preferred_endpoints_by_dc;
         let mut out = Vec::new();
         if let Some(preferred) = preferred_snapshot
             .get(&routed_dc)

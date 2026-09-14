@@ -73,6 +73,7 @@ pub mod route_mode;
 pub mod session_eviction;
 pub mod shared_state;
 pub mod traffic_limiter;
+pub(crate) mod user_admission;
 
 pub use client::ClientHandler;
 #[allow(unused_imports)]

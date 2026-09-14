@@ -25,9 +25,10 @@ pub(super) async fn check_family(
     let mut family_degraded = false;
 
     let mut dc_endpoints = HashMap::<i32, Vec<SocketAddr>>::new();
+    let endpoint_snapshot = pool.endpoint_snapshot.load();
     let map_guard = match family {
-        IpFamily::V4 => pool.proxy_map_v4.read().await,
-        IpFamily::V6 => pool.proxy_map_v6.read().await,
+        IpFamily::V4 => &endpoint_snapshot.map_v4,
+        IpFamily::V6 => &endpoint_snapshot.map_v6,
     };
     for (dc, addrs) in map_guard.iter() {
         let entry = dc_endpoints.entry(*dc).or_default();
@@ -35,7 +36,7 @@ pub(super) async fn check_family(
             entry.push(SocketAddr::new(ip, port));
         }
     }
-    drop(map_guard);
+    drop(endpoint_snapshot);
     for endpoints in dc_endpoints.values_mut() {
         endpoints.sort_unstable();
         endpoints.dedup();

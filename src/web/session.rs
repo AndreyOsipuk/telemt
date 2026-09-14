@@ -17,6 +17,7 @@ use crate::web::frame::{self, FrameType};
 use crate::web::manager::{
     CarrierClientClass, CarrierLearningContext, ProfileKey, TokenHash, WebProcessRuntime,
 };
+use crate::proxy::user_admission::UserSessionRegistration;
 
 // Backend tasks own generation admission and authenticated MTProxy relay lifetimes.
 mod backend;
@@ -213,6 +214,7 @@ pub(crate) struct WebSession {
     created_at: Instant,
     limits: WebLimitsConfig,
     timeouts: WebTimeoutsConfig,
+    _user_registration: Option<UserSessionRegistration>,
     state: Mutex<SessionState>,
     carrier_health_publication: AtomicU8,
     close_complete: AtomicBool,
@@ -257,8 +259,13 @@ impl WebSession {
         recovery: bool,
         limits: WebLimitsConfig,
         timeouts: WebTimeoutsConfig,
+        user_registration: Option<UserSessionRegistration>,
     ) -> Arc<Self> {
         let created_at = Instant::now();
+        let cancel = user_registration
+            .as_ref()
+            .map(UserSessionRegistration::token)
+            .unwrap_or_default();
         let mut carrier_lanes = HashMap::new();
         let mut next_lane_instance = 1;
         if selected_carrier == WebCarrier::HttpsLanes {
@@ -283,6 +290,7 @@ impl WebSession {
             created_at,
             limits,
             timeouts,
+            _user_registration: user_registration,
             state: Mutex::new(SessionState {
                 streams: HashMap::new(),
                 closing_streams: HashMap::new(),
@@ -328,7 +336,7 @@ impl WebSession {
             close_notify: Notify::new(),
             down_notify: Arc::new(Notify::new()),
             lane_open_notify: Arc::new(Notify::new()),
-            cancel: CancellationToken::new(),
+            cancel,
             tasks_live: AtomicUsize::new(0),
             tasks_done: Arc::new(Notify::new()),
             resident: Arc::new(resident::ResidentCounters::default()),

@@ -39,6 +39,7 @@ fn new_session_with_automatic(
         carriers: Arc::from([WebCarrier::HttpsLanes]),
         carrier_negotiation_deadlines_secs: [3, 5, 8, 12],
         capability: [0; 32],
+        credential_id: [0; 16],
         key_fingerprint: "0000000000000000".to_string(),
         max_sessions: 1,
         max_streams: 2,
@@ -65,6 +66,7 @@ fn new_session_with_automatic(
         false,
         limits,
         WebTimeoutsConfig::default(),
+        None,
     )
 }
 

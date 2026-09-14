@@ -24,6 +24,7 @@ fn session() -> (Arc<WebSession>, Arc<WebProcessRuntime>) {
         carriers: Arc::from([WebCarrier::Https]),
         carrier_negotiation_deadlines_secs: [3, 5, 8, 12],
         capability: [0; 32],
+        credential_id: [0; 16],
         key_fingerprint: "0000000000000000".to_string(),
         max_sessions: 1,
         max_streams: 1,
@@ -50,6 +51,7 @@ fn session() -> (Arc<WebSession>, Arc<WebProcessRuntime>) {
         false,
         WebLimitsConfig::default(),
         timeouts,
+        None,
     );
     (session, manager)
 }

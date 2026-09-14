@@ -23,10 +23,12 @@ fn runtime_log_filter() -> RuntimeLogFilter {
 
 fn prepared_runtime(generation: Arc<RuntimeGeneration>) -> PreparedRuntime {
     let (config_watcher_activation, _activation_rx) = watch::channel(false);
+    let user_admission_epoch = generation.proxy_shared.user_admission().epoch();
     PreparedRuntime {
         generation,
         detected_ips: (None, None),
         config_watcher_activation,
+        user_admission_epoch,
     }
 }
 

@@ -43,8 +43,11 @@ fn unregistered_writer(
 async fn normal_warm_publication_cannot_race_past_the_dc_floor() {
     let pool = make_pool().await;
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
-    pool.preferred_endpoints_by_dc
-        .store(Arc::new(std::collections::HashMap::from([(2, vec![addr])])));
+    pool.update_proxy_maps(
+        std::collections::HashMap::from([(2, vec![(addr.ip(), addr.port())])]),
+        None,
+    )
+    .await;
     let generation = 2;
     let writers = (1..=3)
         .map(|writer_id| {
@@ -86,8 +89,11 @@ async fn normal_warm_publication_cannot_race_past_the_dc_floor() {
 async fn normal_active_publication_cannot_race_past_the_family_floor() {
     let pool = make_pool().await;
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
-    pool.preferred_endpoints_by_dc
-        .store(Arc::new(std::collections::HashMap::from([(2, vec![addr])])));
+    pool.update_proxy_maps(
+        std::collections::HashMap::from([(2, vec![(addr.ip(), addr.port())])]),
+        None,
+    )
+    .await;
     let generation = pool.current_generation();
     let writers = (1..=3)
         .map(|writer_id| {

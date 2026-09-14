@@ -35,6 +35,8 @@ pub(crate) struct WebRuntimeProfile {
     pub(crate) public_addr: SocketAddr,
     /// Exact access user authenticated by logical streams.
     pub(crate) user: String,
+    /// Stable credential identity used by process-wide admission fencing.
+    pub(crate) credential_id: [u8; 16],
     /// Client secret representation and inner protocol policy.
     pub(crate) secret_mode: WebSecretMode,
     /// Sole carrier or final fallback frozen into the issued bridge policy.

@@ -124,7 +124,14 @@ pub(in crate::api) async fn create_user(
 
     let revision =
         save_access_sections_to_disk(&shared.config_path, &cfg, &touched_sections).await?;
-    drop(_guard);
+    shared
+        .proxy_shared
+        .stage_user(
+            &body.username,
+            &secret,
+            cfg.access.is_user_enabled(&body.username),
+        )
+        .ok_or_else(|| ApiFailure::internal("failed to stage user admission policy"))?;
 
     if let Some(limit) = updated_limit {
         shared
@@ -132,6 +139,7 @@ pub(in crate::api) async fn create_user(
             .set_user_limit(&body.username, limit)
             .await;
     }
+    drop(_guard);
     let (detected_ip_v4, detected_ip_v6) = shared.detected_link_ips();
 
     let users = users_from_config(

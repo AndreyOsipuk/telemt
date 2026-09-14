@@ -59,6 +59,16 @@ impl UserIpTracker {
     }
 
     pub async fn check_and_add(&self, username: &str, ip: IpAddr) -> Result<(), String> {
+        self.check_and_add_for_incarnation(username, 0, ip).await
+    }
+
+    /// Reserves an IP slot for one exact user incarnation.
+    pub(crate) async fn check_and_add_for_incarnation(
+        &self,
+        username: &str,
+        incarnation: UserIncarnation,
+        ip: IpAddr,
+    ) -> Result<(), String> {
         self.drain_cleanup_for_user(username).await;
         self.maybe_compact_empty_users().await;
         let policy = self.limit_policy.load();
@@ -69,6 +79,30 @@ impl UserIpTracker {
 
         let shard_idx = Self::shard_idx(username);
         let mut shard = self.shards[shard_idx].write().await;
+        if let Some(current) = shard.incarnations.get(username).copied() {
+            if current > incarnation {
+                return Err(format!(
+                    "IP tracker rejected stale user incarnation for '{username}'"
+                ));
+            }
+            if current < incarnation {
+                let removed_active = shard
+                    .active_ips
+                    .remove(username)
+                    .map(|ips| ips.len())
+                    .unwrap_or(0);
+                let removed_recent = shard
+                    .recent_ips
+                    .remove(username)
+                    .map(|ips| ips.len())
+                    .unwrap_or(0);
+                Self::decrement_counter(&self.active_entry_count, removed_active);
+                Self::decrement_counter(&self.recent_entry_count, removed_recent);
+                shard.incarnations.insert(username.to_string(), incarnation);
+            }
+        } else {
+            shard.incarnations.insert(username.to_string(), incarnation);
+        }
         let user_active = shard.active_ips.entry(username.to_string()).or_default();
         let active_contains_ip = user_active.contains_key(&ip);
         let active_len = user_active.len();
@@ -174,9 +208,22 @@ impl UserIpTracker {
     }
 
     pub async fn remove_ip(&self, username: &str, ip: IpAddr) {
+        self.remove_ip_for_incarnation(username, 0, ip).await;
+    }
+
+    /// Releases an IP slot only from the incarnation that acquired it.
+    pub(crate) async fn remove_ip_for_incarnation(
+        &self,
+        username: &str,
+        incarnation: UserIncarnation,
+        ip: IpAddr,
+    ) {
         self.maybe_compact_empty_users().await;
         let shard_idx = Self::shard_idx(username);
         let mut shard = self.shards[shard_idx].write().await;
+        if shard.incarnations.get(username).copied() != Some(incarnation) {
+            return;
+        }
         let mut removed_active_entries = 0usize;
         if let Some(user_ips) = shard.active_ips.get_mut(username) {
             if let Some(count) = user_ips.get_mut(&ip) {

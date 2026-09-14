@@ -85,7 +85,8 @@ impl MePool {
                     "ME floor rebalance lost active-generation authority".into(),
                 ));
             }
-            let preferred = self.preferred_endpoints_by_dc.load();
+            let endpoint_snapshot = self.endpoint_snapshot.load();
+            let preferred = &endpoint_snapshot.preferred_endpoints_by_dc;
             let donor_count = writers
                 .iter()
                 .filter(|candidate| {
@@ -265,8 +266,11 @@ mod tests {
     async fn replacement_commit_publishes_successor_before_draining_victim() {
         let pool = make_pool().await;
         let addr = endpoint(1);
-        pool.preferred_endpoints_by_dc
-            .store(Arc::new(HashMap::from([(2, vec![addr])])));
+        pool.update_proxy_maps(
+            HashMap::from([(2, vec![(addr.ip(), addr.port())])]),
+            None,
+        )
+        .await;
         let victim = install_writer(&pool, 1001, 2, addr).await;
         let expected_role = WriterRole::from_writer(&victim);
         let mut reservation = pool
@@ -305,8 +309,11 @@ mod tests {
     async fn cancelled_replacement_waiting_for_publication_restores_all_reservations() {
         let pool = make_pool().await;
         let addr = endpoint(2);
-        pool.preferred_endpoints_by_dc
-            .store(Arc::new(HashMap::from([(2, vec![addr])])));
+        pool.update_proxy_maps(
+            HashMap::from([(2, vec![(addr.ip(), addr.port())])]),
+            None,
+        )
+        .await;
         let victim = install_writer(&pool, 2001, 2, addr).await;
         let expected_role = WriterRole::from_writer(&victim);
         let mut reservation = pool
@@ -342,10 +349,14 @@ mod tests {
         let pool = make_pool().await;
         let donor_addr = endpoint(3);
         let receiver_addr = endpoint(4);
-        pool.preferred_endpoints_by_dc.store(Arc::new(HashMap::from([
-            (1, vec![donor_addr]),
-            (2, vec![receiver_addr]),
-        ])));
+        pool.update_proxy_maps(
+            HashMap::from([
+                (1, vec![(donor_addr.ip(), donor_addr.port())]),
+                (2, vec![(receiver_addr.ip(), receiver_addr.port())]),
+            ]),
+            None,
+        )
+        .await;
         let victim = install_writer(&pool, 3001, 1, donor_addr).await;
         let expected_role = WriterRole::from_writer(&victim);
         let mut reservation = pool

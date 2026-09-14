@@ -89,11 +89,6 @@ impl WebProcessRuntime {
                 .record_rejection(WebRejectionReason::ConfigDisabled);
             return Err(ManagerError::Closed);
         }
-        if !generation.proxy_shared.is_user_enabled(&profile.user) {
-            self.telemetry
-                .record_rejection(WebRejectionReason::UserDisabled);
-            return Err(ManagerError::Closed);
-        }
         let _operator_admission = self.try_operator_admission()?;
         let now = Instant::now();
         let mut state = self.state.lock();
@@ -146,12 +141,25 @@ impl WebProcessRuntime {
                 .record_rejection(WebRejectionReason::BootstrapCapacity);
             return Err(ManagerError::Limit);
         };
+        let Some(mut user_publication) = generation
+            .proxy_shared
+            .claim_authenticated_user(&profile.user, profile.credential_id)
+        else {
+            self.telemetry
+                .record_rejection(WebRejectionReason::UserDisabled);
+            return Err(ManagerError::Closed);
+        };
+        let Some(user_registration) = user_publication.take_registration() else {
+            return Err(ManagerError::Closed);
+        };
         let trace_session_id = self.trace.next_session_id();
         let bridge_diagnostics_enabled = config.web.debug.bridge_diagnostics_enabled();
         let (user_agent, user_agent_id) = bounded_user_agent(user_agent);
+        let issued_profile = Arc::clone(&profile);
         state.bootstraps.insert(
             hash,
             Bootstrap {
+                user_registration,
                 expires_at: now + Duration::from_secs(config.web.timeouts.bootstrap_lifetime_secs),
                 issued_at: now,
                 issuance_ip: client_ip,
@@ -186,11 +194,7 @@ impl WebProcessRuntime {
             },
         );
         *state.bootstraps_per_ip.entry(client_ip).or_insert(0) += 1;
-        let profile = state
-            .bootstraps
-            .get(&hash)
-            .map(|entry| Arc::clone(&entry.profile))
-            .ok_or(ManagerError::Closed)?;
+        user_publication.commit();
         drop(state);
         if recovery {
             self.telemetry
@@ -202,7 +206,7 @@ impl WebProcessRuntime {
                 Some(client_ip),
                 crate::web::trace::TraceIdentity::from_optional_profile(
                     Some(trace_session_id),
-                    &profile,
+                    &issued_profile,
                 ),
                 crate::web::trace::TraceLifecycleEvent::BridgeIssued,
                 None,
@@ -216,7 +220,7 @@ impl WebProcessRuntime {
             self.trace.record_profile_lifecycle(
                 client_ip,
                 Some(trace_session_id),
-                &profile,
+                &issued_profile,
                 crate::web::trace::TraceLifecycleEvent::BridgeIssued,
                 None,
                 None,

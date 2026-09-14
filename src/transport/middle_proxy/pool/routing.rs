@@ -76,16 +76,23 @@ impl MePool {
         &self,
         dc: i32,
     ) -> bool {
+        let snapshot = self.endpoint_snapshot.load();
         if self.decision.ipv4_me {
-            let map = self.proxy_map_v4.read().await;
-            if map.get(&dc).is_some_and(|endpoints| !endpoints.is_empty()) {
+            if snapshot
+                .map_v4
+                .get(&dc)
+                .is_some_and(|endpoints| !endpoints.is_empty())
+            {
                 return true;
             }
         }
 
         if self.decision.ipv6_me {
-            let map = self.proxy_map_v6.read().await;
-            if map.get(&dc).is_some_and(|endpoints| !endpoints.is_empty()) {
+            if snapshot
+                .map_v6
+                .get(&dc)
+                .is_some_and(|endpoints| !endpoints.is_empty())
+            {
                 return true;
             }
         }
@@ -112,7 +119,12 @@ impl MePool {
         &self,
         addr: SocketAddr,
     ) -> i32 {
-        if let Some(cached) = self.endpoint_dc_map.read().await.get(&addr).copied()
+        if let Some(cached) = self
+            .endpoint_snapshot
+            .load()
+            .endpoint_dc_map
+            .get(&addr)
+            .copied()
             && let Some(dc) = cached
         {
             return dc;
@@ -125,9 +137,45 @@ impl MePool {
         &self,
         family: IpFamily,
     ) -> HashMap<i32, Vec<(IpAddr, u16)>> {
+        let snapshot = self.endpoint_snapshot.load();
         match family {
-            IpFamily::V4 => self.proxy_map_v4.read().await.clone(),
-            IpFamily::V6 => self.proxy_map_v6.read().await.clone(),
+            IpFamily::V4 => snapshot.map_v4.clone(),
+            IpFamily::V6 => snapshot.map_v6.clone(),
+        }
+    }
+
+    pub(in crate::transport::middle_proxy) fn build_endpoint_snapshot(
+        decision: &NetworkDecision,
+        mut map_v4: HashMap<i32, Vec<(IpAddr, u16)>>,
+        mut map_v6: HashMap<i32, Vec<(IpAddr, u16)>>,
+        revision: u64,
+    ) -> EndpointSnapshot {
+        Self::mirror_negative_dcs(&mut map_v4);
+        Self::mirror_negative_dcs(&mut map_v6);
+        let endpoint_dc_map = Self::build_endpoint_dc_map_from_maps(&map_v4, &map_v6);
+        let preferred_endpoints_by_dc =
+            Self::build_preferred_endpoints_by_dc(decision, &map_v4, &map_v6);
+        EndpointSnapshot {
+            revision,
+            map_v4,
+            map_v6,
+            endpoint_dc_map,
+            preferred_endpoints_by_dc,
+        }
+    }
+
+    fn mirror_negative_dcs(map: &mut HashMap<i32, Vec<(IpAddr, u16)>>) {
+        let positive_dcs = map
+            .keys()
+            .copied()
+            .filter(|dc| *dc > 0)
+            .collect::<Vec<_>>();
+        for dc in positive_dcs {
+            if !map.contains_key(&-dc)
+                && let Some(endpoints) = map.get(&dc).cloned()
+            {
+                map.insert(-dc, endpoints);
+            }
         }
     }
 
@@ -224,17 +272,11 @@ impl MePool {
         endpoint_dc_map
     }
 
-    pub(in crate::transport::middle_proxy) async fn rebuild_endpoint_dc_map(&self) {
-        let map_v4 = self.proxy_map_v4.read().await.clone();
-        let map_v6 = self.proxy_map_v6.read().await.clone();
-        let rebuilt = Self::build_endpoint_dc_map_from_maps(&map_v4, &map_v6);
-        let preferred = Self::build_preferred_endpoints_by_dc(&self.decision, &map_v4, &map_v6);
-        *self.endpoint_dc_map.write().await = rebuilt;
-        self.preferred_endpoints_by_dc.store(Arc::new(preferred));
+    pub(in crate::transport::middle_proxy) async fn prune_endpoint_runtime_state(&self) {
         let configured_endpoints = self
+            .endpoint_snapshot
+            .load()
             .endpoint_dc_map
-            .read()
-            .await
             .keys()
             .copied()
             .collect::<HashSet<SocketAddr>>();
@@ -253,8 +295,12 @@ impl MePool {
         &self,
         dc: i32,
     ) -> Vec<SocketAddr> {
-        let guard = self.preferred_endpoints_by_dc.load();
-        guard.get(&dc).cloned().unwrap_or_default()
+        self.endpoint_snapshot
+            .load()
+            .preferred_endpoints_by_dc
+            .get(&dc)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub(in crate::transport::middle_proxy) fn health_interval_unhealthy(&self) -> Duration {

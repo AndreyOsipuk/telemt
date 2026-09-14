@@ -170,12 +170,23 @@ pub(in crate::api) async fn patch_user(
     } else {
         save_access_sections_to_disk(&shared.config_path, &cfg, &touched_sections).await?
     };
-    drop(_guard);
+    if touches_users || touches_user_enabled {
+        let secret = cfg
+            .access
+            .users
+            .get(user)
+            .ok_or_else(|| ApiFailure::internal("updated user secret is missing"))?;
+        shared
+            .proxy_shared
+            .stage_user(user, secret, cfg.access.is_user_enabled(user))
+            .ok_or_else(|| ApiFailure::internal("failed to stage user admission policy"))?;
+    }
     match max_unique_ips_change {
         Some(Some(limit)) => shared.ip_tracker.set_user_limit(user, limit).await,
         Some(None) => shared.ip_tracker.remove_user_limit(user).await,
         None => {}
     }
+    drop(_guard);
     let (detected_ip_v4, detected_ip_v6) = shared.detected_link_ips();
     let users = users_from_config(
         &cfg,
@@ -223,6 +234,15 @@ pub(in crate::api) async fn set_user_enabled(
     let revision =
         save_access_sections_to_disk(&shared.config_path, &cfg, &[AccessSection::UserEnabled])
             .await?;
+    let secret = cfg
+        .access
+        .users
+        .get(user)
+        .ok_or_else(|| ApiFailure::internal("updated user secret is missing"))?;
+    shared
+        .proxy_shared
+        .stage_user(user, secret, enabled)
+        .ok_or_else(|| ApiFailure::internal("failed to stage user admission policy"))?;
     drop(_guard);
 
     let (detected_ip_v4, detected_ip_v6) = shared.detected_link_ips();

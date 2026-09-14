@@ -15,8 +15,8 @@ use crate::config::MeBindStaleMode;
 use crate::network::IpFamily;
 
 use super::pool::{
-    MeDrainGateReason, MePool, ReinitAttemptState, ReinitCoordinatorState, ReinitCore,
-    ReinitPendingState, ReinitStatusSnapshot, WriterContour, WriterOpenIntent,
+    EndpointSnapshot, MeDrainGateReason, MePool, ReinitAttemptState, ReinitCoordinatorState,
+    ReinitCore, ReinitPendingState, ReinitStatusSnapshot, WriterContour, WriterOpenIntent,
 };
 
 // Reinitialization admission, generation state, and coverage checks.
@@ -34,6 +34,7 @@ struct ReinitAttemptGuard {
     generation: u64,
     previous_generation: u64,
     map_hash: u64,
+    endpoint_revision: u64,
     hardswap: bool,
 }
 
@@ -119,17 +120,24 @@ fn commit_reinit_state(
     attempt_id: u64,
     generation: u64,
     map_hash: u64,
+    endpoint_revision: u64,
     hardswap: bool,
 ) -> bool {
     let Some(record) = state.attempts.get(&attempt_id).copied() else {
         return false;
     };
-    if record.map_hash != state.desired_map_hash || record.map_hash != map_hash {
+    if record.map_hash != state.desired_map_hash
+        || record.map_hash != map_hash
+        || record.endpoint_revision != endpoint_revision
+        || record.endpoint_revision != state.endpoint_revision
+    {
         return false;
     }
     if hardswap {
         let pending_matches = state.pending.is_some_and(|pending| {
-            pending.generation == generation && pending.map_hash == map_hash
+            pending.generation == generation
+                && pending.map_hash == map_hash
+                && pending.endpoint_revision == endpoint_revision
         });
         if !pending_matches || generation < state.active_generation {
             return false;

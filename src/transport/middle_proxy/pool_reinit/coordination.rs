@@ -27,9 +27,13 @@ impl MePool {
         self: &Arc<Self>,
         hardswap: bool,
         map_hash: u64,
+        endpoint_revision: u64,
         now_epoch_secs: u64,
-    ) -> ReinitReservation {
+    ) -> Option<ReinitReservation> {
         let mut state = self.reinit.coordinator.lock();
+        if state.endpoint_revision != endpoint_revision {
+            return None;
+        }
         state.desired_map_hash = map_hash;
         let previous_generation = state.active_generation;
         let mut pending_reused = false;
@@ -43,6 +47,7 @@ impl MePool {
                     && pending_age_secs > ME_HARDSWAP_PENDING_TTL_SECS;
                 pending.generation >= previous_generation
                     && pending.map_hash == map_hash
+                    && pending.endpoint_revision == endpoint_revision
                     && !pending_expired
             });
             if let Some(pending) = reusable {
@@ -54,6 +59,7 @@ impl MePool {
                     generation,
                     started_at_epoch_secs: now_epoch_secs,
                     map_hash,
+                    endpoint_revision,
                 });
                 generation
             }
@@ -69,24 +75,26 @@ impl MePool {
             ReinitAttemptState {
                 generation,
                 map_hash,
+                endpoint_revision,
                 hardswap,
                 committed: false,
             },
         );
         publish_reinit_state(self.reinit.as_ref(), &state);
-        ReinitReservation {
+        Some(ReinitReservation {
             attempt: ReinitAttemptGuard {
                 reinit: Arc::clone(&self.reinit),
                 attempt_id,
                 generation,
                 previous_generation,
                 map_hash,
+                endpoint_revision,
                 hardswap,
             },
             pending_reused,
             pending_expired,
             pending_age_secs,
-        }
+        })
     }
 
     /// Revalidates coverage and commits generation ownership under the publication barrier.
@@ -105,10 +113,13 @@ impl MePool {
         if record.generation != attempt.generation
             || record.map_hash != state.desired_map_hash
             || record.map_hash != attempt.map_hash
+            || record.endpoint_revision != attempt.endpoint_revision
+            || record.endpoint_revision != state.endpoint_revision
             || (attempt.hardswap
                 && !state.pending.is_some_and(|pending| {
                     pending.generation == attempt.generation
                         && pending.map_hash == attempt.map_hash
+                        && pending.endpoint_revision == attempt.endpoint_revision
                 }))
         {
             return Err(ReinitCommitFailure::Superseded);
@@ -150,6 +161,7 @@ impl MePool {
             attempt.attempt_id,
             attempt.generation,
             attempt.map_hash,
+            attempt.endpoint_revision,
             attempt.hardswap,
         ) {
             return Err(ReinitCommitFailure::Superseded);
@@ -255,9 +267,13 @@ impl MePool {
 
     /// Restores at least one active writer for every enabled desired DC group.
     pub async fn reconcile_connections(self: &Arc<Self>, rng: &SecureRandom) {
+        let endpoint_snapshot = self.endpoint_snapshot.load_full();
         for family in self.family_order() {
-            let map = self.proxy_map_for_family(family).await;
-            for (dc, addrs) in &map {
+            let map = match family {
+                IpFamily::V4 => &endpoint_snapshot.map_v4,
+                IpFamily::V6 => &endpoint_snapshot.map_v6,
+            };
+            for (dc, addrs) in map {
                 let dc_addrs: Vec<SocketAddr> = addrs
                     .iter()
                     .map(|(ip, port)| SocketAddr::new(*ip, *port))
@@ -287,25 +303,31 @@ impl MePool {
     pub(in crate::transport::middle_proxy) async fn desired_dc_endpoints(
         &self,
     ) -> HashMap<i32, HashSet<SocketAddr>> {
+        let endpoint_snapshot = self.endpoint_snapshot.load_full();
+        self.desired_dc_endpoints_from_snapshot(&endpoint_snapshot)
+    }
+
+    pub(super) fn desired_dc_endpoints_from_snapshot(
+        &self,
+        endpoint_snapshot: &EndpointSnapshot,
+    ) -> HashMap<i32, HashSet<SocketAddr>> {
         let now_epoch_secs = Self::now_epoch_secs();
         let mut out: HashMap<i32, HashSet<SocketAddr>> = HashMap::new();
 
         if self.family_enabled_for_drain_coverage(IpFamily::V4, now_epoch_secs) {
-            let map_v4 = self.proxy_map_v4.read().await.clone();
-            for (dc, addrs) in map_v4 {
-                let entry = out.entry(dc).or_default();
+            for (dc, addrs) in &endpoint_snapshot.map_v4 {
+                let entry = out.entry(*dc).or_default();
                 for (ip, port) in addrs {
-                    entry.insert(SocketAddr::new(ip, port));
+                    entry.insert(SocketAddr::new(*ip, *port));
                 }
             }
         }
 
         if self.family_enabled_for_drain_coverage(IpFamily::V6, now_epoch_secs) {
-            let map_v6 = self.proxy_map_v6.read().await.clone();
-            for (dc, addrs) in map_v6 {
-                let entry = out.entry(dc).or_default();
+            for (dc, addrs) in &endpoint_snapshot.map_v6 {
+                let entry = out.entry(*dc).or_default();
                 for (ip, port) in addrs {
-                    entry.insert(SocketAddr::new(ip, port));
+                    entry.insert(SocketAddr::new(*ip, *port));
                 }
             }
         }
@@ -320,7 +342,8 @@ impl MePool {
         let state = self.reinit.coordinator.lock();
         let active_generation = state.active_generation;
         let pending_generation = state.pending.map(|pending| pending.generation);
-        let preferred = self.preferred_endpoints_by_dc.load();
+        let endpoint_snapshot = self.endpoint_snapshot.load();
+        let preferred = &endpoint_snapshot.preferred_endpoints_by_dc;
         let now_epoch_secs = Self::now_epoch_secs();
         let mut changed = 0usize;
 
@@ -362,7 +385,7 @@ impl MePool {
             self.apply_writer_draining_state(writer, self.force_close_timeout(), false);
             changed = changed.saturating_add(1);
         }
-        drop(preferred);
+        drop(endpoint_snapshot);
         drop(state);
         drop(registry_registration);
         drop(writers);

@@ -123,6 +123,7 @@ fn runtime_config_with_carriers_and_deadlines(
         carriers: Arc::clone(&carriers),
         carrier_negotiation_deadlines_secs,
         capability,
+        credential_id: [0; 16],
         key_fingerprint: "0000000000000000".to_string(),
         max_sessions: 4,
         max_streams: 16,

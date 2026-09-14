@@ -177,6 +177,7 @@ impl ReloadSupervisor {
             self.quota_store.clone(),
             self.runtime_log_filter.clone(),
             self.tls_full_cert_budget.clone(),
+            old_runtime.proxy_shared.user_admission(),
         )
         .await
         {
@@ -277,6 +278,7 @@ impl ReloadSupervisor {
             generation: new_runtime,
             detected_ips,
             config_watcher_activation,
+            user_admission_epoch,
         } = prepared;
         let pending_listener_transition = if let Some(listener_transition) = listener_transition {
             match self
@@ -300,6 +302,12 @@ impl ReloadSupervisor {
         };
         let replaced = {
             let listener_manager = self.listener_manager.lock().await;
+            let config = new_runtime.config();
+            let _ = new_runtime.proxy_shared.apply_user_config_if_epoch(
+                user_admission_epoch,
+                &config.access.users,
+                &config.access.user_enabled,
+            );
             old_runtime.stop_accepting_sessions();
             listener_manager.activate_runtime_generation(new_runtime.clone())
         };

@@ -39,6 +39,7 @@ fn runtime(admission: bool) -> TestRuntime {
         carriers: Arc::from([WebCarrier::WebsocketLanes]),
         carrier_negotiation_deadlines_secs: [3, 5, 8, 12],
         capability: [7; 32],
+        credential_id: [0; 16],
         key_fingerprint: "0000000000000000".to_string(),
         max_sessions: 2,
         max_streams: 1,
@@ -75,6 +76,7 @@ fn runtime(admission: bool) -> TestRuntime {
         false,
         limits,
         timeouts,
+        None,
     );
     TestRuntime {
         session,

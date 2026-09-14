@@ -228,8 +228,25 @@ impl UserIpTracker {
     }
 
     pub async fn clear_user_ips(&self, username: &str) {
+        self.clear_user_ips_if_not_newer(username, 0).await;
+    }
+
+    /// Clears state while advancing the username fence to a newer incarnation.
+    pub(crate) async fn clear_user_ips_if_not_newer(
+        &self,
+        username: &str,
+        incarnation: UserIncarnation,
+    ) {
         let shard_idx = Self::shard_idx(username);
         let mut shard = self.shards[shard_idx].write().await;
+        if shard
+            .incarnations
+            .get(username)
+            .is_some_and(|current| *current > incarnation)
+        {
+            return;
+        }
+        shard.incarnations.insert(username.to_string(), incarnation);
         let removed_active_entries = shard
             .active_ips
             .remove(username)
@@ -250,6 +267,7 @@ impl UserIpTracker {
             let mut shard = shard_lock.write().await;
             shard.active_ips.clear();
             shard.recent_ips.clear();
+            shard.incarnations.clear();
         }
         self.active_entry_count.store(0, Ordering::Relaxed);
         self.recent_entry_count.store(0, Ordering::Relaxed);

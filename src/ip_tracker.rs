@@ -15,6 +15,7 @@ use arc_swap::ArcSwap;
 use tokio::sync::{Mutex as AsyncMutex, RwLock};
 
 use crate::config::UserMaxUniqueIpsMode;
+use crate::proxy::user_admission::UserIncarnation;
 
 const CLEANUP_DRAIN_BATCH_LIMIT: usize = 1024;
 const MAX_ACTIVE_IP_ENTRIES: u64 = 131_072;
@@ -32,11 +33,12 @@ mod tests;
 struct UserIpShard {
     active_ips: HashMap<String, HashMap<IpAddr, usize>>,
     recent_ips: HashMap<String, HashMap<IpAddr, Instant>>,
+    incarnations: HashMap<String, UserIncarnation>,
 }
 
 #[derive(Debug, Default)]
 struct CleanupShard {
-    queue: Mutex<HashMap<String, HashMap<IpAddr, usize>>>,
+    queue: Mutex<HashMap<(String, UserIncarnation), HashMap<IpAddr, usize>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -194,19 +196,19 @@ impl UserIpTracker {
     }
 
     pub(super) fn pop_one_cleanup(
-        queue: &mut HashMap<String, HashMap<IpAddr, usize>>,
-    ) -> Option<(String, IpAddr, usize)> {
-        let user = queue.keys().next().cloned()?;
-        let ip = queue.get(&user)?.keys().next().copied()?;
-        let count = queue.get_mut(&user)?.remove(&ip)?;
+        queue: &mut HashMap<(String, UserIncarnation), HashMap<IpAddr, usize>>,
+    ) -> Option<(String, UserIncarnation, IpAddr, usize)> {
+        let owner = queue.keys().next().cloned()?;
+        let ip = queue.get(&owner)?.keys().next().copied()?;
+        let count = queue.get_mut(&owner)?.remove(&ip)?;
         let remove_user = queue
-            .get(&user)
+            .get(&owner)
             .map(|user_queue| user_queue.is_empty())
             .unwrap_or(false);
         if remove_user {
-            queue.remove(&user);
+            queue.remove(&owner);
         }
-        Some((user, ip, count))
+        Some((owner.0, owner.1, ip, count))
     }
 
     #[cfg(test)]

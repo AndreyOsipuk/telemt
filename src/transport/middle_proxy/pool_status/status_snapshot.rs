@@ -3,12 +3,13 @@ use super::*;
 impl MePool {
     pub(crate) async fn admission_ready_conditional_cast(&self) -> bool {
         let mut endpoints_by_dc = BTreeMap::<i16, BTreeSet<SocketAddr>>::new();
+        let endpoint_snapshot = self.endpoint_snapshot.load_full();
         if self.decision.ipv4_me {
-            let map = self.proxy_map_v4.read().await.clone();
+            let map = endpoint_snapshot.map_v4.clone();
             extend_signed_endpoints(&mut endpoints_by_dc, map);
         }
         if self.decision.ipv6_me {
-            let map = self.proxy_map_v6.read().await.clone();
+            let map = endpoint_snapshot.map_v6.clone();
             extend_signed_endpoints(&mut endpoints_by_dc, map);
         }
 
@@ -45,12 +46,13 @@ impl MePool {
     #[allow(dead_code)]
     pub(crate) async fn admission_ready_full_floor(&self) -> bool {
         let mut endpoints_by_dc = BTreeMap::<i16, BTreeSet<SocketAddr>>::new();
+        let endpoint_snapshot = self.endpoint_snapshot.load_full();
         if self.decision.ipv4_me {
-            let map = self.proxy_map_v4.read().await.clone();
+            let map = endpoint_snapshot.map_v4.clone();
             extend_signed_endpoints(&mut endpoints_by_dc, map);
         }
         if self.decision.ipv6_me {
-            let map = self.proxy_map_v6.read().await.clone();
+            let map = endpoint_snapshot.map_v6.clone();
             extend_signed_endpoints(&mut endpoints_by_dc, map);
         }
 
@@ -106,12 +108,13 @@ impl MePool {
             .load(Ordering::Relaxed);
 
         let mut endpoints_by_dc = BTreeMap::<i16, BTreeSet<SocketAddr>>::new();
+        let endpoint_snapshot = self.endpoint_snapshot.load_full();
         if self.decision.ipv4_me {
-            let map = self.proxy_map_v4.read().await.clone();
+            let map = endpoint_snapshot.map_v4.clone();
             extend_signed_endpoints(&mut endpoints_by_dc, map);
         }
         if self.decision.ipv6_me {
-            let map = self.proxy_map_v6.read().await.clone();
+            let map = endpoint_snapshot.map_v6.clone();
             extend_signed_endpoints(&mut endpoints_by_dc, map);
         }
 

@@ -118,7 +118,8 @@ impl MePool {
         self: &Arc<Self>,
         rng: &SecureRandom,
     ) -> bool {
-        let desired_by_dc = self.desired_dc_endpoints().await;
+        let endpoint_snapshot = self.endpoint_snapshot.load_full();
+        let desired_by_dc = self.desired_dc_endpoints_from_snapshot(&endpoint_snapshot);
         let now_epoch_secs = Self::now_epoch_secs();
         let v4_suppressed = self.is_family_temporarily_suppressed(IpFamily::V4, now_epoch_secs);
         let v6_suppressed = self.is_family_temporarily_suppressed(IpFamily::V6, now_epoch_secs);
@@ -137,7 +138,18 @@ impl MePool {
 
         let desired_map_hash = Self::desired_map_hash(&desired_by_dc);
         let hardswap = self.reinit.hardswap.load(Ordering::Relaxed);
-        let reservation = self.reserve_reinit_attempt(hardswap, desired_map_hash, now_epoch_secs);
+        let Some(reservation) = self.reserve_reinit_attempt(
+            hardswap,
+            desired_map_hash,
+            endpoint_snapshot.revision,
+            now_epoch_secs,
+        ) else {
+            debug!(
+                endpoint_revision = endpoint_snapshot.revision,
+                "ME reinit snapshot superseded before reservation"
+            );
+            return false;
+        };
         let attempt = reservation.attempt;
         let previous_generation = attempt.previous_generation;
         let generation = attempt.generation;

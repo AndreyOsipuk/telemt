@@ -75,6 +75,7 @@ fn test_runtime_with_dc(
         carriers: Arc::from([carrier]),
         carrier_negotiation_deadlines_secs: [3, 5, 8, 12],
         capability: [7; 32],
+        credential_id: [0; 16],
         key_fingerprint: "0000000000000000".to_string(),
         max_sessions: 4,
         max_streams: 16,
@@ -134,6 +135,7 @@ fn test_runtime_with_dc(
         false,
         limits,
         timeouts,
+        None,
     );
     TestRuntime {
         session,

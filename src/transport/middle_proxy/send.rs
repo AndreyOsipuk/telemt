@@ -348,8 +348,10 @@ impl MePool {
                                 for _ in
                                     0..self.route_runtime.me_route_inline_recovery_attempts.max(1)
                                 {
-                                    let preferred = self.preferred_endpoints_by_dc.load_full();
-                                    for (dc, addrs) in preferred.iter() {
+                                    let endpoint_snapshot = self.endpoint_snapshot.load_full();
+                                    for (dc, addrs) in
+                                        &endpoint_snapshot.preferred_endpoints_by_dc
+                                    {
                                         for addr in addrs {
                                             let _ = self
                                                 .connect_one_for_dc(*addr, *dc, self.rng.as_ref())
@@ -470,8 +472,9 @@ impl MePool {
                         }
                         emergency_attempts += 1;
                         let mut endpoints = self
-                            .preferred_endpoints_by_dc
+                            .endpoint_snapshot
                             .load()
+                            .preferred_endpoints_by_dc
                             .get(&routed_dc)
                             .cloned()
                             .unwrap_or_default();

@@ -88,7 +88,8 @@ impl MePool {
 
     pub(super) async fn trigger_async_recovery_global(self: &Arc<Self>) {
         self.stats.increment_me_async_recovery_trigger_total();
-        let preferred = self.preferred_endpoints_by_dc.load();
+        let endpoint_snapshot = self.endpoint_snapshot.load();
+        let preferred = &endpoint_snapshot.preferred_endpoints_by_dc;
         let mut triggered = 0usize;
         for (dc, addrs) in preferred.iter() {
             for addr in addrs {

@@ -31,48 +31,35 @@ impl MePool {
             return SnapshotApplyOutcome::RejectedEmpty;
         }
 
-        let mut changed = false;
-        {
-            let mut guard = self.proxy_map_v4.write().await;
-            if !new_v4.is_empty() && *guard != new_v4 {
-                *guard = new_v4;
-                changed = true;
+        let changed = {
+            // Endpoint publication and reinit commit share this barrier.
+            let mut coordinator = self.reinit.coordinator.lock();
+            let current = self.endpoint_snapshot.load_full();
+            let map_v4 = if new_v4.is_empty() {
+                current.map_v4.clone()
+            } else {
+                new_v4
+            };
+            let map_v6 = match new_v6 {
+                Some(map) if !map.is_empty() => map,
+                _ => current.map_v6.clone(),
+            };
+            let candidate = Self::build_endpoint_snapshot(
+                &self.decision,
+                map_v4,
+                map_v6,
+                current.revision.saturating_add(1),
+            );
+            if candidate.map_v4 == current.map_v4 && candidate.map_v6 == current.map_v6 {
+                false
+            } else {
+                coordinator.endpoint_revision = candidate.revision;
+                self.endpoint_snapshot.store(Arc::new(candidate));
+                true
             }
-        }
-        if let Some(v6) = new_v6 {
-            let mut guard = self.proxy_map_v6.write().await;
-            if !v6.is_empty() && *guard != v6 {
-                *guard = v6;
-                changed = true;
-            }
-        }
-        // Ensure negative DC entries mirror positives when absent (Telegram convention).
-        {
-            let mut guard = self.proxy_map_v4.write().await;
-            let keys: Vec<i32> = guard.keys().cloned().collect();
-            for k in keys.iter().cloned().filter(|k| *k > 0) {
-                if !guard.contains_key(&-k)
-                    && let Some(addrs) = guard.get(&k).cloned()
-                {
-                    guard.insert(-k, addrs);
-                    changed = true;
-                }
-            }
-        }
-        {
-            let mut guard = self.proxy_map_v6.write().await;
-            let keys: Vec<i32> = guard.keys().cloned().collect();
-            for k in keys.iter().cloned().filter(|k| *k > 0) {
-                if !guard.contains_key(&-k)
-                    && let Some(addrs) = guard.get(&k).cloned()
-                {
-                    guard.insert(-k, addrs);
-                    changed = true;
-                }
-            }
-        }
+        };
         if changed {
-            self.rebuild_endpoint_dc_map().await;
+            self.prune_endpoint_runtime_state().await;
             self.notify_writer_epoch();
         }
         if changed {

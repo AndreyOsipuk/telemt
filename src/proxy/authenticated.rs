@@ -14,6 +14,7 @@ use crate::proxy::handshake::HandshakeSuccess;
 use crate::proxy::middle_relay::{handle_via_middle_proxy, handle_via_middle_proxy_with_conntrack};
 use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
 use crate::proxy::shared_state::{ConntrackClosePolicy, ProxySharedState};
+use crate::proxy::user_admission::UserIncarnation;
 use crate::stats::Stats;
 use crate::stream::{BufferPool, CryptoReader, CryptoWriter};
 use crate::transport::UpstreamManager;
@@ -59,13 +60,21 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let user = success.user.clone();
-    if !deps.shared.is_user_enabled(&user) {
+    let Some(credential_id) = deps.config.runtime_user_credential_id(&user) else {
+        warn!(user = %user, "Authenticated user is absent from the runtime credential snapshot");
+        return Err(ProxyError::UserDisabled { user });
+    };
+    let Some(user_incarnation) = deps
+        .shared
+        .authenticated_user_incarnation(&user, credential_id)
+    else {
         warn!(user = %user, "Disabled user rejected");
         return Err(ProxyError::UserDisabled { user });
-    }
+    };
 
-    let user_reservation = acquire_user_connection_reservation(
+    let user_reservation = acquire_user_connection_reservation_for_incarnation(
         &user,
+        user_incarnation,
         &deps.config,
         Arc::clone(&deps.stats),
         peer_addr,
@@ -79,11 +88,20 @@ where
 
     let route_snapshot = deps.route_runtime.snapshot();
     let session_id = deps.rng.u64();
-    let Some(user_session) = deps.shared.register_user_session(&user, session_id) else {
+    let Some(user_session) = deps
+        .shared
+        .register_authenticated_user_session(&user, credential_id)
+    else {
         user_reservation.release_deferred();
         warn!(user = %user, "Disabled user rejected during final admission");
         return Err(ProxyError::UserDisabled { user });
     };
+    if user_session.incarnation() != user_incarnation {
+        drop(user_session);
+        user_reservation.release_deferred();
+        warn!(user = %user, "User incarnation changed during admission");
+        return Err(ProxyError::UserDisabled { user });
+    }
     let session_cancel = user_session.token();
     let selected_me_pool = if deps.config.general.use_middle_proxy
         && matches!(route_snapshot.mode, RelayRouteMode::Middle)
@@ -216,6 +234,7 @@ pub(crate) struct UserConnectionReservation {
     ip_tracker: Arc<UserIpTracker>,
     user: String,
     ip: IpAddr,
+    incarnation: UserIncarnation,
     tracks_ip: bool,
     active: bool,
 }
@@ -229,11 +248,24 @@ impl UserConnectionReservation {
         ip: IpAddr,
         tracks_ip: bool,
     ) -> Self {
+        Self::new_for_incarnation(stats, ip_tracker, user, ip, 0, tracks_ip)
+    }
+
+    /// Creates a reservation fenced to one authenticated user incarnation.
+    pub(crate) fn new_for_incarnation(
+        stats: Arc<Stats>,
+        ip_tracker: Arc<UserIpTracker>,
+        user: String,
+        ip: IpAddr,
+        incarnation: UserIncarnation,
+        tracks_ip: bool,
+    ) -> Self {
         Self {
             stats,
             ip_tracker,
             user,
             ip,
+            incarnation,
             tracks_ip,
             active: true,
         }
@@ -246,7 +278,9 @@ impl UserConnectionReservation {
         }
         self.active = false;
         if self.tracks_ip {
-            self.ip_tracker.remove_ip(&self.user, self.ip).await;
+            self.ip_tracker
+                .remove_ip_for_incarnation(&self.user, self.incarnation, self.ip)
+                .await;
         }
         self.stats.decrement_user_curr_connects(&self.user);
     }
@@ -259,7 +293,11 @@ impl UserConnectionReservation {
         self.active = false;
         self.stats.decrement_user_curr_connects(&self.user);
         if self.tracks_ip {
-            self.ip_tracker.enqueue_cleanup(self.user.clone(), self.ip);
+            self.ip_tracker.enqueue_cleanup_for_incarnation(
+                self.user.clone(),
+                self.incarnation,
+                self.ip,
+            );
         }
     }
 }
@@ -273,7 +311,11 @@ impl Drop for UserConnectionReservation {
         self.stats.increment_session_drop_fallback_total();
         self.stats.decrement_user_curr_connects(&self.user);
         if self.tracks_ip {
-            self.ip_tracker.enqueue_cleanup(self.user.clone(), self.ip);
+            self.ip_tracker.enqueue_cleanup_for_incarnation(
+                self.user.clone(),
+                self.incarnation,
+                self.ip,
+            );
         }
     }
 }
@@ -281,6 +323,25 @@ impl Drop for UserConnectionReservation {
 /// Applies user quota, connection, and source-IP admission atomically.
 pub(crate) async fn acquire_user_connection_reservation(
     user: &str,
+    config: &ProxyConfig,
+    stats: Arc<Stats>,
+    peer_addr: SocketAddr,
+    ip_tracker: Arc<UserIpTracker>,
+) -> Result<UserConnectionReservation> {
+    acquire_user_connection_reservation_for_incarnation(
+        user,
+        0,
+        config,
+        stats,
+        peer_addr,
+        ip_tracker,
+    )
+    .await
+}
+
+async fn acquire_user_connection_reservation_for_incarnation(
+    user: &str,
+    incarnation: UserIncarnation,
     config: &ProxyConfig,
     stats: Arc<Stats>,
     peer_addr: SocketAddr,
@@ -316,7 +377,10 @@ pub(crate) async fn acquire_user_connection_reservation(
         });
     }
 
-    if let Err(reason) = ip_tracker.check_and_add(user, peer_addr.ip()).await {
+    if let Err(reason) = ip_tracker
+        .check_and_add_for_incarnation(user, incarnation, peer_addr.ip())
+        .await
+    {
         stats.decrement_user_curr_connects(user);
         warn!(
             user = %user,
@@ -329,11 +393,12 @@ pub(crate) async fn acquire_user_connection_reservation(
         });
     }
 
-    Ok(UserConnectionReservation::new(
+    Ok(UserConnectionReservation::new_for_incarnation(
         stats,
         ip_tracker,
         user.to_string(),
         peer_addr.ip(),
+        incarnation,
         true,
     ))
 }

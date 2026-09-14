@@ -154,13 +154,11 @@ async fn insert_writer(
     };
 
     pool.writers.write().await.push(writer);
-    {
-        let mut map = pool.proxy_map_v4.write().await;
-        map.entry(writer_dc)
-            .or_insert_with(Vec::new)
-            .push((addr.ip(), addr.port()));
-    }
-    pool.rebuild_endpoint_dc_map().await;
+    let mut map = pool.endpoint_snapshot.load().map_v4.clone();
+    map.entry(writer_dc)
+        .or_insert_with(Vec::new)
+        .push((addr.ip(), addr.port()));
+    pool.update_proxy_maps(map, None).await;
     if register_in_registry {
         pool.registry
             .register_writer(writer_id, tx, byte_budget)
@@ -241,11 +239,7 @@ async fn send_proxy_req_uses_live_same_dc_writer_while_preferred_endpoint_refill
 
     assert!(pool.admission_ready_conditional_cast().await);
     assert_eq!(
-        pool.preferred_endpoints_by_dc
-            .load()
-            .get(&2)
-            .cloned()
-            .unwrap_or_default(),
+        pool.preferred_endpoints_for_dc(2).await,
         vec![new_addr]
     );
 

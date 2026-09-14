@@ -9,6 +9,7 @@ use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::crypto::sha256;
 use crate::error::{ProxyError, Result};
 
 use super::defaults::*;
@@ -228,6 +229,25 @@ impl ProxyConfig {
 
     pub(crate) fn runtime_user_auth(&self) -> Option<&UserAuthSnapshot> {
         self.runtime_user_auth.as_deref()
+    }
+
+    /// Returns the credential identity frozen into this runtime snapshot.
+    pub(crate) fn runtime_user_credential_id(&self, user: &str) -> Option<[u8; 16]> {
+        self.runtime_user_auth()
+            .and_then(|snapshot| snapshot.credential_id_by_name(user))
+            .or_else(|| {
+                self.access
+                    .users
+                    .get(user)
+                    .and_then(|secret| hex::decode(secret).ok())
+                    .and_then(|secret| <[u8; 16]>::try_from(secret).ok())
+                    .map(|secret| {
+                        let digest = sha256(&secret);
+                        let mut credential_id = [0; 16];
+                        credential_id.copy_from_slice(&digest[..16]);
+                        credential_id
+                    })
+            })
     }
 
     /// Validates cross-field configuration invariants after deserialization.

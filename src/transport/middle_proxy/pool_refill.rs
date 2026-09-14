@@ -70,9 +70,9 @@ impl Drop for RefillRunGuard {
 impl MePool {
     pub(super) async fn sweep_endpoint_quarantine(&self) {
         let configured = self
+            .endpoint_snapshot
+            .load()
             .endpoint_dc_map
-            .read()
-            .await
             .keys()
             .copied()
             .collect::<HashSet<SocketAddr>>();
@@ -266,9 +266,10 @@ impl MePool {
         if !self.family_enabled_for_drain_coverage(target.family, now_epoch_secs) {
             return Vec::new();
         }
+        let snapshot = self.endpoint_snapshot.load();
         let map = match target.family {
-            IpFamily::V4 => self.proxy_map_v4.read().await,
-            IpFamily::V6 => self.proxy_map_v6.read().await,
+            IpFamily::V4 => &snapshot.map_v4,
+            IpFamily::V6 => &snapshot.map_v6,
         };
         let mut endpoints = map
             .get(&target.dc)
@@ -294,8 +295,9 @@ impl MePool {
         };
         role_is_authoritative
             && self
-                .preferred_endpoints_by_dc
+                .endpoint_snapshot
                 .load()
+                .preferred_endpoints_by_dc
                 .get(&target.dc)
                 .is_some_and(|endpoints| {
                     endpoints.iter().any(|endpoint| match target.family {

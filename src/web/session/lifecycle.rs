@@ -25,6 +25,8 @@ pub(crate) enum SessionCloseReason {
     WebSocketEnded,
     /// An authenticated control-plane request selected this session.
     ApiClose,
+    /// Process user authority revoked or replaced the authenticated credential.
+    UserDisabled,
     /// A graceful operator drain reached its force-close deadline.
     OperatorForce,
     /// Terminal process shutdown closed all remaining sessions.
@@ -33,7 +35,7 @@ pub(crate) enum SessionCloseReason {
 
 impl SessionCloseReason {
     /// Complete fixed reason set in stable API and metric order.
-    pub(crate) const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 12] = [
         Self::ClientDelete,
         Self::BridgeRecovery,
         Self::PeerIdle,
@@ -43,6 +45,7 @@ impl SessionCloseReason {
         Self::Backpressure,
         Self::WebSocketEnded,
         Self::ApiClose,
+        Self::UserDisabled,
         Self::OperatorForce,
         Self::RuntimeShutdown,
     ];
@@ -59,6 +62,7 @@ impl SessionCloseReason {
             Self::Backpressure => "backpressure",
             Self::WebSocketEnded => "websocket_ended",
             Self::ApiClose => "api_close",
+            Self::UserDisabled => "user_disabled",
             Self::OperatorForce => "operator_force",
             Self::RuntimeShutdown => "runtime_shutdown",
         }
@@ -217,6 +221,20 @@ impl WebSession {
 
     /// Atomically closes a session only when reconnect grace is still due.
     pub(crate) fn close_if_due(&self, now: Instant) -> bool {
+        if self.cancel.is_cancelled() {
+            let released = {
+                let mut state = self.state.lock();
+                if state.closed || state.close_requested.is_some() {
+                    None
+                } else {
+                    Some(self.release_on_close_locked(&mut state, SessionCloseReason::UserDisabled))
+                }
+            };
+            if let Some(released) = released {
+                self.finish_close(released);
+                return true;
+            }
+        }
         let healthy = {
             let mut state = self.state.lock();
             self.carrier_health_ready_locked(&mut state, now)

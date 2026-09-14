@@ -120,9 +120,12 @@ impl MePool {
         me_route_inline_recovery_wait_ms: u64,
         me_connection_cleanup_capacity: usize,
     ) -> Arc<Self> {
-        let endpoint_dc_map = Self::build_endpoint_dc_map_from_maps(&proxy_map_v4, &proxy_map_v6);
-        let preferred_endpoints_by_dc =
-            Self::build_preferred_endpoints_by_dc(&decision, &proxy_map_v4, &proxy_map_v6);
+        let endpoint_snapshot = Self::build_endpoint_snapshot(
+            &decision,
+            proxy_map_v4,
+            proxy_map_v6,
+            1,
+        );
         let registry = Arc::new(ConnRegistry::with_route_and_cleanup_capacity(
             me_route_channel_capacity,
             me_connection_cleanup_capacity,
@@ -149,7 +152,7 @@ impl MePool {
                 writers: Arc::new(WritersState::new()),
                 rr: AtomicU64::new(0),
                 writer_epoch,
-                preferred_endpoints_by_dc: ArcSwap::from_pointee(preferred_endpoints_by_dc),
+                endpoint_snapshot: ArcSwap::from_pointee(endpoint_snapshot),
             }),
             reinit: Arc::new(ReinitCore {
                 generation: AtomicU64::new(1),
@@ -164,6 +167,7 @@ impl MePool {
                     next_attempt_id: 1,
                     active_generation: 1,
                     desired_map_hash: 0,
+                    endpoint_revision: 1,
                     pending: None,
                     attempts: HashMap::new(),
                 }),
@@ -391,9 +395,6 @@ impl MePool {
             })),
             stats,
             pool_size: 2,
-            proxy_map_v4: Arc::new(RwLock::new(proxy_map_v4)),
-            proxy_map_v6: Arc::new(RwLock::new(proxy_map_v6)),
-            endpoint_dc_map: Arc::new(RwLock::new(endpoint_dc_map)),
             default_dc: AtomicI32::new(default_dc.unwrap_or(2)),
             next_writer_id: AtomicU64::new(1),
             writer_connect_active_reserved: AtomicUsize::new(0),

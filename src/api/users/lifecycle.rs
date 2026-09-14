@@ -31,6 +31,10 @@ pub(in crate::api) async fn rotate_secret(
         .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {}", e)))?;
     let revision =
         save_access_sections_to_disk(&shared.config_path, &cfg, &[AccessSection::Users]).await?;
+    shared
+        .proxy_shared
+        .stage_user(user, &secret, cfg.access.is_user_enabled(user))
+        .ok_or_else(|| ApiFailure::internal("failed to stage rotated user credential"))?;
     drop(_guard);
 
     let (detected_ip_v4, detected_ip_v6) = shared.detected_link_ips();
@@ -109,6 +113,7 @@ pub(in crate::api) async fn delete_user(
         .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {}", e)))?;
     let revision =
         save_access_sections_to_disk(&shared.config_path, &cfg, &touched_sections).await?;
+    let deleted_incarnation = shared.proxy_shared.delete_user(user).incarnation;
     let configured_users = cfg.access.users.keys().cloned().collect();
     if let Err(error) = shared
         .quota_state
@@ -121,9 +126,12 @@ pub(in crate::api) async fn delete_user(
             "Deleted user quota checkpoint cleanup will be reconciled on restart"
         );
     }
-    drop(_guard);
     shared.ip_tracker.remove_user_limit(user).await;
-    shared.ip_tracker.clear_user_ips(user).await;
+    shared
+        .ip_tracker
+        .clear_user_ips_if_not_newer(user, deleted_incarnation)
+        .await;
+    drop(_guard);
 
     Ok((user.to_string(), revision))
 }

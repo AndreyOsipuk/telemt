@@ -6,14 +6,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use dashmap::DashMap;
-use parking_lot::Mutex as ParkingMutex;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
-use tokio_util::sync::CancellationToken;
 
 use crate::proxy::direct_buffer_budget::{DirectBufferBudget, fallback_direct_buffer_hard_limit};
 use crate::proxy::handshake::{AuthProbeSaturationState, AuthProbeState};
 use crate::proxy::middle_relay::{DesyncDedupRotationState, RelayIdleCandidateRegistry};
 use crate::proxy::traffic_limiter::TrafficLimiter;
+use crate::proxy::user_admission::{
+    UserAdmissionAuthority, UserAdmissionPublication, UserCredentialId, UserIncarnation,
+    UserMutationResult, UserSessionRegistration,
+};
 
 const HANDSHAKE_RECENT_USER_RING_LEN: usize = 64;
 const MASKING_FALLBACK_MAX_CONCURRENT: usize = 512;
@@ -76,55 +78,15 @@ pub(crate) struct MiddleRelaySharedState {
     pub(crate) relay_idle_mark_seq: AtomicU64,
 }
 
-#[derive(Default)]
-struct UserAdmissionState {
-    disabled_users: HashSet<String>,
-    sessions_by_user: HashMap<String, HashMap<u64, CancellationToken>>,
-}
-
 pub(crate) struct ProxySharedState {
     pub(crate) handshake: HandshakeSharedState,
     pub(crate) middle_relay: MiddleRelaySharedState,
     pub(crate) traffic_limiter: Arc<TrafficLimiter>,
     pub(crate) direct_buffer_budget: Arc<DirectBufferBudget>,
-    user_admission: ParkingMutex<UserAdmissionState>,
+    user_admission: Arc<UserAdmissionAuthority>,
     pub(crate) conntrack_pressure_active: AtomicBool,
     pub(crate) conntrack_close_tx: Mutex<Option<mpsc::Sender<ConntrackCloseEvent>>>,
     masking_fallback_permits: Arc<Semaphore>,
-}
-
-#[must_use = "registered user sessions must be kept alive until relay completion"]
-pub(crate) struct UserSessionRegistration {
-    token: CancellationToken,
-    _guard: UserSessionGuard,
-}
-
-impl UserSessionRegistration {
-    pub(crate) fn token(&self) -> CancellationToken {
-        self.token.clone()
-    }
-}
-
-struct UserSessionGuard {
-    shared: Arc<ProxySharedState>,
-    key: (String, u64),
-}
-
-impl Drop for UserSessionGuard {
-    fn drop(&mut self) {
-        let mut admission = self.shared.user_admission.lock();
-        let remove_user = admission
-            .sessions_by_user
-            .get_mut(&self.key.0)
-            .map(|sessions| {
-                sessions.remove(&self.key.1);
-                sessions.is_empty()
-            })
-            .unwrap_or(false);
-        if remove_user {
-            admission.sessions_by_user.remove(&self.key.0);
-        }
-    }
 }
 
 impl ProxySharedState {
@@ -137,6 +99,17 @@ impl ProxySharedState {
     /// Creates process state with the startup-resolved Direct buffer envelope.
     pub(crate) fn new_with_direct_buffer_budget(
         direct_buffer_budget: Arc<DirectBufferBudget>,
+    ) -> Arc<Self> {
+        Self::new_with_direct_buffer_budget_and_user_admission(
+            direct_buffer_budget,
+            UserAdmissionAuthority::new(),
+        )
+    }
+
+    /// Creates generation state around one process-owned user authority.
+    pub(crate) fn new_with_direct_buffer_budget_and_user_admission(
+        direct_buffer_budget: Arc<DirectBufferBudget>,
+        user_admission: Arc<UserAdmissionAuthority>,
     ) -> Arc<Self> {
         Arc::new(Self {
             handshake: HandshakeSharedState {
@@ -167,7 +140,7 @@ impl ProxySharedState {
             },
             traffic_limiter: TrafficLimiter::new(),
             direct_buffer_budget,
-            user_admission: ParkingMutex::new(UserAdmissionState::default()),
+            user_admission,
             conntrack_pressure_active: AtomicBool::new(false),
             conntrack_close_tx: Mutex::new(None),
             masking_fallback_permits: Arc::new(Semaphore::new(MASKING_FALLBACK_MAX_CONCURRENT)),
@@ -183,106 +156,91 @@ impl ProxySharedState {
     }
 
     pub(crate) fn is_user_enabled(&self, user: &str) -> bool {
-        !self.user_admission.lock().disabled_users.contains(user)
+        self.user_admission.is_user_enabled(user)
     }
 
-    pub(crate) fn set_user_enabled(&self, user: &str, enabled: bool) -> (bool, usize) {
-        let (newly_disabled, tokens) = {
-            let mut admission = self.user_admission.lock();
-            if enabled {
-                admission.disabled_users.remove(user);
-                (false, Vec::new())
-            } else {
-                let newly_disabled = admission.disabled_users.insert(user.to_string());
-                let tokens = admission
-                    .sessions_by_user
-                    .get(user)
-                    .map(|sessions| sessions.values().cloned().collect())
-                    .unwrap_or_default();
-                (newly_disabled, tokens)
-            }
-        };
-        for token in &tokens {
-            token.cancel();
-        }
-        (newly_disabled, tokens.len())
+    /// Returns the process authority shared by every runtime generation.
+    pub(crate) fn user_admission(&self) -> Arc<UserAdmissionAuthority> {
+        Arc::clone(&self.user_admission)
     }
 
-    pub(crate) fn apply_user_enabled_config(
+    /// Reconciles the complete user authentication policy from configuration.
+    pub(crate) fn apply_user_config(
         &self,
+        users: &HashMap<String, String>,
         user_enabled: &HashMap<String, bool>,
     ) -> Vec<(String, usize)> {
-        let desired_disabled = user_enabled
-            .iter()
-            .filter_map(|(user, enabled)| (!*enabled).then_some(user.clone()))
-            .collect::<HashSet<_>>();
-        let cancellations = {
-            let mut admission = self.user_admission.lock();
-            let newly_disabled = desired_disabled
-                .difference(&admission.disabled_users)
-                .cloned()
-                .collect::<Vec<_>>();
-            admission.disabled_users = desired_disabled;
-            newly_disabled
-                .into_iter()
-                .map(|user| {
-                    let tokens = admission
-                        .sessions_by_user
-                        .get(&user)
-                        .map(|sessions| sessions.values().cloned().collect())
-                        .unwrap_or_default();
-                    (user, tokens)
-                })
-                .collect::<Vec<(String, Vec<CancellationToken>)>>()
-        };
-        cancellations
-            .into_iter()
-            .map(|(user, tokens)| {
-                for token in &tokens {
-                    token.cancel();
-                }
-                (user, tokens.len())
-            })
-            .collect()
+        self.user_admission.apply_config(users, user_enabled)
+    }
+
+    /// Applies a candidate user policy only when its captured epoch is current.
+    pub(crate) fn apply_user_config_if_epoch(
+        &self,
+        expected_epoch: u64,
+        users: &HashMap<String, String>,
+        user_enabled: &HashMap<String, bool>,
+    ) -> Option<Vec<(String, usize)>> {
+        self.user_admission
+            .apply_config_if_epoch(expected_epoch, users, user_enabled)
+    }
+
+    /// Applies one persisted user mutation before asynchronous config reload.
+    pub(crate) fn stage_user(
+        &self,
+        user: &str,
+        secret: &str,
+        enabled: bool,
+    ) -> Option<UserMutationResult> {
+        self.user_admission.stage_user(user, secret, enabled)
+    }
+
+    /// Installs a deletion tombstone and cancels every current owner.
+    pub(crate) fn delete_user(&self, user: &str) -> UserMutationResult {
+        self.user_admission.delete_user(user)
+    }
+
+    /// Returns the current incarnation for an exact authenticated credential.
+    pub(crate) fn authenticated_user_incarnation(
+        &self,
+        user: &str,
+        credential_id: UserCredentialId,
+    ) -> Option<UserIncarnation> {
+        self.user_admission
+            .authenticated_incarnation(user, credential_id)
+    }
+
+    /// Starts an atomic publication boundary for an authenticated owner.
+    pub(crate) fn claim_authenticated_user(
+        self: &Arc<Self>,
+        user: &str,
+        credential_id: UserCredentialId,
+    ) -> Option<UserAdmissionPublication<'_>> {
+        self.user_admission
+            .claim_authenticated(user, credential_id)
     }
 
     pub(crate) fn register_user_session(
         self: &Arc<Self>,
         user: &str,
-        session_id: u64,
+        _session_id: u64,
     ) -> Option<UserSessionRegistration> {
-        let token = CancellationToken::new();
-        let key = (user.to_string(), session_id);
-        let mut admission = self.user_admission.lock();
-        if admission.disabled_users.contains(user) {
-            return None;
-        }
-        admission
-            .sessions_by_user
-            .entry(key.0.clone())
-            .or_default()
-            .insert(session_id, token.clone());
-        Some(UserSessionRegistration {
-            token,
-            _guard: UserSessionGuard {
-                shared: Arc::clone(self),
-                key,
-            },
-        })
+        self.user_admission.register_legacy(user)
+    }
+
+    /// Registers a relay session against the exact credential that authenticated it.
+    pub(crate) fn register_authenticated_user_session(
+        self: &Arc<Self>,
+        user: &str,
+        credential_id: UserCredentialId,
+    ) -> Option<UserSessionRegistration> {
+        let mut publication = self.claim_authenticated_user(user, credential_id)?;
+        let registration = publication.take_registration()?;
+        publication.commit();
+        Some(registration)
     }
 
     pub(crate) fn cancel_user_sessions(&self, user: &str) -> usize {
-        let tokens: Vec<CancellationToken> = self
-            .user_admission
-            .lock()
-            .sessions_by_user
-            .get(user)
-            .map(|sessions| sessions.values().cloned().collect())
-            .unwrap_or_default();
-        for token in &tokens {
-            token.cancel();
-        }
-        tokens.len()
+        self.user_admission.cancel_user_owners(user)
     }
 
     pub(crate) fn set_conntrack_close_sender(&self, tx: mpsc::Sender<ConntrackCloseEvent>) {
@@ -350,31 +308,53 @@ impl ProxySharedState {
 mod tests {
     use super::*;
 
+    const ALICE_SECRET: &str = "00112233445566778899aabbccddeeff";
+
+    fn configured_shared() -> Arc<ProxySharedState> {
+        let shared = ProxySharedState::new();
+        let users = HashMap::from([
+            ("alice".to_string(), ALICE_SECRET.to_string()),
+            (
+                "bob".to_string(),
+                "ffeeddccbbaa99887766554433221100".to_string(),
+            ),
+        ]);
+        shared.apply_user_config(&users, &HashMap::new());
+        shared
+    }
+
     #[test]
     fn user_enabled_config_sync_tracks_disabled_overrides() {
-        let shared = ProxySharedState::new();
+        let shared = configured_shared();
         assert!(shared.is_user_enabled("alice"));
 
+        let users = HashMap::from([
+            ("alice".to_string(), ALICE_SECRET.to_string()),
+            (
+                "bob".to_string(),
+                "ffeeddccbbaa99887766554433221100".to_string(),
+            ),
+        ]);
         let mut user_enabled = HashMap::new();
         user_enabled.insert("alice".to_string(), false);
         user_enabled.insert("bob".to_string(), true);
 
-        let mut newly_disabled = shared.apply_user_enabled_config(&user_enabled);
+        let mut newly_disabled = shared.apply_user_config(&users, &user_enabled);
         newly_disabled.sort();
         assert_eq!(newly_disabled, vec![("alice".to_string(), 0)]);
         assert!(!shared.is_user_enabled("alice"));
         assert!(shared.is_user_enabled("bob"));
 
-        assert!(shared.apply_user_enabled_config(&user_enabled).is_empty());
+        assert!(shared.apply_user_config(&users, &user_enabled).is_empty());
 
         user_enabled.clear();
-        assert!(shared.apply_user_enabled_config(&user_enabled).is_empty());
+        assert!(shared.apply_user_config(&users, &user_enabled).is_empty());
         assert!(shared.is_user_enabled("alice"));
     }
 
     #[test]
     fn cancel_user_sessions_cancels_only_registered_matching_user() {
-        let shared = ProxySharedState::new();
+        let shared = configured_shared();
         let alice_1 = shared.register_user_session("alice", 1).unwrap();
         let alice_2 = shared.register_user_session("alice", 2).unwrap();
         let bob = shared.register_user_session("bob", 1).unwrap();
@@ -392,9 +372,11 @@ mod tests {
 
     #[test]
     fn disabled_user_cannot_register_after_the_cancellation_snapshot() {
-        let shared = ProxySharedState::new();
+        let shared = configured_shared();
 
-        assert_eq!(shared.set_user_enabled("alice", false), (true, 0));
+        let result = shared.stage_user("alice", ALICE_SECRET, false).unwrap();
+        assert!(result.newly_disabled);
+        assert_eq!(result.cancelled, 0);
         assert_eq!(shared.cancel_user_sessions("alice"), 0);
 
         let late = shared.register_user_session("alice", 1);
@@ -406,15 +388,19 @@ mod tests {
 
     #[test]
     fn disabling_user_cancels_existing_sessions_before_return() {
-        let shared = ProxySharedState::new();
+        let shared = configured_shared();
         let registration = shared.register_user_session("alice", 1).unwrap();
         let token = registration.token();
 
-        assert_eq!(shared.set_user_enabled("alice", false), (true, 1));
+        let result = shared.stage_user("alice", ALICE_SECRET, false).unwrap();
+        assert!(result.newly_disabled);
+        assert_eq!(result.cancelled, 1);
         assert!(token.is_cancelled());
         assert!(shared.register_user_session("alice", 2).is_none());
 
-        assert_eq!(shared.set_user_enabled("alice", true), (false, 0));
+        let result = shared.stage_user("alice", ALICE_SECRET, true).unwrap();
+        assert!(!result.newly_disabled);
+        assert_eq!(result.cancelled, 0);
         assert!(shared.register_user_session("alice", 3).is_some());
     }
 
@@ -439,7 +425,8 @@ mod tests {
         for session_id in 0..ITERATIONS as u64 {
             let user = format!("user-{session_id}");
             barrier.wait();
-            shared.set_user_enabled(&user, false);
+            let secret = "00112233445566778899aabbccddeeff";
+            shared.stage_user(&user, secret, false).unwrap();
         }
 
         for registration in register.join().unwrap().into_iter().flatten() {

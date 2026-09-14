@@ -115,10 +115,12 @@ fn stale_concurrent_attempt_cannot_regress_active_generation() {
         next_attempt_id: 3,
         active_generation: 1,
         desired_map_hash: 22,
+        endpoint_revision: 7,
         pending: Some(ReinitPendingState {
             generation: 3,
             started_at_epoch_secs: 1,
             map_hash: 22,
+            endpoint_revision: 7,
         }),
         attempts: HashMap::from([
             (
@@ -126,6 +128,7 @@ fn stale_concurrent_attempt_cannot_regress_active_generation() {
                 ReinitAttemptState {
                     generation: 2,
                     map_hash: 11,
+                    endpoint_revision: 6,
                     hardswap: true,
                     committed: false,
                 },
@@ -135,6 +138,7 @@ fn stale_concurrent_attempt_cannot_regress_active_generation() {
                 ReinitAttemptState {
                     generation: 3,
                     map_hash: 22,
+                    endpoint_revision: 7,
                     hardswap: true,
                     committed: false,
                 },
@@ -142,9 +146,9 @@ fn stale_concurrent_attempt_cannot_regress_active_generation() {
         ]),
     };
 
-    assert!(commit_reinit_state(&mut state, 2, 3, 22, true));
+    assert!(commit_reinit_state(&mut state, 2, 3, 22, 7, true));
     assert_eq!(state.active_generation, 3);
-    assert!(!commit_reinit_state(&mut state, 1, 2, 11, true));
+    assert!(!commit_reinit_state(&mut state, 1, 2, 11, 6, true));
     assert_eq!(state.active_generation, 3);
     assert!(state.pending.is_none());
 }
@@ -173,7 +177,10 @@ async fn partial_hardswap_is_rejected_when_stale_binding_is_disabled() {
     )
     .await;
     let map_hash = MePool::desired_map_hash(&desired_by_dc);
-    let reservation = pool.reserve_reinit_attempt(true, map_hash, 100);
+    let endpoint_revision = pool.endpoint_snapshot.load().revision;
+    let reservation = pool
+        .reserve_reinit_attempt(true, map_hash, endpoint_revision, 100)
+        .expect("endpoint revision must remain current");
     insert_writer(
         &pool,
         201,
@@ -221,7 +228,10 @@ async fn partial_hardswap_preserves_fallback_only_for_missing_dc() {
     )
     .await;
     let map_hash = MePool::desired_map_hash(&desired_by_dc);
-    let reservation = pool.reserve_reinit_attempt(true, map_hash, 100);
+    let endpoint_revision = pool.endpoint_snapshot.load().revision;
+    let reservation = pool
+        .reserve_reinit_attempt(true, map_hash, endpoint_revision, 100)
+        .expect("endpoint revision must remain current");
     let fresh_dc1 = insert_writer(
         &pool,
         401,
@@ -274,7 +284,10 @@ async fn complete_hardswap_promotes_fresh_generation_and_retires_old_writers() {
     )
     .await;
     let map_hash = MePool::desired_map_hash(&desired_by_dc);
-    let reservation = pool.reserve_reinit_attempt(true, map_hash, 100);
+    let endpoint_revision = pool.endpoint_snapshot.load().revision;
+    let reservation = pool
+        .reserve_reinit_attempt(true, map_hash, endpoint_revision, 100)
+        .expect("endpoint revision must remain current");
     let fresh_dc1 = insert_writer(
         &pool,
         601,
@@ -315,14 +328,79 @@ async fn complete_hardswap_promotes_fresh_generation_and_retires_old_writers() {
 }
 
 #[tokio::test]
+async fn endpoint_revision_change_supersedes_hardswap_before_writer_drain() {
+    let pool = make_pool().await;
+    let old_endpoint = addr(1, 2001);
+    pool.update_proxy_maps(
+        HashMap::from([(1, vec![(old_endpoint.ip(), old_endpoint.port())])]),
+        None,
+    )
+    .await;
+    let active_generation = pool.current_generation();
+    let old_writer = insert_writer(
+        &pool,
+        651,
+        1,
+        old_endpoint,
+        active_generation,
+        WriterContour::Active,
+    )
+    .await;
+    let desired_by_dc = HashMap::from([(1, HashSet::from([old_endpoint]))]);
+    let map_hash = MePool::desired_map_hash(&desired_by_dc);
+    let endpoint_revision = pool.endpoint_snapshot.load().revision;
+    let reservation = pool
+        .reserve_reinit_attempt(true, map_hash, endpoint_revision, 100)
+        .expect("endpoint revision must remain current");
+    let fresh_writer = insert_writer(
+        &pool,
+        652,
+        1,
+        old_endpoint,
+        reservation.attempt.generation,
+        WriterContour::Warm,
+    )
+    .await;
+
+    let replacement_endpoint = addr(3, 2003);
+    pool.update_proxy_maps(
+        HashMap::from([(
+            1,
+            vec![(replacement_endpoint.ip(), replacement_endpoint.port())],
+        )]),
+        None,
+    )
+    .await;
+
+    let result = pool
+        .commit_reinit_attempt(&reservation.attempt, &desired_by_dc, 1.0)
+        .await;
+
+    assert!(matches!(result, Err(ReinitCommitFailure::Superseded)));
+    assert_eq!(pool.current_generation(), active_generation);
+    assert!(!old_writer.draining.load(Ordering::Acquire));
+    assert!(!fresh_writer.draining.load(Ordering::Acquire));
+    assert_eq!(
+        WriterContour::from_u8(fresh_writer.contour.load(Ordering::Acquire)),
+        WriterContour::Warm
+    );
+}
+
+#[tokio::test]
 async fn generation_role_reconciliation_promotes_active_warm_and_drains_orphans() {
     let pool = make_pool().await;
     let endpoint = addr(1, 2001);
-    pool.preferred_endpoints_by_dc
-        .store(Arc::new(HashMap::from([(1, vec![endpoint])])));
+    pool.update_proxy_maps(
+        HashMap::from([(1, vec![(endpoint.ip(), endpoint.port())])]),
+        None,
+    )
+    .await;
     let desired_by_dc = HashMap::from([(1, HashSet::from([endpoint]))]);
     let map_hash = MePool::desired_map_hash(&desired_by_dc);
-    let reservation = pool.reserve_reinit_attempt(true, map_hash, 100);
+    let endpoint_revision = pool.endpoint_snapshot.load().revision;
+    let reservation = pool
+        .reserve_reinit_attempt(true, map_hash, endpoint_revision, 100)
+        .expect("endpoint revision must remain current");
     let active_warm = insert_writer(
         &pool,
         701,

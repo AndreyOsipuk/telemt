@@ -63,6 +63,7 @@ pub(super) fn rebuild(config: &mut ProxyConfig) -> Result<()> {
                 host: vhost.host.clone(),
                 public_addr: vhost.public_addr,
                 user: profile.user.clone(),
+                credential_id: auth_entry.credential_id,
                 secret_mode: profile.secret_mode,
                 carrier: config.web.carrier,
                 carrier_negotiation_enabled: config.web.carrier_negotiation_enabled(),

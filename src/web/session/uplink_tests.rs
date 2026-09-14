@@ -22,6 +22,7 @@ fn session_with_automatic(automatic: bool) -> Arc<WebSession> {
         carriers: Arc::from([WebCarrier::Https]),
         carrier_negotiation_deadlines_secs: [3, 5, 8, 12],
         capability: [0; 32],
+        credential_id: [0; 16],
         key_fingerprint: "0000000000000000".to_string(),
         max_sessions: 1,
         max_streams: 1,
@@ -48,6 +49,7 @@ fn session_with_automatic(automatic: bool) -> Arc<WebSession> {
         false,
         WebLimitsConfig::default(),
         WebTimeoutsConfig::default(),
+        None,
     )
 }
 

@@ -3,12 +3,22 @@ use super::*;
 impl UserIpTracker {
     /// Queues a deferred active IP cleanup for a later async drain.
     pub fn enqueue_cleanup(&self, user: String, ip: IpAddr) {
+        self.enqueue_cleanup_for_incarnation(user, 0, ip);
+    }
+
+    /// Queues cleanup for the exact user incarnation that owns the reservation.
+    pub(crate) fn enqueue_cleanup_for_incarnation(
+        &self,
+        user: String,
+        incarnation: UserIncarnation,
+        ip: IpAddr,
+    ) {
         self.observe_cleanup_poison_for_tests();
         let shard_idx = Self::shard_idx(&user);
         let cleanup_shard = &self.cleanup_shards[shard_idx];
         match cleanup_shard.queue.lock() {
             Ok(mut queue) => {
-                let user_queue = queue.entry(user).or_default();
+                let user_queue = queue.entry((user, incarnation)).or_default();
                 let count = user_queue.entry(ip).or_insert(0);
                 if *count == 0 {
                     self.cleanup_queue_len.fetch_add(1, Ordering::Relaxed);
@@ -19,7 +29,7 @@ impl UserIpTracker {
             }
             Err(poisoned) => {
                 let mut queue = poisoned.into_inner();
-                let user_queue = queue.entry(user.clone()).or_default();
+                let user_queue = queue.entry((user.clone(), incarnation)).or_default();
                 let count = user_queue.entry(ip).or_insert(0);
                 if *count == 0 {
                     self.cleanup_queue_len.fetch_add(1, Ordering::Relaxed);
@@ -65,10 +75,10 @@ impl UserIpTracker {
         let shard_idx = Self::shard_idx(user);
         let cleanup_shard = &self.cleanup_shards[shard_idx];
         let to_remove = match cleanup_shard.queue.lock() {
-            Ok(mut queue) => queue.remove(user).unwrap_or_default(),
+            Ok(mut queue) => drain_user_cleanup(&mut queue, user),
             Err(poisoned) => {
                 let mut queue = poisoned.into_inner();
-                let drained = queue.remove(user).unwrap_or_default();
+                let drained = drain_user_cleanup(&mut queue, user);
                 cleanup_shard.queue.clear_poison();
                 drained
             }
@@ -76,14 +86,23 @@ impl UserIpTracker {
         if to_remove.is_empty() {
             return;
         }
+        let removed_queue_entries = to_remove
+            .iter()
+            .map(|(_, ips)| ips.len())
+            .sum::<usize>();
         self.cleanup_queue_len
-            .fetch_sub(to_remove.len() as u64, Ordering::Relaxed);
+            .fetch_sub(removed_queue_entries as u64, Ordering::Relaxed);
         let mut shard = self.shards[shard_idx].write().await;
         let mut removed_active_entries = 0usize;
-        for (ip, pending_count) in to_remove {
-            removed_active_entries = removed_active_entries.saturating_add(
-                Self::apply_active_cleanup(&mut shard.active_ips, user, ip, pending_count),
-            );
+        for (incarnation, ips) in to_remove {
+            if shard.incarnations.get(user).copied() != Some(incarnation) {
+                continue;
+            }
+            for (ip, pending_count) in ips {
+                removed_active_entries = removed_active_entries.saturating_add(
+                    Self::apply_active_cleanup(&mut shard.active_ips, user, ip, pending_count),
+                );
+            }
         }
         Self::decrement_counter(&self.active_entry_count, removed_active_entries);
     }
@@ -103,11 +122,13 @@ impl UserIpTracker {
                     let mut drained =
                         HashMap::with_capacity(queue.len().min(CLEANUP_DRAIN_BATCH_LIMIT));
                     for _ in 0..CLEANUP_DRAIN_BATCH_LIMIT {
-                        let Some((user, ip, count)) = Self::pop_one_cleanup(&mut queue) else {
+                        let Some((user, incarnation, ip, count)) =
+                            Self::pop_one_cleanup(&mut queue)
+                        else {
                             break;
                         };
                         self.cleanup_queue_len.fetch_sub(1, Ordering::Relaxed);
-                        drained.insert((user, ip), count);
+                        drained.insert((user, incarnation, ip), count);
                     }
                     drained
                 }
@@ -120,11 +141,13 @@ impl UserIpTracker {
                     let mut drained =
                         HashMap::with_capacity(queue.len().min(CLEANUP_DRAIN_BATCH_LIMIT));
                     for _ in 0..CLEANUP_DRAIN_BATCH_LIMIT {
-                        let Some((user, ip, count)) = Self::pop_one_cleanup(&mut queue) else {
+                        let Some((user, incarnation, ip, count)) =
+                            Self::pop_one_cleanup(&mut queue)
+                        else {
                             break;
                         };
                         self.cleanup_queue_len.fetch_sub(1, Ordering::Relaxed);
-                        drained.insert((user, ip), count);
+                        drained.insert((user, incarnation, ip), count);
                     }
                     cleanup_shard.queue.clear_poison();
                     drained
@@ -138,11 +161,32 @@ impl UserIpTracker {
 
         let mut shard = self.shards[shard_idx].write().await;
         let mut removed_active_entries = 0usize;
-        for ((user, ip), pending_count) in to_remove {
+        for ((user, incarnation, ip), pending_count) in to_remove {
+            if shard.incarnations.get(&user).copied() != Some(incarnation) {
+                continue;
+            }
             removed_active_entries = removed_active_entries.saturating_add(
                 Self::apply_active_cleanup(&mut shard.active_ips, &user, ip, pending_count),
             );
         }
         Self::decrement_counter(&self.active_entry_count, removed_active_entries);
     }
+}
+
+fn drain_user_cleanup(
+    queue: &mut HashMap<(String, UserIncarnation), HashMap<IpAddr, usize>>,
+    user: &str,
+) -> Vec<(UserIncarnation, HashMap<IpAddr, usize>)> {
+    let owners = queue
+        .keys()
+        .filter(|(queued_user, _)| queued_user == user)
+        .cloned()
+        .collect::<Vec<_>>();
+    owners
+        .into_iter()
+        .filter_map(|owner| {
+            let incarnation = owner.1;
+            queue.remove(&owner).map(|ips| (incarnation, ips))
+        })
+        .collect()
 }

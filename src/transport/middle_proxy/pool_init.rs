@@ -19,7 +19,7 @@ impl MePool {
             .me_reconnect_max_concurrent_per_dc
             .max(1) as usize;
         let ks = self.key_selector().await;
-        let me_servers = self.proxy_map_v4.read().await.len();
+        let me_servers = self.endpoint_snapshot.load().map_v4.len();
         let secret_len = self.proxy_secret.read().await.secret.len();
         info!(
             me_servers,

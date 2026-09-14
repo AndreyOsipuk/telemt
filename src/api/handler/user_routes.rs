@@ -61,7 +61,6 @@ pub(super) async fn handle(
         };
         let runtime_cfg = config_rx.borrow().clone();
         data.in_runtime = runtime_cfg.access.users.contains_key(&data.username);
-        shared.proxy_shared.set_user_enabled(base_user, true);
         shared
             .runtime_events
             .record("api.user.enable.ok", format!("username={}", base_user));
@@ -104,13 +103,9 @@ pub(super) async fn handle(
         };
         let runtime_cfg = config_rx.borrow().clone();
         data.in_runtime = runtime_cfg.access.users.contains_key(&data.username);
-        let (newly_disabled, cancelled) = shared.proxy_shared.set_user_enabled(base_user, false);
         shared.runtime_events.record(
             "api.user.disable.ok",
-            format!(
-                "username={} newly_disabled={} cancelled_sessions={}",
-                base_user, newly_disabled, cancelled
-            ),
+            format!("username={}", base_user),
         );
         let status = if data.in_runtime {
             StatusCode::OK
@@ -270,11 +265,6 @@ pub(super) async fn handle(
             }
             let expected_revision = parse_if_match(req.headers());
             let body = read_json::<PatchUserRequest>(req.into_body(), body_limit).await?;
-            let enabled_update = match &body.enabled {
-                Patch::Unchanged => None,
-                Patch::Remove => Some(true),
-                Patch::Set(enabled) => Some(*enabled),
-            };
             let result = patch_user(user, body, expected_revision, shared).await;
             let (mut data, revision) = match result {
                 Ok(ok) => ok,
@@ -288,20 +278,6 @@ pub(super) async fn handle(
             };
             let runtime_cfg = config_rx.borrow().clone();
             data.in_runtime = runtime_cfg.access.users.contains_key(&data.username);
-            if let Some(enabled) = enabled_update {
-                let (_, cancelled) = shared
-                    .proxy_shared
-                    .set_user_enabled(&data.username, enabled);
-                if !enabled {
-                    shared.runtime_events.record(
-                        "api.user.disable.runtime",
-                        format!(
-                            "username={} cancelled_sessions={}",
-                            data.username, cancelled
-                        ),
-                    );
-                }
-            }
             shared
                 .runtime_events
                 .record("api.user.patch.ok", format!("username={}", data.username));
@@ -335,11 +311,9 @@ pub(super) async fn handle(
                     return Err(error);
                 }
             };
-            shared.proxy_shared.set_user_enabled(&deleted_user, true);
-            let cancelled = shared.proxy_shared.cancel_user_sessions(&deleted_user);
             shared.runtime_events.record(
                 "api.user.delete.ok",
-                format!("username={} cancelled_sessions={}", deleted_user, cancelled),
+                format!("username={}", deleted_user),
             );
             let runtime_cfg = config_rx.borrow().clone();
             let in_runtime = runtime_cfg.access.users.contains_key(&deleted_user);

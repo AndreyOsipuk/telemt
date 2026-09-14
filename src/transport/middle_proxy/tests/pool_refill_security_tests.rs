@@ -183,8 +183,18 @@ async fn refill_preserves_bounded_pending_cardinality_and_cleans_up_before_first
     let first = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 31, 0, 21)), 443);
     let second = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 31, 0, 22)), 443);
     let latest = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 31, 0, 23)), 443);
-    pool.preferred_endpoints_by_dc
-        .store(Arc::new(HashMap::from([(2, vec![first, second, latest])])));
+    pool.update_proxy_maps(
+        HashMap::from([(
+            2,
+            vec![
+                (first.ip(), first.port()),
+                (second.ip(), second.port()),
+                (latest.ip(), latest.port()),
+            ],
+        )]),
+        None,
+    )
+    .await;
 
     pool.trigger_immediate_refill_for_dc(first, 2);
     pool.trigger_immediate_refill_for_dc(second, 2);

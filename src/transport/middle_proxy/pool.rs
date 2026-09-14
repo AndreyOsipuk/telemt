@@ -266,7 +266,17 @@ pub struct RoutingCore {
     pub(super) writers: Arc<WritersState>,
     pub(super) rr: AtomicU64,
     pub(super) writer_epoch: watch::Sender<u64>,
-    pub(super) preferred_endpoints_by_dc: ArcSwap<HashMap<i32, Vec<SocketAddr>>>,
+    pub(super) endpoint_snapshot: ArcSwap<EndpointSnapshot>,
+}
+
+/// Immutable endpoint routing authority published as one coherent revision.
+#[derive(Clone, Debug)]
+pub(super) struct EndpointSnapshot {
+    pub(super) revision: u64,
+    pub(super) map_v4: HashMap<i32, Vec<(IpAddr, u16)>>,
+    pub(super) map_v6: HashMap<i32, Vec<(IpAddr, u16)>>,
+    pub(super) endpoint_dc_map: HashMap<SocketAddr, Option<i32>>,
+    pub(super) preferred_endpoints_by_dc: HashMap<i32, Vec<SocketAddr>>,
 }
 
 pub(super) struct ReinitCore {
@@ -302,12 +312,14 @@ pub(super) struct ReinitPendingState {
     pub(super) generation: u64,
     pub(super) started_at_epoch_secs: u64,
     pub(super) map_hash: u64,
+    pub(super) endpoint_revision: u64,
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct ReinitAttemptState {
     pub(super) generation: u64,
     pub(super) map_hash: u64,
+    pub(super) endpoint_revision: u64,
     pub(super) hardswap: bool,
     pub(super) committed: bool,
 }
@@ -316,6 +328,7 @@ pub(super) struct ReinitCoordinatorState {
     pub(super) next_attempt_id: u64,
     pub(super) active_generation: u64,
     pub(super) desired_map_hash: u64,
+    pub(super) endpoint_revision: u64,
     pub(super) pending: Option<ReinitPendingState>,
     pub(super) attempts: HashMap<u64, ReinitAttemptState>,
 }
@@ -475,9 +488,6 @@ pub struct MePool {
     pub(super) rng: Arc<SecureRandom>,
     pub(super) proxy_tag: Option<Vec<u8>>,
     pub(super) proxy_secret: Arc<RwLock<SecretSnapshot>>,
-    pub(super) proxy_map_v4: Arc<RwLock<HashMap<i32, Vec<(IpAddr, u16)>>>>,
-    pub(super) proxy_map_v6: Arc<RwLock<HashMap<i32, Vec<(IpAddr, u16)>>>>,
-    pub(super) endpoint_dc_map: Arc<RwLock<HashMap<SocketAddr, Option<i32>>>>,
     pub(super) default_dc: AtomicI32,
     pub(super) next_writer_id: AtomicU64,
     pub(super) writer_connect_active_reserved: AtomicUsize,

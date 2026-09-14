@@ -41,8 +41,9 @@ impl MePool {
         coordinator: &crate::transport::middle_proxy::pool::ReinitCoordinatorState,
     ) -> Result<WriterContour> {
         let endpoint_is_current = self
-            .preferred_endpoints_by_dc
+            .endpoint_snapshot
             .load()
+            .preferred_endpoints_by_dc
             .get(&writer.writer_dc)
             .is_some_and(|endpoints| endpoints.contains(&writer.addr));
         if !endpoint_is_current {
@@ -61,6 +62,7 @@ impl MePool {
             && coordinator.pending.is_some_and(|pending| {
                 pending.generation == writer.generation
                     && pending.map_hash == coordinator.desired_map_hash
+                    && pending.endpoint_revision == coordinator.endpoint_revision
             })
         {
             return Ok(WriterContour::Warm);
@@ -92,7 +94,8 @@ impl MePool {
         if intent == WriterOpenIntent::Replacement || contour == WriterContour::Draining {
             return Ok(());
         }
-        let preferred = self.preferred_endpoints_by_dc.load();
+        let endpoint_snapshot = self.endpoint_snapshot.load();
+        let preferred = &endpoint_snapshot.preferred_endpoints_by_dc;
         let Some(endpoints) = preferred.get(&writer.writer_dc) else {
             return Err(ProxyError::Proxy(
                 "ME writer target changed before publication".into(),

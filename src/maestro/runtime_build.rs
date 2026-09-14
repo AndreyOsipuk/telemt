@@ -16,6 +16,7 @@ use crate::proxy::direct_buffer_budget::{
 };
 use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
 use crate::proxy::shared_state::ProxySharedState;
+use crate::proxy::user_admission::UserAdmissionAuthority;
 use crate::startup::StartupTracker;
 use crate::stats::beobachten::BeobachtenStore;
 use crate::stats::telemetry::TelemetryPolicy;
@@ -39,6 +40,8 @@ pub(crate) struct PreparedRuntime {
     pub(crate) detected_ips: (Option<IpAddr>, Option<IpAddr>),
     /// Gate opened only after the candidate becomes the active generation.
     pub(crate) config_watcher_activation: watch::Sender<bool>,
+    /// User-authority epoch captured before candidate construction.
+    pub(crate) user_admission_epoch: u64,
 }
 
 pub(crate) async fn prepare_runtime(
@@ -48,7 +51,9 @@ pub(crate) async fn prepare_runtime(
     quota_store: Arc<QuotaStore>,
     runtime_log_filter: RuntimeLogFilter,
     tls_full_cert_budget: Arc<TlsFullCertBudget>,
+    user_admission: Arc<UserAdmissionAuthority>,
 ) -> Result<PreparedRuntime, String> {
+    let user_admission_epoch = user_admission.epoch();
     config
         .validate_web_decoy_listener_separation()
         .map_err(|error| error.to_string())?;
@@ -92,9 +97,10 @@ pub(crate) async fn prepare_runtime(
     let hard_limit =
         resolve_direct_buffer_hard_limit(config.general.direct_relay_buffer_budget_max_bytes).await;
     let direct_buffer_budget = DirectBufferBudget::new(hard_limit);
-    let proxy_shared =
-        ProxySharedState::new_with_direct_buffer_budget(direct_buffer_budget.clone());
-    proxy_shared.apply_user_enabled_config(&config.access.user_enabled);
+    let proxy_shared = ProxySharedState::new_with_direct_buffer_budget_and_user_admission(
+        direct_buffer_budget.clone(),
+        user_admission,
+    );
     proxy_shared.traffic_limiter.apply_policy(
         config.access.user_rate_limits.clone(),
         config.access.cidr_rate_limits.clone(),
@@ -311,6 +317,7 @@ pub(crate) async fn prepare_runtime(
     Ok(PreparedRuntime {
         generation,
         config_watcher_activation,
+        user_admission_epoch,
         detected_ips: (
             probe.detected_ipv4.map(IpAddr::V4),
             probe.detected_ipv6.map(IpAddr::V6),

@@ -65,10 +65,10 @@ impl MePool {
     pub(in crate::transport::middle_proxy) async fn active_coverage_required_total(&self) -> usize {
         let now_epoch_secs = Self::now_epoch_secs();
         let mut required_total = 0usize;
+        let endpoint_snapshot = self.endpoint_snapshot.load();
 
         if self.family_enabled_for_drain_coverage(IpFamily::V4, now_epoch_secs) {
-            let map = self.proxy_map_v4.read().await;
-            for addrs in map.values() {
+            for addrs in endpoint_snapshot.map_v4.values() {
                 let mut endpoints = HashSet::<SocketAddr>::new();
                 for (ip, port) in addrs.iter().copied() {
                     endpoints.insert(SocketAddr::new(ip, port));
@@ -80,8 +80,7 @@ impl MePool {
         }
 
         if self.family_enabled_for_drain_coverage(IpFamily::V6, now_epoch_secs) {
-            let map = self.proxy_map_v6.read().await;
-            for addrs in map.values() {
+            for addrs in endpoint_snapshot.map_v6.values() {
                 let mut endpoints = HashSet::<SocketAddr>::new();
                 for (ip, port) in addrs.iter().copied() {
                     endpoints.insert(SocketAddr::new(ip, port));
@@ -118,13 +117,14 @@ impl MePool {
 
                 let mut endpoints_len = 0;
                 let now_epoch = Self::now_epoch_secs();
+                let endpoint_snapshot = self.endpoint_snapshot.load();
                 if self.family_enabled_for_drain_coverage(IpFamily::V4, now_epoch) {
-                    if let Some(addrs) = self.proxy_map_v4.read().await.get(&writer_dc) {
+                    if let Some(addrs) = endpoint_snapshot.map_v4.get(&writer_dc) {
                         endpoints_len += addrs.len();
                     }
                 }
                 if self.family_enabled_for_drain_coverage(IpFamily::V6, now_epoch) {
-                    if let Some(addrs) = self.proxy_map_v6.read().await.get(&writer_dc) {
+                    if let Some(addrs) = endpoint_snapshot.map_v6.get(&writer_dc) {
                         endpoints_len += addrs.len();
                     }
                 }

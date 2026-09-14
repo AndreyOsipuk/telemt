@@ -70,7 +70,6 @@ use model::{
     PatchUserRequest, ResetUserQuotaResponse, RotateSecretRequest, SummaryData, UserActiveIps,
     is_valid_username,
 };
-use patch::Patch;
 use runtime_edge::{
     EdgeConnectionsCacheEntry, build_runtime_connections_summary_data,
     build_runtime_events_recent_data, build_runtime_tls_fingerprints_data,

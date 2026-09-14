@@ -43,14 +43,24 @@ impl WebProcessRuntime {
         if !valid
             || state.closed
             || !state.issuance_enabled
-            || !generation
-                .proxy_shared
-                .is_user_enabled(&replacement.profile.user)
         {
             drop(state);
             self.cancel_replacement(bootstrap_hash, &replacement.old_session);
             return Err(ManagerError::Closed);
         }
+        let Some(mut user_publication) = generation.proxy_shared.claim_authenticated_user(
+            &replacement.profile.user,
+            replacement.profile.credential_id,
+        ) else {
+            drop(state);
+            self.cancel_replacement(bootstrap_hash, &replacement.old_session);
+            return Err(ManagerError::Closed);
+        };
+        let Some(user_registration) = user_publication.take_registration() else {
+            drop(state);
+            self.cancel_replacement(bootstrap_hash, &replacement.old_session);
+            return Err(ManagerError::Closed);
+        };
         let Some((session_token, session_hash)) = new_unique_token(&generation, &state) else {
             self.record_limit_hit();
             self.telemetry
@@ -86,6 +96,7 @@ impl WebProcessRuntime {
             replacement.recovery,
             self.limits.clone(),
             replacement.old_session.timeouts().clone(),
+            Some(user_registration),
         );
         let Some(supersede) = replacement.old_session.prepare_carrier_supersede() else {
             drop(state);
@@ -146,6 +157,7 @@ impl WebProcessRuntime {
             index.bootstrap_hash = bootstrap_hash;
             index.attempt = replacement.attempt;
         }
+        user_publication.commit();
         let identity = session.trace_identity();
         let old_identity = replacement.old_session.trace_identity();
         drop(state);

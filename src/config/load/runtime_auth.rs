@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
 
+use crate::crypto::sha256;
 use crate::error::{ProxyError, Result};
 
 const ACCESS_SECRET_BYTES: usize = 16;
@@ -19,6 +20,8 @@ pub(crate) struct UserAuthSnapshot {
 pub(crate) struct UserAuthEntry {
     pub(crate) user: String,
     pub(crate) secret: [u8; ACCESS_SECRET_BYTES],
+    /// Stable secret identity used by process-wide admission fencing.
+    pub(crate) credential_id: [u8; 16],
 }
 
 impl UserAuthSnapshot {
@@ -46,9 +49,13 @@ impl UserAuthSnapshot {
 
             let mut secret = [0u8; ACCESS_SECRET_BYTES];
             secret.copy_from_slice(&decoded);
+            let digest = sha256(&secret);
+            let mut credential_id = [0; 16];
+            credential_id.copy_from_slice(&digest[..16]);
             entries.push(UserAuthEntry {
                 user: user.clone(),
                 secret,
+                credential_id,
             });
             by_name.insert(user.clone(), user_id);
             sni_index
@@ -86,6 +93,12 @@ impl UserAuthSnapshot {
     pub(crate) fn entry_by_id(&self, user_id: u32) -> Option<&UserAuthEntry> {
         let idx = usize::try_from(user_id).ok()?;
         self.entries.get(idx)
+    }
+
+    pub(crate) fn credential_id_by_name(&self, user: &str) -> Option<[u8; 16]> {
+        self.user_id_by_name(user)
+            .and_then(|user_id| self.entry_by_id(user_id))
+            .map(|entry| entry.credential_id)
     }
 
     pub(crate) fn sni_candidates(&self, sni: &str) -> Option<&[u32]> {

@@ -108,7 +108,7 @@ pub(super) async fn run_telemt_core(
     );
     let shared_state =
         ProxySharedState::new_with_direct_buffer_budget(direct_buffer_budget.clone());
-    shared_state.apply_user_enabled_config(&config.access.user_enabled);
+    shared_state.apply_user_config(&config.access.users, &config.access.user_enabled);
     shared_state.traffic_limiter.apply_policy(
         config.access.user_rate_limits.clone(),
         config.access.cidr_rate_limits.clone(),
