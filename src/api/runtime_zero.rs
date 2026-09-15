@@ -200,7 +200,7 @@ pub(super) async fn build_runtime_gates_data(
         && cfg.general.me2dc_fallback
         && matches!(route_state.mode, RelayRouteMode::Direct);
     let reroute_to_direct_at_epoch_secs = if reroute_active {
-        shared.route_runtime.direct_since_epoch_secs()
+        route_state.direct_since_epoch_secs
     } else {
         None
     };

@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -10,8 +13,8 @@ use crate::config::{ProxyConfig, RateLimitBps};
 #[cfg(test)]
 use super::compute_revision;
 use super::{
-    AccessSection, compute_snapshot_revision, load_candidate_snapshot, load_config_snapshot,
-    resolve_single_source_owner, toml_path_exists,
+    AccessSection, compute_snapshot_revision, compute_source_revision, load_candidate_snapshot,
+    load_config_snapshot, resolve_single_source_owner, toml_path_exists,
 };
 use crate::api::model::ApiFailure;
 
@@ -100,7 +103,21 @@ pub(in crate::api) async fn save_access_sections_to_disk(
     cfg: &ProxyConfig,
     sections: &[AccessSection],
 ) -> Result<String, ApiFailure> {
+    save_access_sections_to_disk_if_revision(config_path, cfg, sections, None).await
+}
+
+/// Persists access tables only while the complete source graph remains unchanged.
+pub(in crate::api) async fn save_access_sections_to_disk_if_revision(
+    config_path: &Path,
+    cfg: &ProxyConfig,
+    sections: &[AccessSection],
+    expected_revision: Option<&str>,
+) -> Result<String, ApiFailure> {
     let loaded = load_config_snapshot(config_path, false).await?;
+    let loaded_revision = compute_snapshot_revision(&loaded);
+    if expected_revision.is_some_and(|expected| expected != loaded_revision) {
+        return Err(revision_conflict());
+    }
     let mut applied = Vec::new();
     for section in sections {
         if applied.contains(section) {
@@ -117,7 +134,7 @@ pub(in crate::api) async fn save_access_sections_to_disk(
             })
     });
     if applied.is_empty() {
-        return Ok(compute_snapshot_revision(&loaded));
+        return Ok(loaded_revision);
     }
 
     let targets = applied
@@ -130,6 +147,7 @@ pub(in crate::api) async fn save_access_sections_to_disk(
         .get(&owner_path)
         .cloned()
         .ok_or_else(|| ApiFailure::internal("config source owner is missing from snapshot"))?;
+    let expected_owner_contents = owner_contents.clone();
     for section in applied {
         let rendered = render_access_section(cfg, section)?;
         owner_contents = upsert_toml_table(&owner_contents, section.table_name(), &rendered);
@@ -143,7 +161,14 @@ pub(in crate::api) async fn save_access_sections_to_disk(
     )
     .await?;
     let revision = compute_snapshot_revision(&candidate);
-    write_atomic(owner_path, owner_contents).await?;
+    write_atomic_if_unchanged(
+        config_path.to_path_buf(),
+        loaded_revision,
+        owner_path,
+        expected_owner_contents,
+        owner_contents,
+    )
+    .await?;
     Ok(revision)
 }
 
@@ -378,15 +403,112 @@ pub(in crate::api) async fn write_atomic(
     path: PathBuf,
     contents: String,
 ) -> Result<(), ApiFailure> {
-    tokio::task::spawn_blocking(move || write_atomic_sync(&path, &contents))
+    tokio::task::spawn_blocking(move || write_atomic_sync(&path, None, &contents))
         .await
         .map_err(|e| ApiFailure::internal(format!("failed to join writer: {}", e)))?
         .map_err(|e| ApiFailure::internal(format!("failed to write config: {}", e)))
 }
 
-fn write_atomic_sync(path: &Path, contents: &str) -> std::io::Result<()> {
+/// Replaces one source only if both its graph revision and owner contents are unchanged.
+pub(in crate::api) async fn write_atomic_if_unchanged(
+    config_path: PathBuf,
+    expected_revision: String,
+    path: PathBuf,
+    expected_contents: String,
+    contents: String,
+) -> Result<(), ApiFailure> {
+    tokio::task::spawn_blocking(move || {
+        let graph = ProxyConfig::read_source_graph(&config_path)
+            .map_err(|error| AtomicWriteError::ReadGraph(error.to_string()))?;
+        if compute_source_revision(&graph) != expected_revision {
+            return Err(AtomicWriteError::Conflict);
+        }
+        write_atomic_sync(&path, Some(&expected_contents), &contents)
+            .map_err(AtomicWriteError::Io)
+    })
+    .await
+    .map_err(|error| ApiFailure::internal(format!("failed to join writer: {error}")))?
+    .map_err(|error| match error {
+        AtomicWriteError::Conflict => revision_conflict(),
+        AtomicWriteError::ReadGraph(error) => {
+            ApiFailure::internal(format!("failed to verify config graph: {error}"))
+        }
+        AtomicWriteError::Io(error) => {
+            ApiFailure::internal(format!("failed to write config: {error}"))
+        }
+    })
+}
+
+enum AtomicWriteError {
+    Conflict,
+    ReadGraph(String),
+    Io(std::io::Error),
+}
+
+struct ExistingTarget {
+    contents: String,
+    metadata: std::fs::Metadata,
+}
+
+fn revision_conflict() -> ApiFailure {
+    ApiFailure::new(
+        hyper::StatusCode::CONFLICT,
+        "revision_conflict",
+        "Config revision changed before persistence",
+    )
+}
+
+fn open_existing_target(path: &Path) -> std::io::Result<Option<ExistingTarget>> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "config target must be a regular file",
+        ));
+    }
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    Ok(Some(ExistingTarget { contents, metadata }))
+}
+
+fn same_target(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        left.dev() == right.dev() && left.ino() == right.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        left.len() == right.len() && left.modified().ok() == right.modified().ok()
+    }
+}
+
+fn write_atomic_sync(
+    path: &Path,
+    expected_contents: Option<&str>,
+    contents: &str,
+) -> std::io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
+    let existing = open_existing_target(path)?;
+    if expected_contents.is_some_and(|expected| {
+        existing
+            .as_ref()
+            .is_none_or(|target| target.contents != expected)
+    }) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "config source changed before persistence",
+        ));
+    }
 
     let tmp_name = format!(
         ".{}.tmp-{}",
@@ -401,9 +523,40 @@ fn write_atomic_sync(path: &Path, contents: &str) -> std::io::Result<()> {
         let mut file = std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
+            #[cfg(unix)]
+            .mode(0o600)
             .open(&tmp_path)?;
+        #[cfg(unix)]
+        if let Some(existing) = existing.as_ref() {
+            use nix::unistd::{Gid, Uid, fchown};
+
+            fchown(
+                &file,
+                Some(Uid::from_raw(existing.metadata.uid())),
+                Some(Gid::from_raw(existing.metadata.gid())),
+            )
+            .map_err(|error| std::io::Error::from_raw_os_error(error as i32))?;
+            file.set_permissions(std::fs::Permissions::from_mode(
+                existing.metadata.mode() & 0o7777,
+            ))?;
+        }
         file.write_all(contents.as_bytes())?;
         file.sync_all()?;
+        let current = open_existing_target(path)?;
+        let target_unchanged = match (&existing, &current) {
+            (Some(expected), Some(current)) => {
+                same_target(&expected.metadata, &current.metadata)
+                    && expected.contents == current.contents
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if !target_unchanged {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "config target changed during persistence",
+            ));
+        }
         std::fs::rename(&tmp_path, path)?;
         if let Ok(dir) = std::fs::File::open(parent) {
             let _ = dir.sync_all();

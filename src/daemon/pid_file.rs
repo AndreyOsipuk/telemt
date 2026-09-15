@@ -1,6 +1,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use nix::fcntl::{Flock, FlockArg};
@@ -14,7 +14,23 @@ pub struct PidFile {
     path: PathBuf,
     lock_path: PathBuf,
     pid_file: Option<File>,
+    pid_identity: Option<FileIdentity>,
     lock_file: Option<Flock<File>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl FileIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
 }
 
 impl PidFile {
@@ -26,6 +42,7 @@ impl PidFile {
             path,
             lock_path,
             pid_file: None,
+            pid_identity: None,
             lock_file: None,
         }
     }
@@ -60,6 +77,7 @@ impl PidFile {
             .create(true)
             .truncate(false)
             .mode(0o644)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
             .open(&self.lock_path)
             .map_err(|error| {
                 DaemonError::PidFile(format!(
@@ -68,6 +86,7 @@ impl PidFile {
                     error
                 ))
             })?;
+        validate_regular_single_link(&lock_file, &self.lock_path)?;
         let lock_file =
             Flock::lock(lock_file, FlockArg::LockExclusiveNonblock).map_err(|(_, errno)| {
                 if let Some(pid) = self.check_running().ok().flatten() {
@@ -91,10 +110,13 @@ impl PidFile {
             .create(true)
             .truncate(true)
             .mode(0o644)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
             .open(&self.path)
             .map_err(|error| {
                 DaemonError::PidFile(format!("cannot open {}: {}", self.path.display(), error))
             })?;
+        let pid_metadata = validate_regular_single_link(&pid_file, &self.path)?;
+        let pid_identity = FileIdentity::from_metadata(&pid_metadata);
         let pid = getpid();
         writeln!(pid_file, "{}", pid).map_err(|error| {
             DaemonError::PidFile(format!(
@@ -103,8 +125,16 @@ impl PidFile {
                 error
             ))
         })?;
+        pid_file.sync_data().map_err(|error| {
+            DaemonError::PidFile(format!(
+                "cannot sync PID file {}: {}",
+                self.path.display(),
+                error
+            ))
+        })?;
 
         self.pid_file = Some(pid_file);
+        self.pid_identity = Some(pid_identity);
         self.lock_file = Some(lock_file);
         info!(pid = pid.as_raw(), path = %self.path.display(), "PID file created");
         Ok(())
@@ -114,19 +144,36 @@ impl PidFile {
     pub fn release(&mut self) -> Result<(), DaemonError> {
         if self.lock_file.is_none() {
             self.pid_file = None;
+            self.pid_identity = None;
             return Ok(());
         }
 
-        let removal = match fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
+        let removal = match fs::symlink_metadata(&self.path) {
+            Ok(metadata)
+                if self.pid_identity == Some(FileIdentity::from_metadata(&metadata))
+                    && metadata.is_file() =>
+            {
+                fs::remove_file(&self.path).map_err(|error| {
+                    DaemonError::PidFile(format!(
+                        "cannot remove {}: {}",
+                        self.path.display(),
+                        error
+                    ))
+                })
+            }
+            Ok(_) => Err(DaemonError::PidFile(format!(
+                "refusing to remove replaced PID file {}",
+                self.path.display()
+            ))),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
             Err(error) => Err(DaemonError::PidFile(format!(
-                "cannot remove {}: {}",
+                "cannot inspect {} before removal: {}",
                 self.path.display(),
                 error
             ))),
         };
         self.pid_file = None;
+        self.pid_identity = None;
         self.lock_file = None;
         removal?;
         debug!(path = %self.path.display(), "PID file removed");
@@ -161,7 +208,11 @@ fn sibling_lock_path(path: &Path) -> PathBuf {
 }
 
 fn read_pid_file_if_exists(path: &Path) -> Result<Option<i32>, DaemonError> {
-    let mut file = match File::open(path) {
+    let mut file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+    {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => {
@@ -172,15 +223,44 @@ fn read_pid_file_if_exists(path: &Path) -> Result<Option<i32>, DaemonError> {
             )));
         }
     };
+    let metadata = validate_regular_single_link(&file, path)?;
+    if metadata.len() > 64 {
+        return Err(DaemonError::PidFile(format!(
+            "invalid PID in {}",
+            path.display()
+        )));
+    }
     let mut contents = String::new();
     file.read_to_string(&mut contents).map_err(|error| {
         DaemonError::PidFile(format!("cannot read {}: {}", path.display(), error))
     })?;
-    let pid = contents
+    let pid: i32 = contents
         .trim()
         .parse()
         .map_err(|_| DaemonError::PidFile(format!("invalid PID in {}", path.display())))?;
+    if pid <= 1 {
+        return Err(DaemonError::PidFile(format!(
+            "invalid PID in {}",
+            path.display()
+        )));
+    }
     Ok(Some(pid))
+}
+
+fn validate_regular_single_link(
+    file: &File,
+    path: &Path,
+) -> Result<fs::Metadata, DaemonError> {
+    let metadata = file.metadata().map_err(|error| {
+        DaemonError::PidFile(format!("cannot inspect {}: {}", path.display(), error))
+    })?;
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        return Err(DaemonError::PidFile(format!(
+            "{} must be a regular file with one directory entry",
+            path.display()
+        )));
+    }
+    Ok(metadata)
 }
 
 /// Reads a PID from a PID file.
@@ -202,13 +282,6 @@ pub fn signal_pid_file<P: AsRef<Path>>(
     signal: nix::sys::signal::Signal,
 ) -> Result<(), DaemonError> {
     let pid = read_pid_file(&path)?;
-    if !is_process_running(pid) {
-        return Err(DaemonError::PidFile(format!(
-            "process {} from {} is not running",
-            pid,
-            path.as_ref().display()
-        )));
-    }
     nix::sys::signal::kill(Pid::from_raw(pid), signal)
         .map_err(|error| DaemonError::PidFile(format!("cannot signal process {}: {}", pid, error)))
 }
@@ -243,6 +316,7 @@ fn is_process_running(pid: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::symlink;
     use std::process::{Child, Command, Stdio};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -365,6 +439,46 @@ mod tests {
         pid_file.release().unwrap();
 
         assert!(pid_path.exists());
+    }
+
+    #[test]
+    fn acquire_rejects_pid_symlink_without_truncating_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_path = directory.path().join("telemt.pid");
+        let target_path = directory.path().join("target");
+        fs::write(&target_path, b"preserve\n").unwrap();
+        symlink(&target_path, &pid_path).unwrap();
+        let mut pid_file = PidFile::new(&pid_path);
+
+        assert!(pid_file.acquire().is_err());
+        assert_eq!(fs::read(&target_path).unwrap(), b"preserve\n");
+    }
+
+    #[test]
+    fn release_does_not_remove_replacement_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_path = directory.path().join("telemt.pid");
+        let owned_path = directory.path().join("owned.pid");
+        let mut pid_file = PidFile::new(&pid_path);
+        pid_file.acquire().unwrap();
+        fs::rename(&pid_path, &owned_path).unwrap();
+        fs::write(&pid_path, b"replacement\n").unwrap();
+
+        let error = pid_file.release().unwrap_err();
+
+        assert!(error.to_string().contains("refusing to remove replaced PID file"));
+        assert_eq!(fs::read(&pid_path).unwrap(), b"replacement\n");
+    }
+
+    #[test]
+    fn pid_parser_rejects_process_group_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_path = directory.path().join("telemt.pid");
+
+        for value in ["-1\n", "0\n", "1\n"] {
+            fs::write(&pid_path, value).unwrap();
+            assert!(read_pid_file(&pid_path).is_err());
+        }
     }
 
     #[test]

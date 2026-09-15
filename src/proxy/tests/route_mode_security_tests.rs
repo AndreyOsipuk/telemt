@@ -120,6 +120,7 @@ fn session_is_not_affected_when_mode_matches_even_if_generation_advanced() {
     let current = RouteCutoverState {
         mode: RelayRouteMode::Direct,
         generation: 2,
+        direct_since_epoch_secs: Some(1),
     };
     let session_generation = 0;
 
@@ -134,6 +135,7 @@ fn cutover_predicate_rejects_equal_generation_even_if_mode_differs() {
     let current = RouteCutoverState {
         mode: RelayRouteMode::Middle,
         generation: 77,
+        direct_since_epoch_secs: None,
     };
     assert!(
         !is_session_affected_by_cutover(current, RelayRouteMode::Direct, 77),
@@ -168,13 +170,15 @@ fn adversarial_route_oscillation_only_cuts_over_sessions_with_different_final_mo
 fn light_fuzz_cutover_predicate_matches_reference_oracle() {
     let mut rng = StdRng::seed_from_u64(0xC0DEC0DE5EED);
     for _ in 0..20_000 {
+        let mode = if rng.random::<bool>() {
+            RelayRouteMode::Direct
+        } else {
+            RelayRouteMode::Middle
+        };
         let current = RouteCutoverState {
-            mode: if rng.random::<bool>() {
-                RelayRouteMode::Direct
-            } else {
-                RelayRouteMode::Middle
-            },
+            mode,
             generation: rng.random_range(0u64..1_000_000),
+            direct_since_epoch_secs: matches!(mode, RelayRouteMode::Direct).then_some(1),
         };
         let session_mode = if rng.random::<bool>() {
             RelayRouteMode::Direct

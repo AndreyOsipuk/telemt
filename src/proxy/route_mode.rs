@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::watch;
@@ -24,11 +23,11 @@ impl RelayRouteMode {
 pub(crate) struct RouteCutoverState {
     pub mode: RelayRouteMode,
     pub generation: u64,
+    pub direct_since_epoch_secs: Option<u64>,
 }
 
 #[derive(Clone)]
 pub(crate) struct RouteRuntimeController {
-    direct_since_epoch_secs: Arc<AtomicU64>,
     tx: watch::Sender<RouteCutoverState>,
 }
 
@@ -37,17 +36,11 @@ impl RouteRuntimeController {
         let initial = RouteCutoverState {
             mode: initial_mode,
             generation: 0,
+            direct_since_epoch_secs: matches!(initial_mode, RelayRouteMode::Direct)
+                .then(now_epoch_secs),
         };
         let (tx, _rx) = watch::channel(initial);
-        let direct_since_epoch_secs = if matches!(initial_mode, RelayRouteMode::Direct) {
-            now_epoch_secs()
-        } else {
-            0
-        };
-        Self {
-            direct_since_epoch_secs: Arc::new(AtomicU64::new(direct_since_epoch_secs)),
-            tx,
-        }
+        Self { tx }
     }
 
     pub(crate) fn snapshot(&self) -> RouteCutoverState {
@@ -58,25 +51,16 @@ impl RouteRuntimeController {
         self.tx.subscribe()
     }
 
-    pub(crate) fn direct_since_epoch_secs(&self) -> Option<u64> {
-        let value = self.direct_since_epoch_secs.load(Ordering::Relaxed);
-        (value > 0).then_some(value)
-    }
-
     pub(crate) fn set_mode(&self, mode: RelayRouteMode) -> Option<RouteCutoverState> {
         let mut next = None;
         let changed = self.tx.send_if_modified(|state| {
             if state.mode == mode {
                 return false;
             }
-            if matches!(mode, RelayRouteMode::Direct) {
-                self.direct_since_epoch_secs
-                    .store(now_epoch_secs(), Ordering::Relaxed);
-            } else {
-                self.direct_since_epoch_secs.store(0, Ordering::Relaxed);
-            }
             state.mode = mode;
             state.generation = state.generation.saturating_add(1);
+            state.direct_since_epoch_secs =
+                matches!(mode, RelayRouteMode::Direct).then(now_epoch_secs);
             next = Some(*state);
             true
         });

@@ -102,7 +102,7 @@ impl WebProcessRuntime {
             self.record_limit_hit();
             self.telemetry
                 .record_rejection(WebRejectionReason::RuntimeClosed);
-            return Err(ManagerError::Limit);
+            return Err(ManagerError::Closed);
         }
         if state
             .bootstraps_per_ip
