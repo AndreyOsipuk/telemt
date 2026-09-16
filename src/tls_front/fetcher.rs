@@ -172,6 +172,12 @@ fn sweep_expired_profile_cache(ttl: Duration, now: Instant) {
     profile_cache().retain(|_, value| now.saturating_duration_since(value.updated_at) <= ttl);
 }
 
+fn remove_profile_if_unchanged(key: &ProfileCacheKey, observed: ProfileCacheValue) {
+    profile_cache().remove_if(key, |_, current| {
+        current.profile == observed.profile && current.updated_at == observed.updated_at
+    });
+}
+
 /// Current number of adaptive TLS fetch profile-cache entries.
 pub(crate) fn profile_cache_entries_for_metrics() -> usize {
     profile_cache().len()
@@ -270,8 +276,9 @@ fn order_profiles(
     if let Some(cached) = profile_cache().get(key) {
         let age = now.saturating_duration_since(cached.updated_at);
         if age > strategy.profile_cache_ttl {
+            let observed = *cached;
             drop(cached);
-            profile_cache().remove(key);
+            remove_profile_if_unchanged(key, observed);
             return ordered;
         }
 

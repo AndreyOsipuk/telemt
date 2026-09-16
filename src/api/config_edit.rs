@@ -9,8 +9,11 @@ use super::ApiShared;
 use super::config_store::{
     EDITABLE_SECTIONS, EDITABLE_SERVER_FIELDS, compute_snapshot_revision, is_editable_section,
     load_candidate_snapshot, load_config_snapshot, render_server_listeners,
-    render_top_level_section, resolve_single_source_owner, upsert_toml_table, write_atomic,
+    render_top_level_section, resolve_single_source_owner, upsert_toml_table,
+    write_atomic_if_unchanged,
 };
+#[cfg(test)]
+use super::config_store::write_atomic;
 use super::model::ApiFailure;
 use crate::config::ProxyConfig;
 use crate::config::hot_reload::classify_config_changes;
@@ -43,7 +46,10 @@ pub(super) struct PatchConfigResponse {
 }
 
 struct PreparedConfigPatch {
+    config_path: PathBuf,
+    expected_revision: String,
     owner_path: PathBuf,
+    expected_owner_contents: String,
     owner_contents: String,
     desired_config: Arc<ProxyConfig>,
     response: PatchConfigResponse,
@@ -77,7 +83,14 @@ pub(super) async fn patch_config(
     } else {
         None
     };
-    write_atomic(prepared.owner_path, prepared.owner_contents).await?;
+    write_atomic_if_unchanged(
+        prepared.config_path,
+        prepared.expected_revision,
+        prepared.owner_path,
+        prepared.expected_owner_contents,
+        prepared.owner_contents,
+    )
+    .await?;
     if let Some(reservation) = reservation {
         prepared.response.reload = Some(reservation.enqueue(prepared.desired_config));
     }
@@ -111,7 +124,14 @@ pub(super) async fn apply_patch_to_path(
     expected_revision: Option<String>,
 ) -> Result<PatchConfigResponse, ApiFailure> {
     let prepared = prepare_patch_to_path(config_path, patch_json, expected_revision).await?;
-    write_atomic(prepared.owner_path, prepared.owner_contents).await?;
+    write_atomic_if_unchanged(
+        prepared.config_path,
+        prepared.expected_revision,
+        prepared.owner_path,
+        prepared.expected_owner_contents,
+        prepared.owner_contents,
+    )
+    .await?;
     Ok(prepared.response)
 }
 
@@ -197,6 +217,7 @@ async fn prepare_patch_to_path(
         .get(&owner_path)
         .cloned()
         .ok_or_else(|| ApiFailure::internal("config source owner is missing from snapshot"))?;
+    let expected_owner_contents = owner_contents.clone();
     for section in &touched {
         if *section == "server" {
             let rendered = render_server_listeners(&requested_cfg)?;
@@ -233,7 +254,10 @@ async fn prepare_patch_to_path(
         deferred_process_fields(&old_cfg, &new_cfg).map_err(ApiFailure::bad_request)?;
 
     Ok(PreparedConfigPatch {
+        config_path: config_path.to_path_buf(),
+        expected_revision: current,
         owner_path,
+        expected_owner_contents,
         owner_contents,
         desired_config: Arc::new(new_cfg),
         response: PatchConfigResponse {

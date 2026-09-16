@@ -27,6 +27,7 @@ mod protocol;
 mod proxy;
 mod quota_state;
 mod service;
+mod slot_budget;
 mod startup;
 mod stats;
 mod stream;

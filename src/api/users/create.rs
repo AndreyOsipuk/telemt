@@ -42,8 +42,8 @@ pub(in crate::api) async fn create_user(
 
     let expiration = parse_optional_expiration(body.expiration_rfc3339.as_deref())?;
     let _guard = shared.mutation_lock.lock().await;
-    let mut cfg = load_config_from_disk(&shared.config_path).await?;
-    ensure_expected_revision(&shared.config_path, expected_revision.as_deref()).await?;
+    let (mut cfg, base_revision) =
+        load_config_for_mutation(&shared.config_path, expected_revision.as_deref()).await?;
 
     if cfg.access.users.contains_key(&body.username) {
         return Err(ApiFailure::new(
@@ -122,8 +122,13 @@ pub(in crate::api) async fn create_user(
         touched_sections.push(AccessSection::UserEnabled);
     }
 
-    let revision =
-        save_access_sections_to_disk(&shared.config_path, &cfg, &touched_sections).await?;
+    let revision = save_access_sections_to_disk_if_revision(
+        &shared.config_path,
+        &cfg,
+        &touched_sections,
+        Some(&base_revision),
+    )
+    .await?;
     shared
         .proxy_shared
         .stage_user(

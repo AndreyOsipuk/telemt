@@ -16,6 +16,7 @@ use crate::proxy::user_admission::{
     UserAdmissionAuthority, UserAdmissionPublication, UserCredentialId, UserIncarnation,
     UserMutationResult, UserSessionRegistration,
 };
+use crate::slot_budget::SlotBudget;
 
 const HANDSHAKE_RECENT_USER_RING_LEN: usize = 64;
 const MASKING_FALLBACK_MAX_CONCURRENT: usize = 512;
@@ -55,13 +56,17 @@ pub(crate) enum ConntrackClosePolicy {
 
 pub(crate) struct HandshakeSharedState {
     pub(crate) auth_probe: DashMap<IpAddr, AuthProbeState>,
+    pub(crate) auth_probe_slots: SlotBudget,
     pub(crate) auth_probe_saturation: Mutex<Option<AuthProbeSaturationState>>,
     pub(crate) auth_probe_eviction_hasher: RandomState,
     pub(crate) invalid_secret_warned: Mutex<HashSet<(String, String)>>,
     pub(crate) unknown_sni_warn_next_allowed: Mutex<Option<Instant>>,
     pub(crate) sticky_user_by_ip: DashMap<IpAddr, u32>,
+    pub(crate) sticky_user_by_ip_slots: SlotBudget,
     pub(crate) sticky_user_by_ip_prefix: DashMap<u64, u32>,
+    pub(crate) sticky_user_by_ip_prefix_slots: SlotBudget,
     pub(crate) sticky_user_by_sni_hash: DashMap<u64, u32>,
+    pub(crate) sticky_user_by_sni_hash_slots: SlotBudget,
     pub(crate) recent_user_ring: Box<[AtomicU32]>,
     pub(crate) recent_user_ring_seq: AtomicU64,
     pub(crate) auth_expensive_checks_total: AtomicU64,
@@ -114,13 +119,25 @@ impl ProxySharedState {
         Arc::new(Self {
             handshake: HandshakeSharedState {
                 auth_probe: DashMap::new(),
+                auth_probe_slots: SlotBudget::new(
+                    crate::proxy::handshake::AUTH_PROBE_TRACK_MAX_ENTRIES,
+                ),
                 auth_probe_saturation: Mutex::new(None),
                 auth_probe_eviction_hasher: RandomState::new(),
                 invalid_secret_warned: Mutex::new(HashSet::new()),
                 unknown_sni_warn_next_allowed: Mutex::new(None),
                 sticky_user_by_ip: DashMap::new(),
+                sticky_user_by_ip_slots: SlotBudget::new(
+                    crate::proxy::handshake::STICKY_HINT_MAX_ENTRIES,
+                ),
                 sticky_user_by_ip_prefix: DashMap::new(),
+                sticky_user_by_ip_prefix_slots: SlotBudget::new(
+                    crate::proxy::handshake::STICKY_HINT_MAX_ENTRIES,
+                ),
                 sticky_user_by_sni_hash: DashMap::new(),
+                sticky_user_by_sni_hash_slots: SlotBudget::new(
+                    crate::proxy::handshake::STICKY_HINT_MAX_ENTRIES,
+                ),
                 recent_user_ring: std::iter::repeat_with(|| AtomicU32::new(0))
                     .take(HANDSHAKE_RECENT_USER_RING_LEN)
                     .collect::<Vec<_>>()

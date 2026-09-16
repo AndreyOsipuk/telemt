@@ -76,27 +76,48 @@ pub(super) fn sticky_hint_record_success_in(
     user_id: u32,
     sni: Option<&str>,
 ) {
-    if shared.handshake.sticky_user_by_ip.len() > STICKY_HINT_MAX_ENTRIES {
-        shared.handshake.sticky_user_by_ip.clear();
-    }
-    shared.handshake.sticky_user_by_ip.insert(peer_ip, user_id);
-
-    if shared.handshake.sticky_user_by_ip_prefix.len() > STICKY_HINT_MAX_ENTRIES {
-        shared.handshake.sticky_user_by_ip_prefix.clear();
-    }
-    shared
-        .handshake
-        .sticky_user_by_ip_prefix
-        .insert(ip_prefix_hint_key(peer_ip), user_id);
+    bounded_sticky_hint_upsert(
+        &shared.handshake.sticky_user_by_ip,
+        &shared.handshake.sticky_user_by_ip_slots,
+        peer_ip,
+        user_id,
+    );
+    bounded_sticky_hint_upsert(
+        &shared.handshake.sticky_user_by_ip_prefix,
+        &shared.handshake.sticky_user_by_ip_prefix_slots,
+        ip_prefix_hint_key(peer_ip),
+        user_id,
+    );
 
     if let Some(sni) = sni {
-        if shared.handshake.sticky_user_by_sni_hash.len() > STICKY_HINT_MAX_ENTRIES {
-            shared.handshake.sticky_user_by_sni_hash.clear();
+        bounded_sticky_hint_upsert(
+            &shared.handshake.sticky_user_by_sni_hash,
+            &shared.handshake.sticky_user_by_sni_hash_slots,
+            sni_hint_hash(sni),
+            user_id,
+        );
+    }
+}
+
+fn bounded_sticky_hint_upsert<K>(
+    entries: &DashMap<K, u32>,
+    slots: &crate::slot_budget::SlotBudget,
+    key: K,
+    user_id: u32,
+) where
+    K: Eq + Hash,
+{
+    match entries.entry(key) {
+        Entry::Occupied(mut entry) => {
+            entry.insert(user_id);
         }
-        shared
-            .handshake
-            .sticky_user_by_sni_hash
-            .insert(sni_hint_hash(sni), user_id);
+        Entry::Vacant(entry) => {
+            let Some(slot) = slots.try_acquire() else {
+                return;
+            };
+            entry.insert(user_id);
+            slot.commit();
+        }
     }
 }
 
@@ -340,6 +361,61 @@ mod web_mode_tests {
             false,
             MtprotoModePolicy::Web(WebSecretMode::Dd),
         ));
+    }
+}
+
+#[cfg(test)]
+mod bounded_registry_tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    #[test]
+    fn parallel_sticky_hints_never_exceed_their_hard_caps() {
+        const ATTEMPTS: usize = 10_000;
+
+        let shared = ProxySharedState::new();
+        std::thread::scope(|scope| {
+            for worker in 0..16 {
+                let shared = Arc::clone(&shared);
+                scope.spawn(move || {
+                    for index in (worker..ATTEMPTS).step_by(16) {
+                        let octets = (index as u32).to_be_bytes();
+                        let peer_ip = IpAddr::V4(std::net::Ipv4Addr::new(
+                            octets[1], octets[2], octets[3], worker as u8,
+                        ));
+                        sticky_hint_record_success_in(
+                            shared.as_ref(),
+                            peer_ip,
+                            index as u32,
+                            Some(&format!("host-{index}.example")),
+                        );
+                    }
+                });
+            }
+        });
+
+        assert_eq!(shared.handshake.sticky_user_by_ip.len(), STICKY_HINT_MAX_ENTRIES);
+        assert_eq!(
+            shared.handshake.sticky_user_by_ip_prefix.len(),
+            STICKY_HINT_MAX_ENTRIES
+        );
+        assert_eq!(
+            shared.handshake.sticky_user_by_sni_hash.len(),
+            STICKY_HINT_MAX_ENTRIES
+        );
+        assert_eq!(
+            shared.handshake.sticky_user_by_ip_slots.used(),
+            shared.handshake.sticky_user_by_ip.len()
+        );
+        assert_eq!(
+            shared.handshake.sticky_user_by_ip_prefix_slots.used(),
+            shared.handshake.sticky_user_by_ip_prefix.len()
+        );
+        assert_eq!(
+            shared.handshake.sticky_user_by_sni_hash_slots.used(),
+            shared.handshake.sticky_user_by_sni_hash.len()
+        );
     }
 }
 

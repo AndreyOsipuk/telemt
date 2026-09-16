@@ -261,6 +261,60 @@ async fn access_mutation_writes_only_the_single_included_owner() {
 }
 
 #[tokio::test]
+async fn access_mutation_rejects_source_graph_change_after_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("config.toml");
+    let included = dir.path().join("users.toml");
+    let root_body = "include = \"users.toml\"\n[censorship]\ntls_domain = \"one.example\"\n";
+    let external_root =
+        "include = \"users.toml\"\n[censorship]\ntls_domain = \"two.example\"\n";
+    let included_body = "[access.users]\nalice = \"00000000000000000000000000000000\"\n";
+    tokio::fs::write(&root, root_body).await.unwrap();
+    tokio::fs::write(&included, included_body).await.unwrap();
+    let (mut cfg, revision) = load_config_for_mutation(&root, None).await.unwrap();
+    cfg.access.users.insert(
+        "bob".to_string(),
+        "11111111111111111111111111111111".to_string(),
+    );
+    tokio::fs::write(&root, external_root).await.unwrap();
+
+    let error = save_access_sections_to_disk_if_revision(
+        &root,
+        &cfg,
+        &[AccessSection::Users],
+        Some(&revision),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, "revision_conflict");
+    assert_eq!(tokio::fs::read_to_string(&root).await.unwrap(), external_root);
+    assert_eq!(
+        tokio::fs::read_to_string(&included).await.unwrap(),
+        included_body
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn atomic_write_preserves_existing_file_mode() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    tokio::fs::write(&path, "old").await.unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let before = std::fs::metadata(&path).unwrap();
+
+    write_atomic(path.clone(), "new".to_string()).await.unwrap();
+
+    let after = std::fs::metadata(&path).unwrap();
+    assert_eq!(after.mode() & 0o7777, 0o640);
+    assert_eq!(after.uid(), before.uid());
+    assert_eq!(after.gid(), before.gid());
+}
+
+#[tokio::test]
 async fn access_mutation_rejects_sections_with_different_source_owners() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("config.toml");

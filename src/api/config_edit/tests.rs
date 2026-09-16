@@ -324,6 +324,30 @@ async fn patch_writes_the_included_section_owner_only() {
 }
 
 #[tokio::test]
+async fn prepared_patch_rejects_external_edit_before_commit() {
+    let (path, _directory) = temp_config("[censorship]\ntls_domain = \"old.example\"\n");
+    let patch: Json = serde_json::json!({
+        "censorship": {"tls_domain": "api.example"}
+    });
+    let prepared = prepare_patch_to_path(&path, &patch, None).await.unwrap();
+    let external = "[censorship]\ntls_domain = \"external.example\"\n";
+    tokio::fs::write(&path, external).await.unwrap();
+
+    let error = write_atomic_if_unchanged(
+        prepared.config_path,
+        prepared.expected_revision,
+        prepared.owner_path,
+        prepared.expected_owner_contents,
+        prepared.owner_contents,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, "revision_conflict");
+    assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), external);
+}
+
+#[tokio::test]
 async fn patch_rejects_multiple_source_owners_without_writing() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("config.toml");

@@ -32,8 +32,8 @@ pub(in crate::api) async fn patch_user(
     }
     let expiration = parse_patch_expiration(&body.expiration_rfc3339)?;
     let _guard = shared.mutation_lock.lock().await;
-    let mut cfg = load_config_from_disk(&shared.config_path).await?;
-    ensure_expected_revision(&shared.config_path, expected_revision.as_deref()).await?;
+    let (mut cfg, base_revision) =
+        load_config_for_mutation(&shared.config_path, expected_revision.as_deref()).await?;
 
     if !cfg.access.users.contains_key(user) {
         return Err(ApiFailure::new(
@@ -168,7 +168,13 @@ pub(in crate::api) async fn patch_user(
     let revision = if touched_sections.is_empty() {
         current_revision(&shared.config_path).await?
     } else {
-        save_access_sections_to_disk(&shared.config_path, &cfg, &touched_sections).await?
+        save_access_sections_to_disk_if_revision(
+            &shared.config_path,
+            &cfg,
+            &touched_sections,
+            Some(&base_revision),
+        )
+        .await?
     };
     if touches_users || touches_user_enabled {
         let secret = cfg
@@ -212,8 +218,8 @@ pub(in crate::api) async fn set_user_enabled(
     shared: &ApiShared,
 ) -> Result<(UserInfo, String), ApiFailure> {
     let _guard = shared.mutation_lock.lock().await;
-    let mut cfg = load_config_from_disk(&shared.config_path).await?;
-    ensure_expected_revision(&shared.config_path, expected_revision.as_deref()).await?;
+    let (mut cfg, base_revision) =
+        load_config_for_mutation(&shared.config_path, expected_revision.as_deref()).await?;
 
     if !cfg.access.users.contains_key(user) {
         return Err(ApiFailure::new(
@@ -231,9 +237,13 @@ pub(in crate::api) async fn set_user_enabled(
 
     cfg.validate()
         .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {}", e)))?;
-    let revision =
-        save_access_sections_to_disk(&shared.config_path, &cfg, &[AccessSection::UserEnabled])
-            .await?;
+    let revision = save_access_sections_to_disk_if_revision(
+        &shared.config_path,
+        &cfg,
+        &[AccessSection::UserEnabled],
+        Some(&base_revision),
+    )
+    .await?;
     let secret = cfg
         .access
         .users

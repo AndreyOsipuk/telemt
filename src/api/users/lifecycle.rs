@@ -15,8 +15,8 @@ pub(in crate::api) async fn rotate_secret(
     }
 
     let _guard = shared.mutation_lock.lock().await;
-    let mut cfg = load_config_from_disk(&shared.config_path).await?;
-    ensure_expected_revision(&shared.config_path, expected_revision.as_deref()).await?;
+    let (mut cfg, base_revision) =
+        load_config_for_mutation(&shared.config_path, expected_revision.as_deref()).await?;
 
     if !cfg.access.users.contains_key(user) {
         return Err(ApiFailure::new(
@@ -29,8 +29,13 @@ pub(in crate::api) async fn rotate_secret(
     cfg.access.users.insert(user.to_string(), secret.clone());
     cfg.validate()
         .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {}", e)))?;
-    let revision =
-        save_access_sections_to_disk(&shared.config_path, &cfg, &[AccessSection::Users]).await?;
+    let revision = save_access_sections_to_disk_if_revision(
+        &shared.config_path,
+        &cfg,
+        &[AccessSection::Users],
+        Some(&base_revision),
+    )
+    .await?;
     shared
         .proxy_shared
         .stage_user(user, &secret, cfg.access.is_user_enabled(user))
@@ -67,8 +72,8 @@ pub(in crate::api) async fn delete_user(
     shared: &ApiShared,
 ) -> Result<(String, String), ApiFailure> {
     let _guard = shared.mutation_lock.lock().await;
-    let mut cfg = load_config_from_disk(&shared.config_path).await?;
-    ensure_expected_revision(&shared.config_path, expected_revision.as_deref()).await?;
+    let (mut cfg, base_revision) =
+        load_config_for_mutation(&shared.config_path, expected_revision.as_deref()).await?;
 
     if !cfg.access.users.contains_key(user) {
         return Err(ApiFailure::new(
@@ -111,8 +116,13 @@ pub(in crate::api) async fn delete_user(
 
     cfg.validate()
         .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {}", e)))?;
-    let revision =
-        save_access_sections_to_disk(&shared.config_path, &cfg, &touched_sections).await?;
+    let revision = save_access_sections_to_disk_if_revision(
+        &shared.config_path,
+        &cfg,
+        &touched_sections,
+        Some(&base_revision),
+    )
+    .await?;
     let deleted_incarnation = shared.proxy_shared.delete_user(user).incarnation;
     let configured_users = cfg.access.users.keys().cloned().collect();
     if let Err(error) = shared

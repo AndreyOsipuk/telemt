@@ -134,8 +134,8 @@ pub(super) async fn handle(
         }
         let expected_revision = parse_if_match(req.headers());
         let _mutation_guard = shared.mutation_lock.lock().await;
-        let disk_cfg = load_config_from_disk(&shared.config_path).await?;
-        ensure_expected_revision(&shared.config_path, expected_revision.as_deref()).await?;
+        let (disk_cfg, _) =
+            load_config_for_mutation(&shared.config_path, expected_revision.as_deref()).await?;
         if !disk_cfg.access.users.contains_key(user) {
             return Ok(error_response(
                 request_id,

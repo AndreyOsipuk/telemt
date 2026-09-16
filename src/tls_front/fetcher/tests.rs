@@ -6,6 +6,7 @@ use super::{
     TLS_NAMED_GROUP_X25519MLKEM768, TlsFetchStrategy, X25519_KEY_SHARE_LEN, build_client_hello,
     build_tls_fetch_proxy_header, derive_behavior_profile, encode_tls13_certificate_message,
     fetch_via_rustls_stream, order_profiles, profile_alpn, profile_cache, profile_cache_key,
+    remove_profile_if_unchanged,
 };
 use crate::config::TlsFetchProfile;
 use crate::crypto::SecureRandom;
@@ -223,6 +224,31 @@ fn test_order_profiles_drops_expired_cached_winner() {
     let ordered = order_profiles(&strategy, Some(&cache_key), Instant::now());
     assert_eq!(ordered[0], TlsFetchProfile::ModernFirefoxLike);
     assert!(profile_cache().get(&cache_key).is_none());
+}
+
+#[test]
+fn expired_profile_removal_preserves_concurrent_refresh() {
+    let cache_key = profile_cache_key("mask3.example", 443, "tls3.example", None, None, 0, None);
+    let observed = ProfileCacheValue {
+        profile: TlsFetchProfile::CompatTls12,
+        updated_at: Instant::now() - Duration::from_secs(60),
+    };
+    let refreshed = ProfileCacheValue {
+        profile: TlsFetchProfile::ModernChromeLike,
+        updated_at: Instant::now(),
+    };
+    profile_cache().insert(cache_key.clone(), observed);
+    profile_cache().insert(cache_key.clone(), refreshed);
+
+    remove_profile_if_unchanged(&cache_key, observed);
+
+    let current = profile_cache()
+        .get(&cache_key)
+        .expect("concurrent refresh must remain cached");
+    assert_eq!(current.profile, refreshed.profile);
+    assert_eq!(current.updated_at, refreshed.updated_at);
+    drop(current);
+    profile_cache().remove(&cache_key);
 }
 
 #[test]

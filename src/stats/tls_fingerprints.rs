@@ -10,6 +10,7 @@ use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 
 use crate::protocol::tls_fingerprint::TlsClientFingerprint;
+use crate::slot_budget::SlotBudget;
 
 use super::Stats;
 
@@ -68,15 +69,33 @@ struct TlsFingerprintEntry {
     bad_or_probe: AtomicU64,
 }
 
-#[derive(Default)]
 pub struct TlsFingerprintCollector {
     entries: DashMap<TlsFingerprintKey, TlsFingerprintEntry>,
+    slots: SlotBudget,
+    capacity: usize,
     dropped_total: AtomicU64,
     parse_error_total: AtomicU64,
     last_cleanup_epoch_secs: AtomicU64,
 }
 
+impl Default for TlsFingerprintCollector {
+    fn default() -> Self {
+        Self::with_capacity(MAX_TLS_FINGERPRINT_BUCKETS)
+    }
+}
+
 impl TlsFingerprintCollector {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            entries: DashMap::new(),
+            slots: SlotBudget::new(capacity),
+            capacity,
+            dropped_total: AtomicU64::new(0),
+            parse_error_total: AtomicU64::new(0),
+            last_cleanup_epoch_secs: AtomicU64::new(0),
+        }
+    }
+
     pub fn record_observed(
         &self,
         fingerprint: &TlsClientFingerprint,
@@ -228,7 +247,7 @@ impl TlsFingerprintCollector {
 
         TlsFingerprintSnapshot {
             retention_secs: ttl.as_secs(),
-            capacity: MAX_TLS_FINGERPRINT_BUCKETS,
+            capacity: self.capacity,
             dropped_total: self.dropped_total.load(Ordering::Relaxed),
             parse_error_total: self.parse_error_total.load(Ordering::Relaxed),
             by_fingerprint,
@@ -286,22 +305,6 @@ impl TlsFingerprintCollector {
             ja4_raw: fingerprint.ja4_raw.clone(),
         };
 
-        if let Some(entry) = self.entries.get(&key) {
-            update_entry(
-                entry.value(),
-                now_epoch_secs,
-                count_total,
-                count_auth_success,
-                count_bad_or_probe,
-            );
-            return;
-        }
-
-        if self.entries.len() >= MAX_TLS_FINGERPRINT_BUCKETS {
-            self.dropped_total.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-
         match self.entries.entry(key) {
             Entry::Occupied(entry) => {
                 update_entry(
@@ -313,12 +316,17 @@ impl TlsFingerprintCollector {
                 );
             }
             Entry::Vacant(entry) => {
+                let Some(slot) = self.slots.try_acquire() else {
+                    self.dropped_total.fetch_add(1, Ordering::Relaxed);
+                    return;
+                };
                 entry.insert(TlsFingerprintEntry::new(
                     now_epoch_secs,
                     if count_total { 1 } else { 0 },
                     if count_auth_success { 1 } else { 0 },
                     if count_bad_or_probe { 1 } else { 0 },
                 ));
+                slot.commit();
             }
         }
     }
@@ -339,14 +347,17 @@ impl TlsFingerprintCollector {
     }
 
     fn cleanup(&self, now_epoch_secs: u64, ttl_secs: u64) {
-        if ttl_secs == 0 {
-            self.entries.clear();
-            return;
-        }
+        let mut removed = 0usize;
         self.entries.retain(|_, entry| {
             let last_seen = entry.last_seen_epoch_secs.load(Ordering::Relaxed);
-            now_epoch_secs.saturating_sub(last_seen) <= ttl_secs
+            let retained =
+                ttl_secs != 0 && now_epoch_secs.saturating_sub(last_seen) <= ttl_secs;
+            if !retained {
+                removed += 1;
+            }
+            retained
         });
+        self.slots.release_many(removed);
     }
 }
 
@@ -526,31 +537,4 @@ impl Stats {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn fp() -> TlsClientFingerprint {
-        TlsClientFingerprint {
-            ja3: "ja3".to_string(),
-            ja3_raw: "771,4865,,,0".to_string(),
-            ja4: "t13d010100_hash_hash".to_string(),
-            ja4_raw: "raw".to_string(),
-        }
-    }
-
-    #[test]
-    fn aggregates_ip_cidr_and_user_scopes() {
-        let collector = TlsFingerprintCollector::default();
-        let ip: IpAddr = "192.0.2.15".parse().expect("test IP parses");
-        collector.record_observed(&fp(), ip, Duration::from_secs(60));
-        collector.record_auth_success(&fp(), ip, "alice", Duration::from_secs(60));
-        let snapshot = collector.snapshot(Duration::from_secs(60), 10);
-
-        assert_eq!(snapshot.by_fingerprint[0].total, 1);
-        assert_eq!(snapshot.by_fingerprint[0].auth_success, 1);
-        assert_eq!(snapshot.by_ip[0].scope_key, "192.0.2.15");
-        assert_eq!(snapshot.by_cidr[0].scope_key, "192.0.2.0/24");
-        assert_eq!(snapshot.by_user[0].scope_key, "alice");
-        assert_eq!(snapshot.by_user[0].total, 1);
-    }
-}
+mod tests;

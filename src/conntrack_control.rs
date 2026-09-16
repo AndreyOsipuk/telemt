@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 use std::net::IpAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,6 +13,8 @@ use crate::config::{ConntrackBackend, ConntrackMode, ProxyConfig};
 use crate::proxy::middle_relay::note_global_relay_pressure;
 use crate::proxy::shared_state::{ConntrackCloseEvent, ConntrackCloseReason, ProxySharedState};
 use crate::stats::Stats;
+#[cfg(unix)]
+use crate::util::trusted_command::resolve_trusted_helper;
 
 const CONNTRACK_EVENT_QUEUE_CAPACITY: usize = 32_768;
 const PRESSURE_RELEASE_TICKS: u8 = 3;
@@ -381,13 +382,15 @@ fn pick_backend(configured: ConntrackBackend) -> Option<NetfilterBackend> {
 }
 
 fn command_exists(binary: &str) -> bool {
-    let Some(path_var) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path_var).any(|dir| {
-        let candidate: PathBuf = dir.join(binary);
-        candidate.exists() && candidate.is_file()
-    })
+    #[cfg(unix)]
+    {
+        resolve_trusted_helper(binary).is_some()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = binary;
+        false
+    }
 }
 
 fn listener_port_set(cfg: &ProxyConfig) -> Vec<u16> {
@@ -651,10 +654,14 @@ async fn delete_conntrack_entry(event: ConntrackCloseEvent) -> DeleteOutcome {
 }
 
 async fn run_command(binary: &str, args: &[&str], stdin: Option<String>) -> Result<(), String> {
-    if !command_exists(binary) {
+    #[cfg(unix)]
+    let Some(command_path) = resolve_trusted_helper(binary) else {
         return Err(format!("{binary} is not available"));
-    }
-    let mut command = Command::new(binary);
+    };
+    #[cfg(not(unix))]
+    return Err(format!("{binary} is not available"));
+    #[cfg(unix)]
+    let mut command = Command::new(command_path);
     command.args(args);
     if stdin.is_some() {
         command.stdin(std::process::Stdio::piped());

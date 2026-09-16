@@ -36,7 +36,9 @@ mod validate_server;
 mod validate_web;
 mod validation;
 
-use self::includes::{hash_rendered_snapshot, normalize_config_path, preprocess_includes};
+use self::includes::{
+    hash_rendered_snapshot, normalize_config_path, preprocess_includes, read_config_source,
+};
 use self::normalize::{
     is_valid_ad_tag, is_valid_tls_domain_name, normalize_domain_to_ascii,
     normalize_exclusive_mask_target, normalize_mask_host_to_ascii, parse_exclusive_mask_target,
@@ -175,13 +177,12 @@ impl ProxyConfig {
         source_overrides: &BTreeMap<PathBuf, String>,
     ) -> Result<ConfigSourceGraph> {
         let path = path.as_ref();
-        let normalized_path = normalize_config_path(path);
-        let content = source_overrides
-            .get(&normalized_path)
-            .cloned()
-            .map(Ok)
-            .unwrap_or_else(|| std::fs::read_to_string(path))
-            .map_err(|e| ProxyError::Config(e.to_string()))?;
+        let initial_path = normalize_config_path(path);
+        let (normalized_path, content) = if let Some(content) = source_overrides.get(&initial_path) {
+            (initial_path, content.clone())
+        } else {
+            read_config_source(path)?
+        };
         let base_dir = path.parent().unwrap_or(Path::new("."));
         let mut source_files = BTreeSet::new();
         source_files.insert(normalized_path.clone());

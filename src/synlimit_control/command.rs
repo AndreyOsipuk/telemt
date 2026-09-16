@@ -1,14 +1,14 @@
-use std::path::PathBuf;
-
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+
+use crate::util::trusted_command::resolve_trusted_helper;
 
 pub(super) async fn run_command(
     binary: &str,
     args: &[&str],
     stdin: Option<String>,
 ) -> Result<(), String> {
-    let Some(command_path) = resolve_command(binary) else {
+    let Some(command_path) = resolve_trusted_helper(binary) else {
         return Err(format!("{binary} is not available"));
     };
     let mut command = Command::new(command_path);
@@ -45,7 +45,7 @@ pub(super) async fn run_command(
 }
 
 pub(super) async fn run_command_stdout(binary: &str, args: &[&str]) -> Result<String, String> {
-    let Some(command_path) = resolve_command(binary) else {
+    let Some(command_path) = resolve_trusted_helper(binary) else {
         return Err(format!("{binary} is not available"));
     };
     let output = Command::new(command_path)
@@ -62,16 +62,6 @@ pub(super) async fn run_command_stdout(binary: &str, args: &[&str]) -> Result<St
     } else {
         stderr
     })
-}
-
-fn resolve_command(binary: &str) -> Option<PathBuf> {
-    let mut dirs = std::env::var_os("PATH")
-        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
-        .unwrap_or_default();
-    dirs.extend(["/usr/sbin", "/sbin", "/usr/bin", "/bin"].map(PathBuf::from));
-    dirs.into_iter()
-        .map(|dir| dir.join(binary))
-        .find(|candidate| candidate.exists() && candidate.is_file())
 }
 
 pub(super) fn has_firewall_privileges() -> bool {

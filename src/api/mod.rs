@@ -59,7 +59,7 @@ mod web_runtime;
 mod web_status;
 
 use config_store::{
-    current_revision, ensure_expected_revision, load_config_for_reload, load_config_from_disk,
+    current_revision, load_config_for_mutation, load_config_for_reload, load_config_from_disk,
     parse_if_match,
 };
 use events::ApiEventStore;
