@@ -66,9 +66,9 @@ const MAX_API_REQUEST_BODY_LIMIT_BYTES: usize = 1024 * 1024;
 pub(crate) struct LoadedConfig {
     /// Validated and normalized effective configuration.
     pub(crate) config: ProxyConfig,
-    /// Canonical paths participating in the recursive include graph.
+    /// Normalized absolute paths participating in the recursive include graph.
     pub(crate) source_files: Vec<PathBuf>,
-    /// Raw source bytes keyed by canonical source path.
+    /// Raw source bytes keyed by normalized absolute source path.
     pub(crate) source_contents: BTreeMap<PathBuf, String>,
     /// Legacy hash of the include-expanded rendered snapshot.
     pub(crate) rendered_hash: u64,
@@ -77,7 +77,7 @@ pub(crate) struct LoadedConfig {
 /// Raw recursive source graph captured before typed deserialization.
 #[derive(Debug, Clone)]
 pub(crate) struct ConfigSourceGraph {
-    /// Raw source bytes keyed by canonical source path.
+    /// Raw source bytes keyed by normalized absolute source path.
     pub(crate) source_contents: BTreeMap<PathBuf, String>,
     /// Include-expanded TOML used for typed deserialization.
     pub(crate) rendered: String,
@@ -177,20 +177,42 @@ impl ProxyConfig {
         source_overrides: &BTreeMap<PathBuf, String>,
     ) -> Result<ConfigSourceGraph> {
         let path = path.as_ref();
-        let initial_path = normalize_config_path(path);
-        let (normalized_path, content) = if let Some(content) = source_overrides.get(&initial_path) {
-            (initial_path, content.clone())
-        } else {
-            read_config_source(path)?
-        };
-        let base_dir = path.parent().unwrap_or(Path::new("."));
+        let mut previous = Self::capture_source_graph(path, source_overrides)?;
+        for _ in 0..2 {
+            let current = Self::capture_source_graph(path, source_overrides)?;
+            if current.source_contents == previous.source_contents
+                && current.rendered == previous.rendered
+            {
+                return Ok(current);
+            }
+            previous = current;
+        }
+        Err(ProxyError::Config(
+            "config source graph changed repeatedly while it was read".to_string(),
+        ))
+    }
+
+    fn capture_source_graph(
+        path: &Path,
+        source_overrides: &BTreeMap<PathBuf, String>,
+    ) -> Result<ConfigSourceGraph> {
+        let path = path.as_ref();
+        let (normalized_path, disk_content) = read_config_source(path)?;
+        let content = source_overrides
+            .get(&normalized_path)
+            .cloned()
+            .unwrap_or(disk_content);
+        let base_dir = normalized_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
         let mut source_files = BTreeSet::new();
         source_files.insert(normalized_path.clone());
         let mut source_contents = BTreeMap::new();
         source_contents.insert(normalized_path, content.clone());
         let processed = preprocess_includes(
             &content,
-            base_dir,
+            &base_dir,
             0,
             &mut source_files,
             &mut source_contents,

@@ -1,7 +1,7 @@
 use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -61,13 +61,13 @@ pub(crate) struct HandshakeSharedState {
     pub(crate) auth_probe_eviction_hasher: RandomState,
     pub(crate) invalid_secret_warned: Mutex<HashSet<(String, String)>>,
     pub(crate) unknown_sni_warn_next_allowed: Mutex<Option<Instant>>,
-    pub(crate) sticky_user_by_ip: DashMap<IpAddr, u32>,
+    pub(crate) sticky_user_by_ip: DashMap<IpAddr, u64>,
     pub(crate) sticky_user_by_ip_slots: SlotBudget,
-    pub(crate) sticky_user_by_ip_prefix: DashMap<u64, u32>,
+    pub(crate) sticky_user_by_ip_prefix: DashMap<u64, u64>,
     pub(crate) sticky_user_by_ip_prefix_slots: SlotBudget,
-    pub(crate) sticky_user_by_sni_hash: DashMap<u64, u32>,
+    pub(crate) sticky_user_by_sni_hash: DashMap<u64, u64>,
     pub(crate) sticky_user_by_sni_hash_slots: SlotBudget,
-    pub(crate) recent_user_ring: Box<[AtomicU32]>,
+    pub(crate) recent_user_ring: Box<[AtomicU64]>,
     pub(crate) recent_user_ring_seq: AtomicU64,
     pub(crate) auth_expensive_checks_total: AtomicU64,
     pub(crate) auth_budget_exhausted_total: AtomicU64,
@@ -138,7 +138,7 @@ impl ProxySharedState {
                 sticky_user_by_sni_hash_slots: SlotBudget::new(
                     crate::proxy::handshake::STICKY_HINT_MAX_ENTRIES,
                 ),
-                recent_user_ring: std::iter::repeat_with(|| AtomicU32::new(0))
+                recent_user_ring: std::iter::repeat_with(|| AtomicU64::new(0))
                     .take(HANDSHAKE_RECENT_USER_RING_LEN)
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),

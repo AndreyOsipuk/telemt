@@ -1,11 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
@@ -173,6 +171,19 @@ fn now_epoch_secs() -> u64 {
 }
 
 async fn read_state_file(path: &Path) -> std::io::Result<Option<QuotaStateFile>> {
+    #[cfg(unix)]
+    let payload = match crate::util::secure_fs::read_regular_limited_async(
+        path.to_path_buf(),
+        QUOTA_STATE_MAX_BYTES as usize,
+    )
+    .await
+    {
+        Ok(payload) => payload,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    #[cfg(not(unix))]
+    let payload = {
     let file = match tokio::fs::File::open(path).await {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -194,6 +205,8 @@ async fn read_state_file(path: &Path) -> std::io::Result<Option<QuotaStateFile>>
             "quota state file grew beyond the 16 MiB limit while reading",
         ));
     }
+        payload
+    };
     let state = serde_json::from_slice(&payload).map_err(|error| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -217,11 +230,6 @@ async fn wait_for_blocking_io<T>(
 }
 
 fn write_state_file_blocking(path: &Path, state: &QuotaStateFile) -> std::io::Result<()> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)?;
     let mut payload = serde_json::to_vec_pretty(state)?;
     payload.push(b'\n');
     if payload.len() as u64 > QUOTA_STATE_MAX_BYTES {
@@ -230,6 +238,20 @@ fn write_state_file_blocking(path: &Path, state: &QuotaStateFile) -> std::io::Re
             "quota state payload exceeds the 16 MiB limit",
         ));
     }
+
+    #[cfg(unix)]
+    {
+        return crate::util::secure_fs::atomic_replace(path, &payload, 0o600);
+    }
+    #[cfg(not(unix))]
+    {
+    use std::io::Write;
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
 
     let mut last_collision = None;
     for _ in 0..8 {
@@ -270,6 +292,7 @@ fn write_state_file_blocking(path: &Path, state: &QuotaStateFile) -> std::io::Re
             "failed to allocate a unique quota checkpoint temporary file",
         )
     }))
+    }
 }
 
 fn quota_user_state(quota: UserQuotaSnapshot) -> QuotaUserState {

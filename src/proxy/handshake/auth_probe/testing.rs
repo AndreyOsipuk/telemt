@@ -21,8 +21,10 @@ pub(crate) fn auth_probe_fail_streak_for_testing_in_shared(
 }
 
 pub(crate) fn clear_auth_probe_state_for_testing_in_shared(shared: &ProxySharedState) {
+    let removed = shared.handshake.auth_probe.len();
+    assert_eq!(shared.handshake.auth_probe_slots.used(), removed);
     shared.handshake.auth_probe.clear();
-    shared.handshake.auth_probe_slots.reset_for_testing();
+    shared.handshake.auth_probe_slots.release_many(removed);
     match shared.handshake.auth_probe_saturation.lock() {
         Ok(mut saturation) => {
             *saturation = None;
@@ -31,6 +33,28 @@ pub(crate) fn clear_auth_probe_state_for_testing_in_shared(shared: &ProxySharedS
             let mut saturation = poisoned.into_inner();
             *saturation = None;
             shared.handshake.auth_probe_saturation.clear_poison();
+        }
+    }
+}
+
+pub(crate) fn insert_auth_probe_state_for_testing_in_shared(
+    shared: &ProxySharedState,
+    peer_ip: IpAddr,
+    state: AuthProbeState,
+) {
+    let peer_ip = normalize_auth_probe_ip(peer_ip);
+    let slot = shared
+        .handshake
+        .auth_probe_slots
+        .try_acquire()
+        .expect("test auth-probe registry capacity must be available");
+    match shared.handshake.auth_probe.entry(peer_ip) {
+        Entry::Occupied(mut entry) => {
+            entry.insert(state);
+        }
+        Entry::Vacant(entry) => {
+            entry.insert(state);
+            slot.commit();
         }
     }
 }

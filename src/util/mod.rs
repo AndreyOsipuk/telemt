@@ -1,6 +1,8 @@
 //! Utils
 
 pub mod ip;
+#[cfg(unix)]
+pub mod secure_fs;
 pub mod time;
 #[cfg(unix)]
 pub mod trusted_command;

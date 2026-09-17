@@ -20,6 +20,8 @@ use crate::config::{ListenerTransport, ProxyConfig};
 use crate::startup::{COMPONENT_LISTENERS_BIND, StartupTracker};
 use crate::transport::find_listener_processes;
 use crate::transport::socket::{activate_listener_socket, bind_listener_socket};
+#[cfg(unix)]
+use crate::util::secure_fs::AnchoredPath;
 
 use super::plan::{ListenerBindSpec, listener_bind_plan};
 use crate::maestro::helpers::{print_proxy_links, print_web_proxy_links};
@@ -281,6 +283,7 @@ pub(crate) async fn bind_listeners(
     #[cfg(unix)]
     if let Some(unix_path) = &config.server.listen_unix_sock {
         let unix_path = Path::new(unix_path);
+        let anchored_path = AnchoredPath::open_trusted_parent(unix_path)?;
         remove_stale_unix_socket(unix_path)?;
         let unix_listener = UnixListener::bind(unix_path)?;
         let socket_metadata = std::fs::symlink_metadata(unix_path)?;
@@ -295,10 +298,15 @@ pub(crate) async fn bind_listeners(
         if let Some(perm_str) = &config.server.listen_unix_sock_perm {
             match u32::from_str_radix(perm_str.trim_start_matches('0'), 8) {
                 Ok(mode) => {
-                    use std::os::unix::fs::PermissionsExt;
-                    let permissions = std::fs::Permissions::from_mode(mode);
+                    use nix::sys::stat::{FchmodatFlags, Mode, fchmodat};
+
                     verify_bound_unix_socket(unix_path, socket_identity)?;
-                    if let Err(error_value) = std::fs::set_permissions(unix_path, permissions) {
+                    if let Err(error_value) = fchmodat(
+                        anchored_path.parent(),
+                        anchored_path.name(),
+                        Mode::from_bits_truncate(mode),
+                        FchmodatFlags::NoFollowSymlink,
+                    ) {
                         error!(
                             path = %unix_path.display(),
                             permissions = %perm_str,

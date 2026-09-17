@@ -42,7 +42,7 @@ pub(super) fn ip_prefix_hint_key(peer_ip: IpAddr) -> u64 {
     }
 }
 
-pub(super) fn sticky_hint_get_by_ip(shared: &ProxySharedState, peer_ip: IpAddr) -> Option<u32> {
+pub(super) fn sticky_hint_get_by_ip(shared: &ProxySharedState, peer_ip: IpAddr) -> Option<u64> {
     shared
         .handshake
         .sticky_user_by_ip
@@ -53,7 +53,7 @@ pub(super) fn sticky_hint_get_by_ip(shared: &ProxySharedState, peer_ip: IpAddr) 
 pub(super) fn sticky_hint_get_by_ip_prefix(
     shared: &ProxySharedState,
     peer_ip: IpAddr,
-) -> Option<u32> {
+) -> Option<u64> {
     shared
         .handshake
         .sticky_user_by_ip_prefix
@@ -61,7 +61,7 @@ pub(super) fn sticky_hint_get_by_ip_prefix(
         .map(|entry| *entry)
 }
 
-pub(super) fn sticky_hint_get_by_sni(shared: &ProxySharedState, sni: &str) -> Option<u32> {
+pub(super) fn sticky_hint_get_by_sni(shared: &ProxySharedState, sni: &str) -> Option<u64> {
     let key = sni_hint_hash(sni);
     shared
         .handshake
@@ -73,20 +73,20 @@ pub(super) fn sticky_hint_get_by_sni(shared: &ProxySharedState, sni: &str) -> Op
 pub(super) fn sticky_hint_record_success_in(
     shared: &ProxySharedState,
     peer_ip: IpAddr,
-    user_id: u32,
+    hint_key: u64,
     sni: Option<&str>,
 ) {
     bounded_sticky_hint_upsert(
         &shared.handshake.sticky_user_by_ip,
         &shared.handshake.sticky_user_by_ip_slots,
         peer_ip,
-        user_id,
+        hint_key,
     );
     bounded_sticky_hint_upsert(
         &shared.handshake.sticky_user_by_ip_prefix,
         &shared.handshake.sticky_user_by_ip_prefix_slots,
         ip_prefix_hint_key(peer_ip),
-        user_id,
+        hint_key,
     );
 
     if let Some(sni) = sni {
@@ -94,34 +94,55 @@ pub(super) fn sticky_hint_record_success_in(
             &shared.handshake.sticky_user_by_sni_hash,
             &shared.handshake.sticky_user_by_sni_hash_slots,
             sni_hint_hash(sni),
-            user_id,
+            hint_key,
         );
     }
 }
 
 fn bounded_sticky_hint_upsert<K>(
-    entries: &DashMap<K, u32>,
+    entries: &DashMap<K, u64>,
     slots: &crate::slot_budget::SlotBudget,
     key: K,
-    user_id: u32,
+    hint_key: u64,
 ) where
-    K: Eq + Hash,
+    K: Clone + Eq + Hash,
 {
-    match entries.entry(key) {
-        Entry::Occupied(mut entry) => {
-            entry.insert(user_id);
+    if let Some(mut existing) = entries.get_mut(&key) {
+        *existing = hint_key;
+        return;
+    }
+
+    for _ in 0..2 {
+        if let Some(slot) = slots.try_acquire() {
+            match entries.entry(key.clone()) {
+                Entry::Occupied(mut entry) => {
+                    entry.insert(hint_key);
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(hint_key);
+                    slot.commit();
+                }
+            }
+            return;
         }
-        Entry::Vacant(entry) => {
-            let Some(slot) = slots.try_acquire() else {
-                return;
-            };
-            entry.insert(user_id);
-            slot.commit();
+
+        let Some((victim_key, victim_hint_key)) = entries
+            .iter()
+            .next()
+            .map(|entry| (entry.key().clone(), *entry.value()))
+        else {
+            return;
+        };
+        if entries
+            .remove_if(&victim_key, |_, current| *current == victim_hint_key)
+            .is_some()
+        {
+            slots.release();
         }
     }
 }
 
-pub(super) fn record_recent_user_success_in(shared: &ProxySharedState, user_id: u32) {
+pub(super) fn record_recent_user_success_in(shared: &ProxySharedState, hint_key: u64) {
     let ring = &shared.handshake.recent_user_ring;
     if ring.is_empty() {
         return;
@@ -131,7 +152,7 @@ pub(super) fn record_recent_user_success_in(shared: &ProxySharedState, user_id: 
         .recent_user_ring_seq
         .fetch_add(1, Ordering::Relaxed);
     let idx = (seq as usize) % ring.len();
-    ring[idx].store(user_id.saturating_add(1), Ordering::Relaxed);
+    ring[idx].store(hint_key, Ordering::Relaxed);
 }
 
 pub(super) fn mark_candidate_if_new(
@@ -387,7 +408,7 @@ mod bounded_registry_tests {
                         sticky_hint_record_success_in(
                             shared.as_ref(),
                             peer_ip,
-                            index as u32,
+                            index as u64 | 1,
                             Some(&format!("host-{index}.example")),
                         );
                     }

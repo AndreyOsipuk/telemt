@@ -231,9 +231,6 @@ impl TlsFrontCache {
 
     pub async fn load_from_disk(&self) {
         let path = self.disk_path.clone();
-        if tokio::fs::create_dir_all(&path).await.is_err() {
-            return;
-        }
         let mut loaded = 0usize;
         for name in &self.disk_entry_names {
             let entry_path = path.join(name);
@@ -297,9 +294,6 @@ impl TlsFrontCache {
     }
 
     async fn persist(&self, domain: &str, data: &CachedTlsData) {
-        if tokio::fs::create_dir_all(&self.disk_path).await.is_err() {
-            return;
-        }
         let fname = format!("{}.json", domain.replace(['/', '\\'], "_"));
         let path = self.disk_path.join(fname);
         if let Ok(json) = serde_json::to_vec_pretty(data) {
@@ -311,7 +305,9 @@ impl TlsFrontCache {
                 );
                 return;
             }
-            // best-effort write
+            #[cfg(unix)]
+            let _ = crate::util::secure_fs::atomic_replace_async(path, json, 0o600).await;
+            #[cfg(not(unix))]
             let _ = tokio::fs::write(path, json).await;
         }
     }

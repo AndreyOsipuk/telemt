@@ -23,6 +23,8 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
 use super::*;
+#[cfg(unix)]
+use crate::util::secure_fs::open_dir_nofollow;
 
 // Path-based static snapshot fallback for platforms without directory descriptors.
 #[cfg(not(unix))]
@@ -247,14 +249,15 @@ fn load_static_site(
 
 #[cfg(unix)]
 fn open_static_root(root: &Path) -> Result<Dir> {
-    Dir::open(
-        root,
-        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|error| {
+    let descriptor = open_dir_nofollow(root).map_err(|error| {
         ProxyError::Config(format!(
             "WEB static directory `{}` must be a real directory, not a symlink: {error}",
+            root.display()
+        ))
+    })?;
+    Dir::from_fd(descriptor).map_err(|error| {
+        ProxyError::Config(format!(
+            "failed to read WEB static directory `{}`: {error}",
             root.display()
         ))
     })

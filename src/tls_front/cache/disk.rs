@@ -1,27 +1,26 @@
 use std::path::Path;
 
-use tokio::io::AsyncReadExt;
-
 use super::*;
 pub(super) async fn read_disk_entry_bounded(path: &Path) -> std::io::Result<Vec<u8>> {
-    let file = tokio::fs::File::open(path).await?;
-    if file.metadata().await?.len() > TLS_FRONT_DISK_ENTRY_MAX_BYTES {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "TLS cache entry exceeds the 1 MiB limit",
-        ));
+    #[cfg(unix)]
+    {
+        crate::util::secure_fs::read_regular_limited_async(
+            path.to_path_buf(),
+            TLS_FRONT_DISK_ENTRY_MAX_BYTES as usize,
+        )
+        .await
     }
-    let mut bytes = Vec::new();
-    file.take(TLS_FRONT_DISK_ENTRY_MAX_BYTES.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .await?;
-    if bytes.len() as u64 > TLS_FRONT_DISK_ENTRY_MAX_BYTES {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "TLS cache entry grew beyond the 1 MiB limit while reading",
-        ));
+    #[cfg(not(unix))]
+    {
+        let bytes = tokio::fs::read(path).await?;
+        if bytes.len() as u64 > TLS_FRONT_DISK_ENTRY_MAX_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "TLS cache entry exceeds the 1 MiB limit",
+            ));
+        }
+        Ok(bytes)
     }
-    Ok(bytes)
 }
 
 pub(super) fn cert_info_matches_domain(cached: &CachedTlsData) -> bool {

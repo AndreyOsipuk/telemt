@@ -25,6 +25,21 @@ impl RunningClientHandler {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
+        // Manually constructed handshake fixtures bypass credential validation, so
+        // materialize the process-authority state that a real handshake generation owns.
+        let config = if config.runtime_user_credential_id(&success.user).is_none() {
+            let mut test_config = (*config).clone();
+            test_config.access.users.insert(
+                success.user.clone(),
+                "00000000000000000000000000000000".to_string(),
+            );
+            test_config.rebuild_runtime_user_auth()?;
+            Arc::new(test_config)
+        } else {
+            config
+        };
+        let shared = ProxySharedState::new();
+        shared.apply_user_config(&config.access.users, &config.access.user_enabled);
         Self::handle_authenticated_static_with_shared(
             client_reader,
             client_writer,
@@ -40,7 +55,7 @@ impl RunningClientHandler {
             local_addr,
             peer_addr,
             ip_tracker,
-            ProxySharedState::new(),
+            shared,
         )
         .await
     }

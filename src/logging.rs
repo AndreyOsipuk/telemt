@@ -8,8 +8,6 @@
 // Infrastructure module used via CLI flags.
 #![allow(dead_code)]
 
-use std::path::Path;
-
 use crate::config::{LogRotation, LoggingConfig, LoggingDestination};
 
 use tracing_subscriber::layer::SubscriberExt;
@@ -144,31 +142,9 @@ pub fn init_logging(
         }
 
         LogDestination::File { options } => {
-            let (non_blocking, guard) = if options.max_size_bytes > 0
-                || options.max_files > 0
-                || options.max_age_secs > 0
-            {
-                let file_appender = file::BoundedFileAppender::new(options.clone())
-                    .expect("Failed to open log file");
-                tracing_appender::non_blocking(file_appender)
-            } else if !matches!(options.rotation, LogRotation::Never) {
-                let path = Path::new(&options.path);
-                let dir = log_file_dir(path);
-                let prefix = log_file_name(path);
-                let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
-                    .rotation(to_tracing_rotation(options.rotation))
-                    .filename_prefix(prefix)
-                    .build(dir)
-                    .expect("Failed to open log file");
-                tracing_appender::non_blocking(file_appender)
-            } else {
-                let file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&options.path)
-                    .expect("Failed to open log file");
-                tracing_appender::non_blocking(file)
-            };
+            let file_appender = file::BoundedFileAppender::new(options.clone())
+                .expect("Failed to open log file");
+            let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
             let fmt_layer = fmt::Layer::default()
                 .with_ansi(false)
@@ -182,28 +158,6 @@ pub fn init_logging(
 
             (filter_handle, LoggingGuard::new(Some(guard)))
         }
-    }
-}
-
-fn log_file_dir(path: &Path) -> &Path {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
-}
-
-fn log_file_name(path: &Path) -> &str {
-    path.file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("telemt")
-}
-
-fn to_tracing_rotation(rotation: LogRotation) -> tracing_appender::rolling::Rotation {
-    match rotation {
-        LogRotation::Never => tracing_appender::rolling::Rotation::NEVER,
-        LogRotation::Minutely => tracing_appender::rolling::Rotation::MINUTELY,
-        LogRotation::Hourly => tracing_appender::rolling::Rotation::HOURLY,
-        LogRotation::Daily => tracing_appender::rolling::Rotation::DAILY,
-        LogRotation::Weekly => tracing_appender::rolling::Rotation::WEEKLY,
     }
 }
 

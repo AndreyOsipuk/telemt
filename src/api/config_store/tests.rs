@@ -315,6 +315,48 @@ async fn atomic_write_preserves_existing_file_mode() {
 }
 
 #[tokio::test]
+async fn config_sidecar_lock_serializes_competing_revision_writers() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let original = concat!(
+        "[censorship]\n",
+        "tls_domain = \"original.example\"\n",
+        "[access.users]\n",
+        "alice = \"00000000000000000000000000000000\"\n"
+    );
+    tokio::fs::write(&path, original).await.unwrap();
+    let graph = ProxyConfig::read_source_graph(&path).unwrap();
+    let revision = compute_source_revision(&graph);
+
+    let first = tokio::spawn(write_atomic_if_unchanged(
+        path.clone(),
+        revision.clone(),
+        path.clone(),
+        original.to_string(),
+        original.replace("original.example", "first.example"),
+    ));
+    let second = tokio::spawn(write_atomic_if_unchanged(
+        path.clone(),
+        revision,
+        path.clone(),
+        original.to_string(),
+        original.replace("original.example", "second.example"),
+    ));
+    let first = first.await.unwrap();
+    let second = second.await.unwrap();
+
+    assert_ne!(first.is_ok(), second.is_ok());
+    let conflict = if let Err(error) = first {
+        error
+    } else {
+        second.unwrap_err()
+    };
+    assert_eq!(conflict.code, "revision_conflict");
+    let persisted = tokio::fs::read_to_string(path).await.unwrap();
+    assert!(persisted.contains("first.example") || persisted.contains("second.example"));
+}
+
+#[tokio::test]
 async fn access_mutation_rejects_sections_with_different_source_owners() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("config.toml");

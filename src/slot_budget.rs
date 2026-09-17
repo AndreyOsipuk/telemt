@@ -54,10 +54,7 @@ impl SlotBudget {
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 current.checked_sub(amount)
             });
-        #[cfg(not(test))]
         debug_assert!(released.is_ok(), "slot budget release must match acquisitions");
-        #[cfg(test)]
-        let _ = released;
     }
 
     /// Returns the exact number of currently committed or reserved slots.
@@ -65,10 +62,6 @@ impl SlotBudget {
         self.used.load(Ordering::Acquire)
     }
 
-    #[cfg(test)]
-    pub(crate) fn reset_for_testing(&self) {
-        self.used.store(0, Ordering::Release);
-    }
 }
 
 /// Provisional slot ownership that rolls back unless committed to a registry entry.

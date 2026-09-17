@@ -396,8 +396,18 @@ where
     auth_probe_record_success_in(shared, peer.ip());
 
     if let Some(user_id) = validated_user_id {
-        sticky_hint_record_success_in(shared, peer.ip(), user_id, client_sni.as_deref());
-        record_recent_user_success_in(shared, user_id);
+        if let Some(entry) = config
+            .runtime_user_auth()
+            .and_then(|snapshot| snapshot.entry_by_id(user_id))
+        {
+            sticky_hint_record_success_in(
+                shared,
+                peer.ip(),
+                entry.hint_key,
+                client_sni.as_deref(),
+            );
+            record_recent_user_success_in(shared, entry.hint_key);
+        }
     }
 
     HandshakeResult::Success((

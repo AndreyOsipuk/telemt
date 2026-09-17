@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -114,10 +113,9 @@ pub fn run_init(opts: InitOptions) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("[+] Port:   {}", opts.port);
     eprintln!("[+] Domain: {}", opts.domain);
 
-    fs::create_dir_all(&opts.config_dir)?;
     let config_path = opts.config_dir.join("config.toml");
     let config_content = generate_config(&opts.username, &secret, opts.port, &opts.domain);
-    fs::write(&config_path, &config_content)?;
+    write_init_file(&config_path, &config_content, 0o600)?;
     eprintln!("[+] Config written to {}", config_path.display());
 
     let exe_path =
@@ -135,22 +133,15 @@ pub fn run_init(opts: InitOptions) -> Result<(), Box<dyn std::error::Error>> {
 
     let service_path = service::service_file_path(init_system);
     let service_content = service::generate_service_file(init_system, &service_opts);
-    if let Some(parent) = Path::new(service_path).parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-
-    match fs::write(service_path, &service_content) {
+    let service_mode = if init_system == InitSystem::OpenRC || init_system == InitSystem::FreeBSDRc
+    {
+        0o755
+    } else {
+        0o644
+    };
+    match write_init_file(Path::new(service_path), &service_content, service_mode) {
         Ok(()) => {
             eprintln!("[+] Service file written to {}", service_path);
-
-            // OpenRC and FreeBSD service scripts must be executable.
-            #[cfg(unix)]
-            if init_system == InitSystem::OpenRC || init_system == InitSystem::FreeBSDRc {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = fs::metadata(service_path)?.permissions();
-                perms.set_mode(0o755);
-                fs::set_permissions(service_path, perms)?;
-            }
         }
         Err(e) => {
             eprintln!("[!] Cannot write service file (run as root?): {}", e);
@@ -224,6 +215,21 @@ pub fn run_init(opts: InitOptions) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!();
     print_links(&opts.username, &secret, opts.port, &opts.domain);
     Ok(())
+}
+
+fn write_init_file(path: &Path, contents: &str, mode: u32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        crate::util::secure_fs::atomic_replace(path, contents.as_bytes(), mode)
+    }
+    #[cfg(not(unix))]
+    {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let _ = mode;
+        std::fs::write(path, contents)
+    }
 }
 
 fn generate_secret() -> String {

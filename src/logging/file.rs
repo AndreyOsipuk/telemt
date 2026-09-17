@@ -1,7 +1,25 @@
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
+#[cfg(not(unix))]
+use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[cfg(unix)]
+use std::ffi::OsString;
+#[cfg(unix)]
+use std::os::fd::OwnedFd;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
+
+#[cfg(unix)]
+use nix::dir::Dir;
+#[cfg(unix)]
+use nix::fcntl::{OFlag, openat, renameat};
+#[cfg(unix)]
+use nix::sys::stat::Mode;
+#[cfg(unix)]
+use nix::unistd::{UnlinkatFlags, dup, unlinkat};
 
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Utc};
 
@@ -20,6 +38,8 @@ pub(crate) struct BoundedFileAppender {
     current_size: u64,
     last_cleanup: DateTime<Utc>,
     file: Option<File>,
+    #[cfg(unix)]
+    dir_fd: OwnedFd,
     now: Box<dyn Fn() -> DateTime<Utc> + Send + Sync>,
 }
 
@@ -46,6 +66,11 @@ impl BoundedFileAppender {
 
         let start = now();
         let current_path = active_path_for(&dir, &base_name, options.rotation, &start);
+        #[cfg(unix)]
+        let dir_fd = crate::util::secure_fs::open_dir_nofollow_or_create(&dir, 0o750)?;
+        #[cfg(unix)]
+        let (file, current_size) = open_append_file(&dir_fd, &current_path)?;
+        #[cfg(not(unix))]
         let (file, current_size) = open_append_file(&current_path)?;
         let mut appender = Self {
             options,
@@ -55,6 +80,8 @@ impl BoundedFileAppender {
             current_size,
             last_cleanup: start,
             file: Some(file),
+            #[cfg(unix)]
+            dir_fd,
             now,
         };
         appender.cleanup(&start);
@@ -79,10 +106,8 @@ impl BoundedFileAppender {
 
     fn rotate_for_size(&mut self, now: &DateTime<Utc>) -> io::Result<()> {
         self.close_current()?;
-        if self.current_path.exists() {
-            let archive_path = self.archive_path(now);
-            fs::rename(&self.current_path, archive_path)?;
-        }
+        let archive_path = self.archive_path(now);
+        self.rename_current_if_present(&archive_path)?;
         self.open_current()
     }
 
@@ -95,7 +120,7 @@ impl BoundedFileAppender {
         let stamp = now.format("%Y%m%d%H%M%S");
         for seq in 0..1000 {
             let candidate = self.dir.join(format!("{file_name}.{stamp}.{seq}"));
-            if !candidate.exists() {
+            if !self.path_exists(&candidate) {
                 return candidate;
             }
         }
@@ -103,6 +128,9 @@ impl BoundedFileAppender {
     }
 
     fn open_current(&mut self) -> io::Result<()> {
+        #[cfg(unix)]
+        let (file, current_size) = open_append_file(&self.dir_fd, &self.current_path)?;
+        #[cfg(not(unix))]
         let (file, current_size) = open_append_file(&self.current_path)?;
         self.file = Some(file);
         self.current_size = current_size;
@@ -130,39 +158,9 @@ impl BoundedFileAppender {
 
     fn cleanup(&mut self, now: &DateTime<Utc>) {
         self.last_cleanup = now.clone();
-        let Ok(entries) = fs::read_dir(&self.dir) else {
+        let Ok(mut candidates) = self.collect_candidates() else {
             return;
         };
-
-        let mut candidates = Vec::new();
-        let prefix = format!("{}.", self.base_name);
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if !file_type.is_file() {
-                continue;
-            }
-
-            let is_current = path == self.current_path;
-            let Some(name) = entry.file_name().to_str().map(|name| name.to_string()) else {
-                continue;
-            };
-            if !is_current && !name.starts_with(&prefix) {
-                continue;
-            }
-
-            let Ok(metadata) = entry.metadata() else {
-                continue;
-            };
-            let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
-            candidates.push(LogFileCandidate {
-                path,
-                modified,
-                is_current,
-            });
-        }
 
         if self.options.max_age_secs > 0 {
             let cutoff = system_time_from_utc(now)
@@ -172,7 +170,7 @@ impl BoundedFileAppender {
                 if candidate.is_current || candidate.modified >= cutoff {
                     true
                 } else {
-                    let _ = fs::remove_file(&candidate.path);
+                    self.remove_candidate(candidate);
                     false
                 }
             });
@@ -189,10 +187,152 @@ impl BoundedFileAppender {
                 if total <= self.options.max_files {
                     break;
                 }
-                let _ = fs::remove_file(candidate.path);
+                self.remove_candidate(&candidate);
                 total -= 1;
             }
         }
+    }
+
+    #[cfg(unix)]
+    fn path_exists(&self, path: &Path) -> bool {
+        let Some(name) = path.file_name() else {
+            return true;
+        };
+        match openat(
+            &self.dir_fd,
+            name,
+            OFlag::O_RDONLY | OFlag::O_NONBLOCK | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(_) => true,
+            Err(nix::errno::Errno::ENOENT) => false,
+            Err(_) => true,
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn path_exists(&self, path: &Path) -> bool {
+        path.exists()
+    }
+
+    #[cfg(unix)]
+    fn rename_current_if_present(&self, archive_path: &Path) -> io::Result<()> {
+        let current_name = self.current_path.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "log path has no file name")
+        })?;
+        let archive_name = archive_path.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "archive path has no file name")
+        })?;
+        match renameat(
+            &self.dir_fd,
+            current_name,
+            &self.dir_fd,
+            archive_name,
+        ) {
+            Ok(()) => Ok(()),
+            Err(nix::errno::Errno::ENOENT) => Ok(()),
+            Err(error) => Err(io::Error::from_raw_os_error(error as i32)),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn rename_current_if_present(&self, archive_path: &Path) -> io::Result<()> {
+        if self.current_path.exists() {
+            fs::rename(&self.current_path, archive_path)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn collect_candidates(&self) -> io::Result<Vec<LogFileCandidate>> {
+        use std::os::unix::fs::MetadataExt;
+
+        let descriptor = dup(&self.dir_fd).map_err(|error| {
+            io::Error::from_raw_os_error(error as i32)
+        })?;
+        let mut directory = Dir::from_fd(descriptor)
+            .map_err(|error| io::Error::from_raw_os_error(error as i32))?;
+        let mut candidates = Vec::new();
+        let prefix = format!("{}.", self.base_name);
+        for entry in directory.iter().flatten() {
+            let bytes = entry.file_name().to_bytes();
+            if bytes == b"." || bytes == b".." {
+                continue;
+            }
+            let name = OsString::from_vec(bytes.to_vec());
+            let path = self.dir.join(&name);
+            let is_current = path == self.current_path;
+            let Some(name_text) = name.to_str() else {
+                continue;
+            };
+            if !is_current && !name_text.starts_with(&prefix) {
+                continue;
+            }
+            let Ok(descriptor) = openat(
+                &self.dir_fd,
+                name.as_os_str(),
+                OFlag::O_RDONLY | OFlag::O_NONBLOCK | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+                Mode::empty(),
+            ) else {
+                continue;
+            };
+            let file = File::from(descriptor);
+            let Ok(metadata) = file.metadata() else {
+                continue;
+            };
+            if !metadata.is_file() || metadata.nlink() != 1 {
+                continue;
+            }
+            candidates.push(LogFileCandidate {
+                path,
+                modified: metadata.modified().unwrap_or(UNIX_EPOCH),
+                is_current,
+            });
+        }
+        Ok(candidates)
+    }
+
+    #[cfg(not(unix))]
+    fn collect_candidates(&self) -> io::Result<Vec<LogFileCandidate>> {
+        let mut candidates = Vec::new();
+        let prefix = format!("{}.", self.base_name);
+        for entry in fs::read_dir(&self.dir)?.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_file() {
+                continue;
+            }
+            let is_current = path == self.current_path;
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if !is_current && !name.starts_with(&prefix) {
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            candidates.push(LogFileCandidate {
+                path,
+                modified: metadata.modified().unwrap_or(UNIX_EPOCH),
+                is_current,
+            });
+        }
+        Ok(candidates)
+    }
+
+    #[cfg(unix)]
+    fn remove_candidate(&self, candidate: &LogFileCandidate) {
+        if let Some(name) = candidate.path.file_name() {
+            let _ = unlinkat(&self.dir_fd, name, UnlinkatFlags::NoRemoveDir);
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn remove_candidate(&self, candidate: &LogFileCandidate) {
+        let _ = fs::remove_file(&candidate.path);
     }
 }
 
@@ -233,6 +373,17 @@ struct LogFileCandidate {
     is_current: bool,
 }
 
+#[cfg(unix)]
+fn open_append_file(dir_fd: &OwnedFd, path: &Path) -> io::Result<(File, u64)> {
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "log path has no file name")
+    })?;
+    let file = crate::util::secure_fs::open_append_regular_at(dir_fd, name, 0o640)?;
+    let current_size = file.metadata()?.len();
+    Ok((file, current_size))
+}
+
+#[cfg(not(unix))]
 fn open_append_file(path: &Path) -> io::Result<(File, u64)> {
     let mut options = OpenOptions::new();
     options.create(true).append(true);
@@ -291,105 +442,4 @@ fn system_time_from_utc(now: &DateTime<Utc>) -> SystemTime {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::io::Write;
-
-    use tempfile::tempdir;
-
-    use super::*;
-
-    fn fixed_now() -> DateTime<Utc> {
-        DateTime::<Utc>::from(UNIX_EPOCH + Duration::from_secs(10))
-    }
-
-    fn options(path: PathBuf) -> FileLogOptions {
-        FileLogOptions {
-            path: path.to_string_lossy().to_string(),
-            rotation: LogRotation::Never,
-            max_size_bytes: 0,
-            max_files: 0,
-            max_age_secs: 0,
-        }
-    }
-
-    fn matching_logs(dir: &Path) -> Vec<PathBuf> {
-        let mut files: Vec<_> = fs::read_dir(dir)
-            .unwrap()
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("telemt.log"))
-                    .unwrap_or(false)
-            })
-            .collect();
-        files.sort();
-        files
-    }
-
-    #[test]
-    fn size_rotation_keeps_latest_write_in_active_file() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("telemt.log");
-        let mut options = options(path.clone());
-        options.max_size_bytes = 6;
-
-        let mut appender = BoundedFileAppender::with_now(options, Box::new(fixed_now)).unwrap();
-        appender.write_all(b"abc\n").unwrap();
-        appender.write_all(b"def\n").unwrap();
-        appender.flush().unwrap();
-
-        assert_eq!(fs::read_to_string(path).unwrap(), "def\n");
-        assert_eq!(matching_logs(dir.path()).len(), 2);
-    }
-
-    #[test]
-    fn max_files_retention_removes_oldest_archives() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("telemt.log");
-        let mut options = options(path);
-        options.max_size_bytes = 4;
-        options.max_files = 2;
-
-        let mut appender = BoundedFileAppender::with_now(options, Box::new(fixed_now)).unwrap();
-        for line in [b"aa\n", b"bb\n", b"cc\n", b"dd\n"] {
-            appender.write_all(line).unwrap();
-        }
-        appender.flush().unwrap();
-
-        assert!(matching_logs(dir.path()).len() <= 2);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn max_age_retention_removes_old_archives() {
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt;
-
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("telemt.log");
-        let old_archive = dir.path().join("telemt.log.20000101000000.0");
-        fs::write(&old_archive, "old").unwrap();
-
-        let c_path = CString::new(old_archive.as_os_str().as_bytes()).unwrap();
-        let times = [
-            libc::timespec {
-                tv_sec: 0,
-                tv_nsec: 0,
-            },
-            libc::timespec {
-                tv_sec: 0,
-                tv_nsec: 0,
-            },
-        ];
-        let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
-        assert_eq!(rc, 0);
-
-        let mut options = options(path);
-        options.max_age_secs = 1;
-        let _appender = BoundedFileAppender::with_now(options, Box::new(fixed_now)).unwrap();
-
-        assert!(!old_archive.exists());
-    }
-}
+mod tests;
