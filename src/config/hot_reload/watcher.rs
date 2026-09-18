@@ -52,15 +52,24 @@ impl ReloadState {
 }
 
 fn normalize_watch_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(path))
-                .unwrap_or_else(|_| path.to_path_buf())
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
         }
-    })
+    }
+    normalized
 }
 
 fn sync_watch_paths<W: Watcher>(
@@ -432,4 +441,22 @@ pub fn spawn_config_watcher(
     };
 
     (config_rx, log_rx, task)
+}
+
+#[cfg(all(test, unix))]
+mod path_tests {
+    use std::os::unix::fs::symlink;
+
+    use super::normalize_watch_path;
+
+    #[test]
+    fn watch_path_normalization_preserves_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.toml");
+        let linked = dir.path().join("linked.toml");
+        std::fs::write(&real, "").unwrap();
+        symlink(&real, &linked).unwrap();
+
+        assert_eq!(normalize_watch_path(&linked), linked);
+    }
 }

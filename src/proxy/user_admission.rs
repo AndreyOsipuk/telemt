@@ -1,11 +1,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use parking_lot::{Mutex, MutexGuard};
 use tokio_util::sync::CancellationToken;
 
 use crate::crypto::sha256;
+
+const REGISTRATION_PENDING: u8 = 0;
+const REGISTRATION_ACTIVE: u8 = 1;
+const REGISTRATION_DROPPED: u8 = 2;
 
 /// Stable secret identity used to fence authentication across runtime generations.
 pub(crate) type UserCredentialId = [u8; 16];
@@ -358,7 +362,7 @@ impl UserAdmissionAuthority {
         };
         let registration_id = state.allocate_registration_id()?;
         let token = CancellationToken::new();
-        let active = Arc::new(AtomicBool::new(false));
+        let active = Arc::new(AtomicU8::new(REGISTRATION_PENDING));
         Some(UserAdmissionPublication {
             state,
             authority: Arc::clone(self),
@@ -429,7 +433,7 @@ pub(crate) struct UserAdmissionPublication<'a> {
     registration_id: u64,
     incarnation: UserIncarnation,
     token: CancellationToken,
-    active: Arc<AtomicBool>,
+    active: Arc<AtomicU8>,
     registration_taken: bool,
 }
 
@@ -455,6 +459,11 @@ impl UserAdmissionPublication<'_> {
         if !self.registration_taken {
             return;
         }
+        if self.active.compare_exchange(
+            REGISTRATION_PENDING, REGISTRATION_ACTIVE, Ordering::AcqRel, Ordering::Acquire,
+        ).is_err() {
+            return;
+        }
         self.state
             .owners_by_user
             .entry(self.user.clone())
@@ -466,7 +475,6 @@ impl UserAdmissionPublication<'_> {
                     incarnation: self.incarnation,
                 },
             );
-        self.active.store(true, Ordering::Release);
     }
 }
 
@@ -478,7 +486,7 @@ pub(crate) struct UserSessionRegistration {
     registration_id: u64,
     incarnation: UserIncarnation,
     token: CancellationToken,
-    active: Arc<AtomicBool>,
+    active: Arc<AtomicU8>,
 }
 
 impl UserSessionRegistration {
@@ -500,7 +508,7 @@ impl UserSessionRegistration {
 
 impl Drop for UserSessionRegistration {
     fn drop(&mut self) {
-        if self.active.swap(false, Ordering::AcqRel) {
+        if self.active.swap(REGISTRATION_DROPPED, Ordering::AcqRel) == REGISTRATION_ACTIVE {
             self.authority
                 .unregister(&self.user, self.registration_id, self.incarnation);
         }

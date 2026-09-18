@@ -67,7 +67,7 @@ impl BoundedFileAppender {
         let start = now();
         let current_path = active_path_for(&dir, &base_name, options.rotation, &start);
         #[cfg(unix)]
-        let dir_fd = crate::util::secure_fs::open_dir_nofollow_or_create(&dir, 0o750)?;
+        let dir_fd = crate::util::secure_fs::open_trusted_dir_nofollow_or_create(&dir, 0o750)?;
         #[cfg(unix)]
         let (file, current_size) = open_append_file(&dir_fd, &current_path)?;
         #[cfg(not(unix))]

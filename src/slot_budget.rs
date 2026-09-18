@@ -61,7 +61,6 @@ impl SlotBudget {
     pub(crate) fn used(&self) -> usize {
         self.used.load(Ordering::Acquire)
     }
-
 }
 
 /// Provisional slot ownership that rolls back unless committed to a registry entry.

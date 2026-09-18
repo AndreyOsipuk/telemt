@@ -403,3 +403,17 @@ fn render_user_rate_limits_section() {
     assert!(rendered.starts_with("[access.user_rate_limits]\n"));
     assert!(rendered.contains("alice = { up_bps = 1024, down_bps = 2048 }"));
 }
+
+#[cfg(unix)]
+#[test]
+fn source_owner_normalization_preserves_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real.toml");
+    let linked = dir.path().join("linked.toml");
+    std::fs::write(&real, "").unwrap();
+    symlink(&real, &linked).unwrap();
+
+    assert_eq!(normalize_source_path(&linked), linked);
+}

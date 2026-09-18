@@ -123,3 +123,24 @@ fn rotation_stays_bound_to_opened_directory_after_path_replacement() {
     assert!(!matching_logs(&moved).is_empty());
     assert!(matching_logs(&redirect).is_empty());
 }
+
+#[cfg(unix)]
+#[test]
+fn appender_rejects_group_writable_log_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let current = std::env::current_dir().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("telemt-untrusted-log-")
+        .tempdir_in(current)
+        .unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o770)).unwrap();
+
+    assert!(
+        BoundedFileAppender::with_now(
+            options(dir.path().join("telemt.log")),
+            Box::new(fixed_now),
+        )
+        .is_err()
+    );
+}

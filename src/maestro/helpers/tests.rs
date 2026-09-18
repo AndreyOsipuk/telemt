@@ -52,6 +52,35 @@
         let _ = std::fs::remove_dir(&startup_cwd);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn runtime_paths_preserve_symlinks_for_descriptor_validation() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let real_dir = dir.path().join("real");
+        let linked_dir = dir.path().join("linked");
+        std::fs::create_dir(&real_dir).unwrap();
+        std::fs::write(real_dir.join("config.toml"), " ").unwrap();
+        symlink(&real_dir, &linked_dir).unwrap();
+        let linked_config = linked_dir.join("config.toml");
+
+        let config = resolve_runtime_config_path(
+            linked_config.to_str().unwrap(),
+            dir.path(),
+            true,
+        );
+        let runtime = resolve_runtime_base_dir(
+            &linked_config,
+            dir.path(),
+            true,
+            Some(&linked_dir),
+        );
+
+        assert_eq!(config, linked_config);
+        assert_eq!(runtime, linked_dir);
+    }
+
     #[test]
     fn resolve_runtime_config_path_uses_startup_candidates_when_not_explicit() {
         let nonce = std::time::SystemTime::now()

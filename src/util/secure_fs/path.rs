@@ -41,6 +41,18 @@ impl AnchoredPath {
         Ok(Self { parent, name })
     }
 
+    /// Creates missing parents and opens a chain protected from untrusted renames.
+    pub(crate) fn open_trusted_parent_or_create(path: &Path, mode: u32) -> io::Result<Self> {
+        let name = path
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?
+            .to_os_string();
+        let parent_path = path.parent().unwrap_or_else(|| Path::new("."));
+        let parent = open_trusted_dir_nofollow_or_create(parent_path, mode)?;
+        Ok(Self { parent, name })
+    }
+
     fn open_with_parent_creation(path: &Path, create_mode: Option<u32>) -> io::Result<Self> {
         let name = path
             .file_name()
@@ -80,6 +92,14 @@ pub(crate) fn open_dir_nofollow_or_create(path: &Path, mode: u32) -> io::Result<
     open_or_create_dir_nofollow(path, mode)
 }
 
+/// Opens or creates a directory chain protected from untrusted entry replacement.
+pub(crate) fn open_trusted_dir_nofollow_or_create(
+    path: &Path,
+    mode: u32,
+) -> io::Result<OwnedFd> {
+    open_dir_components(path, Some(mode), true)
+}
+
 /// Opens a directory only when its entire path is owned by root or the effective user.
 fn open_trusted_dir_nofollow(path: &Path) -> io::Result<OwnedFd> {
     open_dir_components(path, None, true)
@@ -90,6 +110,20 @@ fn open_dir_components(
     create_mode: Option<u32>,
     require_trusted: bool,
 ) -> io::Result<OwnedFd> {
+    let mut names = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => continue,
+            Component::Normal(name) => names.push(name.to_os_string()),
+            Component::ParentDir => names.push(OsString::from("..")),
+            Component::Prefix(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unsupported path prefix",
+                ));
+            }
+        }
+    }
     let start = if path.is_absolute() {
         Path::new("/")
     } else {
@@ -97,48 +131,46 @@ fn open_dir_components(
     };
     let mut current = open(start, DIRECTORY_FLAGS, Mode::empty()).map_err(errno_to_io)?;
     if require_trusted {
-        validate_trusted_directory(&current)?;
+        validate_trusted_directory(&current, !names.is_empty())?;
     }
-
-    for component in path.components() {
-        let name = match component {
-            Component::RootDir | Component::CurDir => continue,
-            Component::Normal(name) => name,
-            Component::ParentDir => OsStr::new(".."),
-            Component::Prefix(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "unsupported path prefix",
-                ));
-            }
-        };
-        let next = match openat(&current, name, DIRECTORY_FLAGS, Mode::empty()) {
+    let component_count = names.len();
+    for (index, name) in names.into_iter().enumerate() {
+        let next = match openat(&current, name.as_os_str(), DIRECTORY_FLAGS, Mode::empty()) {
             Ok(descriptor) => descriptor,
             Err(nix::errno::Errno::ENOENT) if create_mode.is_some() => {
                 let mode = Mode::from_bits_truncate(create_mode.unwrap_or(0o750));
-                match mkdirat(&current, name, mode) {
+                match mkdirat(&current, name.as_os_str(), mode) {
                     Ok(()) | Err(nix::errno::Errno::EEXIST) => {}
                     Err(error) => return Err(errno_to_io(error)),
                 }
-                openat(&current, name, DIRECTORY_FLAGS, Mode::empty()).map_err(errno_to_io)?
+                openat(
+                    &current,
+                    name.as_os_str(),
+                    DIRECTORY_FLAGS,
+                    Mode::empty(),
+                )
+                .map_err(errno_to_io)?
             }
             Err(error) => return Err(errno_to_io(error)),
         };
         if require_trusted {
-            validate_trusted_directory(&next)?;
+            validate_trusted_directory(&next, index + 1 < component_count)?;
         }
         current = next;
     }
     Ok(current)
 }
 
-fn validate_trusted_directory(descriptor: &OwnedFd) -> io::Result<()> {
+fn validate_trusted_directory(descriptor: &OwnedFd, allow_sticky_parent: bool) -> io::Result<()> {
     let file = std::fs::File::from(descriptor.try_clone()?);
     let metadata = file.metadata()?;
     let effective_uid = nix::unistd::Uid::effective().as_raw();
+    let mode = metadata.permissions().mode();
+    let writable_by_others = mode & 0o022 != 0;
+    let protected_sticky_parent = allow_sticky_parent && mode & 0o1000 != 0;
     if !metadata.is_dir()
         || (metadata.uid() != 0 && metadata.uid() != effective_uid)
-        || metadata.permissions().mode() & 0o022 != 0
+        || (writable_by_others && !protected_sticky_parent)
     {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,

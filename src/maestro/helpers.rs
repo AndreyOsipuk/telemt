@@ -35,6 +35,20 @@ pub(crate) fn resolve_runtime_config_path(
     startup_cwd: &Path,
     config_path_explicit: bool,
 ) -> PathBuf {
+    let normalize = |path: PathBuf| {
+        let mut normalized = PathBuf::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    normalized.pop();
+                }
+                component => normalized.push(component.as_os_str()),
+            }
+        }
+        normalized
+    };
+
     if config_path_explicit {
         let raw = PathBuf::from(config_path_cli);
         let absolute = if raw.is_absolute() {
@@ -42,7 +56,7 @@ pub(crate) fn resolve_runtime_config_path(
         } else {
             startup_cwd.join(raw)
         };
-        return absolute.canonicalize().unwrap_or(absolute);
+        return normalize(absolute);
     }
 
     let etc_telemt = std::path::Path::new("/etc/telemt");
@@ -54,7 +68,7 @@ pub(crate) fn resolve_runtime_config_path(
     ];
     for candidate in candidates {
         if candidate.is_file() {
-            return candidate.canonicalize().unwrap_or(candidate);
+            return normalize(candidate);
         }
     }
 
@@ -91,7 +105,17 @@ fn normalize_runtime_dir(path: &Path, startup_cwd: &Path) -> PathBuf {
     } else {
         startup_cwd.join(path)
     };
-    absolute.canonicalize().unwrap_or(absolute)
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 /// Parsed CLI arguments.

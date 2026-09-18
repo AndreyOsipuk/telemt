@@ -157,6 +157,57 @@ fn acquire_rejects_pid_symlink_without_truncating_target() {
 }
 
 #[test]
+fn acquire_rejects_pid_hard_link_without_truncating_target() {
+    let directory = tempfile::tempdir().unwrap();
+    let pid_path = directory.path().join("telemt.pid");
+    let target_path = directory.path().join("target");
+    fs::write(&target_path, b"preserve\n").unwrap();
+    fs::hard_link(&target_path, &pid_path).unwrap();
+    let mut pid_file = PidFile::new(&pid_path);
+
+    assert!(pid_file.acquire().is_err());
+    assert_eq!(fs::read(&target_path).unwrap(), b"preserve\n");
+}
+
+#[test]
+fn acquire_rejects_symlinked_parent_without_publishing_outside() {
+    let directory = tempfile::tempdir().unwrap();
+    let real_parent = directory.path().join("real");
+    let linked_parent = directory.path().join("linked");
+    fs::create_dir(&real_parent).unwrap();
+    symlink(&real_parent, &linked_parent).unwrap();
+    let pid_path = linked_parent.join("telemt.pid");
+    let mut pid_file = PidFile::new(&pid_path);
+
+    assert!(pid_file.acquire().is_err());
+    assert!(!real_parent.join("telemt.pid").exists());
+    assert!(!real_parent.join("telemt.pid.lock").exists());
+}
+
+#[test]
+fn release_remains_anchored_after_parent_path_replacement() {
+    let directory = tempfile::tempdir().unwrap();
+    let active_parent = directory.path().join("active");
+    let moved_parent = directory.path().join("moved");
+    fs::create_dir(&active_parent).unwrap();
+    let pid_path = active_parent.join("telemt.pid");
+    let mut pid_file = PidFile::new(&pid_path);
+    pid_file.acquire().unwrap();
+
+    fs::rename(&active_parent, &moved_parent).unwrap();
+    fs::create_dir(&active_parent).unwrap();
+    fs::write(active_parent.join("telemt.pid"), b"replacement\n").unwrap();
+
+    pid_file.release().unwrap();
+
+    assert!(!moved_parent.join("telemt.pid").exists());
+    assert_eq!(
+        fs::read(active_parent.join("telemt.pid")).unwrap(),
+        b"replacement\n"
+    );
+}
+
+#[test]
 fn release_does_not_remove_replacement_path() {
     let directory = tempfile::tempdir().unwrap();
     let pid_path = directory.path().join("telemt.pid");

@@ -54,3 +54,20 @@ fn stale_candidate_cannot_overwrite_newer_mutation() {
     );
     assert!(!authority.is_user_enabled("alice"));
 }
+
+#[test]
+fn registration_dropped_before_publication_cannot_leave_an_owner() {
+    let authority = UserAdmissionAuthority::new();
+    let secret = "00112233445566778899aabbccddeeff";
+    authority.apply_config(&users(secret), &HashMap::new());
+    let credential = credential_id_from_hex(secret).unwrap();
+    let mut publication = authority
+        .claim_authenticated("alice", credential)
+        .unwrap();
+    let registration = publication.take_registration().unwrap();
+
+    drop(registration);
+    publication.commit();
+
+    assert_eq!(authority.cancel_user_owners("alice"), 0);
+}

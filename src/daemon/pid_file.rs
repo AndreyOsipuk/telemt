@@ -1,15 +1,18 @@
-use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::ffi::OsStr;
+use std::fs::{self, File};
+use std::io::{self, ErrorKind, Read, Write};
+use std::os::unix::fs::MetadataExt;
 #[cfg(target_os = "linux")]
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 
-use nix::fcntl::{Flock, FlockArg};
-use nix::unistd::{Pid, getpid};
+use nix::fcntl::{Flock, FlockArg, OFlag, openat};
+use nix::sys::stat::Mode;
+use nix::unistd::{Pid, UnlinkatFlags, getpid, unlinkat};
 use tracing::{debug, info, warn};
 
 use super::DaemonError;
+use crate::util::secure_fs::AnchoredPath;
 
 /// PID file manager backed by a persistent sibling lock file.
 pub struct PidFile {
@@ -18,6 +21,7 @@ pub struct PidFile {
     pid_file: Option<File>,
     pid_identity: Option<FileIdentity>,
     lock_file: Option<Flock<File>>,
+    anchor: Option<AnchoredPath>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +50,7 @@ impl PidFile {
             pid_file: None,
             pid_identity: None,
             lock_file: None,
+            anchor: None,
         }
     }
 
@@ -61,37 +66,42 @@ impl PidFile {
     ///
     /// Fails if another owner holds the lock or the existing PID names a running process.
     pub fn acquire(&mut self) -> Result<(), DaemonError> {
-        if let Some(parent) = self.path.parent()
-            && !parent.exists()
-        {
-            fs::create_dir_all(parent).map_err(|error| {
+        let anchor = AnchoredPath::open_trusted_parent_or_create(&self.path, 0o755).map_err(
+            |error| {
                 DaemonError::PidFile(format!(
-                    "cannot create directory {}: {}",
-                    parent.display(),
+                    "cannot open trusted parent for {}: {}",
+                    self.path.display(),
                     error
                 ))
-            })?;
-        }
-
-        let lock_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o644)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-            .open(&self.lock_path)
-            .map_err(|error| {
-                DaemonError::PidFile(format!(
-                    "cannot open lock file {}: {}",
-                    self.lock_path.display(),
-                    error
-                ))
-            })?;
+            },
+        )?;
+        let lock_name = self.lock_path.file_name().ok_or_else(|| {
+            DaemonError::PidFile(format!(
+                "lock path {} has no file name",
+                self.lock_path.display()
+            ))
+        })?;
+        let lock_file = open_file_at(
+            &anchor,
+            lock_name,
+            OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            0o644,
+        )
+        .map_err(|error| {
+            DaemonError::PidFile(format!(
+                "cannot open lock file {}: {}",
+                self.lock_path.display(),
+                error
+            ))
+        })?;
         validate_regular_single_link(&lock_file, &self.lock_path)?;
         let lock_file =
             Flock::lock(lock_file, FlockArg::LockExclusiveNonblock).map_err(|(_, errno)| {
-                if let Some(pid) = self.check_running().ok().flatten() {
+                if let Some(pid) = read_pid_file_at(&anchor, &self.path)
+                    .ok()
+                    .flatten()
+                    .filter(|pid| is_process_running(*pid))
+                {
                     DaemonError::AlreadyRunning(pid)
                 } else {
                     DaemonError::PidFile(format!(
@@ -102,23 +112,28 @@ impl PidFile {
                 }
             })?;
 
-        if let Some(pid) = self.check_running()? {
+        if let Some(pid) = read_pid_file_at(&anchor, &self.path)?
+            && is_process_running(pid)
+        {
             return Err(DaemonError::AlreadyRunning(pid));
         }
 
-        let mut pid_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o644)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-            .open(&self.path)
-            .map_err(|error| {
-                DaemonError::PidFile(format!("cannot open {}: {}", self.path.display(), error))
-            })?;
+        let mut pid_file = open_file_at(
+            &anchor,
+            anchor.name(),
+            OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            0o644,
+        )
+        .map_err(|error| {
+            DaemonError::PidFile(format!("cannot open {}: {}", self.path.display(), error))
+        })?;
         let pid_metadata = validate_regular_single_link(&pid_file, &self.path)?;
         let pid_identity = FileIdentity::from_metadata(&pid_metadata);
+        // Validate the opened inode before modifying it so a hard-link substitution
+        // cannot turn PID publication into truncation of an unrelated file.
+        pid_file.set_len(0).map_err(|error| {
+            DaemonError::PidFile(format!("cannot truncate {}: {}", self.path.display(), error))
+        })?;
         let pid = getpid();
         writeln!(pid_file, "{}", pid).map_err(|error| {
             DaemonError::PidFile(format!(
@@ -138,6 +153,7 @@ impl PidFile {
         self.pid_file = Some(pid_file);
         self.pid_identity = Some(pid_identity);
         self.lock_file = Some(lock_file);
+        self.anchor = Some(anchor);
         info!(pid = pid.as_raw(), path = %self.path.display(), "PID file created");
         Ok(())
     }
@@ -147,36 +163,20 @@ impl PidFile {
         if self.lock_file.is_none() {
             self.pid_file = None;
             self.pid_identity = None;
+            self.anchor = None;
             return Ok(());
         }
 
-        let removal = match fs::symlink_metadata(&self.path) {
-            Ok(metadata)
-                if self.pid_identity == Some(FileIdentity::from_metadata(&metadata))
-                    && metadata.is_file() =>
-            {
-                fs::remove_file(&self.path).map_err(|error| {
-                    DaemonError::PidFile(format!(
-                        "cannot remove {}: {}",
-                        self.path.display(),
-                        error
-                    ))
-                })
-            }
-            Ok(_) => Err(DaemonError::PidFile(format!(
-                "refusing to remove replaced PID file {}",
-                self.path.display()
-            ))),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(DaemonError::PidFile(format!(
-                "cannot inspect {} before removal: {}",
-                self.path.display(),
-                error
-            ))),
+        let removal = match self.anchor.as_ref() {
+            Some(anchor) => remove_owned_pid_file(anchor, &self.path, self.pid_identity),
+            None => Err(DaemonError::PidFile(
+                "PID file lock is held without a directory anchor".to_string(),
+            )),
         };
         self.pid_file = None;
         self.pid_identity = None;
         self.lock_file = None;
+        self.anchor = None;
         removal?;
         debug!(path = %self.path.display(), "PID file removed");
         Ok(())
@@ -209,12 +209,44 @@ fn sibling_lock_path(path: &Path) -> PathBuf {
     lock_path.into()
 }
 
+fn open_file_at(
+    anchor: &AnchoredPath,
+    name: &OsStr,
+    flags: OFlag,
+    mode: u32,
+) -> io::Result<File> {
+    let descriptor = openat(
+        anchor.parent(),
+        name,
+        flags,
+        Mode::from_bits_truncate(mode),
+    )
+    .map_err(|error| io::Error::from_raw_os_error(error as i32))?;
+    Ok(File::from(descriptor))
+}
+
 fn read_pid_file_if_exists(path: &Path) -> Result<Option<i32>, DaemonError> {
-    let mut file = match OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(path)
-    {
+    let anchor = match AnchoredPath::open_trusted_parent(path) {
+        Ok(anchor) => anchor,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(DaemonError::PidFile(format!(
+                "cannot open trusted parent for {}: {}",
+                path.display(),
+                error
+            )));
+        }
+    };
+    read_pid_file_at(&anchor, path)
+}
+
+fn read_pid_file_at(anchor: &AnchoredPath, path: &Path) -> Result<Option<i32>, DaemonError> {
+    let mut file = match open_file_at(
+        anchor,
+        anchor.name(),
+        OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+        0,
+    ) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => {
@@ -247,6 +279,49 @@ fn read_pid_file_if_exists(path: &Path) -> Result<Option<i32>, DaemonError> {
         )));
     }
     Ok(Some(pid))
+}
+
+fn remove_owned_pid_file(
+    anchor: &AnchoredPath,
+    path: &Path,
+    expected: Option<FileIdentity>,
+) -> Result<(), DaemonError> {
+    let file = match open_file_at(
+        anchor,
+        anchor.name(),
+        OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+        0,
+    ) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(DaemonError::PidFile(format!(
+                "cannot inspect {} before removal: {}",
+                path.display(),
+                error
+            )));
+        }
+    };
+    let metadata = validate_regular_single_link(&file, path)?;
+    if expected != Some(FileIdentity::from_metadata(&metadata)) {
+        return Err(DaemonError::PidFile(format!(
+            "refusing to remove replaced PID file {}",
+            path.display()
+        )));
+    }
+    drop(file);
+    unlinkat(
+        anchor.parent(),
+        anchor.name(),
+        UnlinkatFlags::NoRemoveDir,
+    )
+    .map_err(|error| {
+        DaemonError::PidFile(format!(
+            "cannot remove {}: {}",
+            path.display(),
+            io::Error::from_raw_os_error(error as i32)
+        ))
+    })
 }
 
 fn validate_regular_single_link(
@@ -329,12 +404,26 @@ pub fn check_status<P: AsRef<Path>>(path: P) -> DaemonStatus {
 
 fn daemon_lock_is_held(path: &Path) -> Result<bool, DaemonError> {
     let lock_path = sibling_lock_path(path);
-    let file = match OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(&lock_path)
-    {
+    let anchor = match AnchoredPath::open_trusted_parent(path) {
+        Ok(anchor) => anchor,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(DaemonError::PidFile(format!(
+                "cannot open trusted parent for {}: {}",
+                path.display(),
+                error
+            )));
+        }
+    };
+    let lock_name = lock_path.file_name().ok_or_else(|| {
+        DaemonError::PidFile(format!("lock path {} has no file name", lock_path.display()))
+    })?;
+    let file = match open_file_at(
+        &anchor,
+        lock_name,
+        OFlag::O_RDWR | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+        0,
+    ) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
         Err(error) => {
