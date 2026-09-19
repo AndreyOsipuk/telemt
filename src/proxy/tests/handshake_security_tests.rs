@@ -1115,7 +1115,8 @@ async fn tls_unknown_sni_reject_handshake_policy_emits_unrecognized_name_alert()
     // Drain what the server wrote. We expect exactly one TLS alert record:
     //   0x15 0x03 0x03 0x00 0x02 0x02 0x70
     // (ContentType.alert, TLS 1.2, length=2, fatal, unrecognized_name)
-    drop(result); // drops the server-side writer so peer_side sees EOF
+    // Drop the server-side writer so `peer_side` observes EOF.
+    drop(result);
     let mut buf = Vec::new();
     peer_side.read_to_end(&mut buf).await.unwrap();
     assert_eq!(

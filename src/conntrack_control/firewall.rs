@@ -13,6 +13,7 @@ use crate::util::trusted_command::resolve_trusted_helper;
 
 use super::{ConntrackRuntimeSupport, NetfilterBackend};
 
+/// Reconciles kernel NOTRACK rules with the active listener policy.
 pub(super) async fn reconcile_rules(
     cfg: &ProxyConfig,
     runtime_support: ConntrackRuntimeSupport,
@@ -45,6 +46,7 @@ pub(super) async fn reconcile_rules(
     }
 }
 
+/// Probes the effective firewall backend and conntrack deletion capability.
 pub(super) fn probe_runtime_support(
     configured_backend: ConntrackBackend,
 ) -> ConntrackRuntimeSupport {
@@ -55,6 +57,7 @@ pub(super) fn probe_runtime_support(
     }
 }
 
+/// Resolves whether conntrack close publication is usable for this runtime.
 pub(super) fn effective_conntrack_enabled(
     cfg: &ProxyConfig,
     runtime_support: ConntrackRuntimeSupport,
@@ -317,12 +320,17 @@ async fn clear_notrack_rules_all_backends() {
     let _ = run_command("ip6tables", &["-t", "raw", "-X", "TELEMT_NOTRACK"], None).await;
 }
 
+/// Result of one best-effort kernel conntrack deletion.
 pub(super) enum DeleteOutcome {
+    /// The kernel reported successful deletion.
     Deleted,
+    /// No matching conntrack entry existed.
     NotFound,
+    /// The helper was unavailable or returned an unexpected failure.
     Error,
 }
 
+/// Deletes the exact TCP tuple represented by one close event.
 pub(super) async fn delete_conntrack_entry(event: ConntrackCloseEvent) -> DeleteOutcome {
     if !command_exists("conntrack") {
         return DeleteOutcome::Error;

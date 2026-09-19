@@ -182,10 +182,11 @@ fn validate_trusted_directory(descriptor: &OwnedFd, allow_sticky_parent: bool) -
 
 /// Creates missing components and changes cwd to the exact opened directory inode.
 pub(crate) fn chdir_nofollow_or_create(path: &Path, mode: u32) -> io::Result<()> {
-    let descriptor = open_or_create_dir_nofollow(path, mode)?;
+    let descriptor = open_dir_nofollow_or_create(path, mode)?;
     nix::unistd::fchdir(&descriptor).map_err(errno_to_io)
 }
 
+/// Converts one `nix` errno without discarding its platform error code.
 pub(super) fn errno_to_io(error: nix::errno::Errno) -> io::Error {
     io::Error::from_raw_os_error(error as i32)
 }

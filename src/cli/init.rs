@@ -3,6 +3,8 @@ use std::process::Command;
 
 use rand::RngExt;
 
+use crate::util::trusted_command::resolve_trusted_helper;
+
 /// Options for the fire-and-forget init command.
 #[derive(Debug, Clone)]
 pub struct InitOptions {
@@ -165,11 +167,14 @@ pub fn run_init(opts: InitOptions) -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("[+] Service started");
 
                 std::thread::sleep(std::time::Duration::from_secs(1));
-                let status = Command::new("systemctl")
-                    .args(["is-active", "telemt.service"])
-                    .output();
+                let status = resolve_trusted_helper("systemctl").and_then(|command_path| {
+                    Command::new(command_path)
+                        .args(["is-active", "telemt.service"])
+                        .output()
+                        .ok()
+                });
                 match status {
-                    Ok(out) if out.status.success() => {
+                    Some(out) if out.status.success() => {
                         eprintln!("[+] Service is running");
                     }
                     _ => {
@@ -329,7 +334,11 @@ weight = 10
 }
 
 fn run_cmd(cmd: &str, args: &[&str]) {
-    match Command::new(cmd).args(args).output() {
+    let Some(command_path) = resolve_trusted_helper(cmd) else {
+        eprintln!("[!] Refusing unavailable or untrusted command: {}", cmd);
+        return;
+    };
+    match Command::new(command_path).args(args).output() {
         Ok(output) => {
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);

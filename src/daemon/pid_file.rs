@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, ErrorKind, Read, Write};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 #[cfg(target_os = "linux")]
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
@@ -42,7 +42,7 @@ impl FileIdentity {
 impl PidFile {
     /// Creates a new PID file manager for the given path.
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
-        let path = path.as_ref().to_path_buf();
+        let path = normalize_pid_path(path.as_ref());
         let lock_path = sibling_lock_path(&path);
         Self {
             path,
@@ -209,6 +209,33 @@ fn sibling_lock_path(path: &Path) -> PathBuf {
     lock_path.into()
 }
 
+fn normalize_pid_path(path: &Path) -> PathBuf {
+    let legacy_run = Path::new("/var/run");
+    let Ok(remainder) = path.strip_prefix(legacy_run) else {
+        return path.to_path_buf();
+    };
+    let Ok(var_metadata) = fs::metadata("/var") else {
+        return path.to_path_buf();
+    };
+    let Ok(link_metadata) = fs::symlink_metadata(legacy_run) else {
+        return path.to_path_buf();
+    };
+    let Ok(target) = fs::read_link(legacy_run) else {
+        return path.to_path_buf();
+    };
+    let trusted_var = var_metadata.is_dir()
+        && var_metadata.uid() == 0
+        && var_metadata.permissions().mode() & 0o022 == 0;
+    let trusted_alias = link_metadata.file_type().is_symlink()
+        && link_metadata.uid() == 0
+        && (target == Path::new("/run") || target == Path::new("../run"));
+    if trusted_var && trusted_alias {
+        Path::new("/run").join(remainder)
+    } else {
+        path.to_path_buf()
+    }
+}
+
 fn open_file_at(
     anchor: &AnchoredPath,
     name: &OsStr,
@@ -343,8 +370,8 @@ fn validate_regular_single_link(
 /// Reads a PID from a PID file.
 #[allow(dead_code)]
 pub fn read_pid_file<P: AsRef<Path>>(path: P) -> Result<i32, DaemonError> {
-    let path = path.as_ref();
-    read_pid_file_if_exists(path)?.ok_or_else(|| {
+    let path = normalize_pid_path(path.as_ref());
+    read_pid_file_if_exists(&path)?.ok_or_else(|| {
         DaemonError::PidFile(format!(
             "cannot read {}: file does not exist",
             path.display()
@@ -358,11 +385,11 @@ pub fn signal_pid_file<P: AsRef<Path>>(
     path: P,
     signal: nix::sys::signal::Signal,
 ) -> Result<(), DaemonError> {
-    let path = path.as_ref();
-    let pid = read_pid_file(path)?;
+    let path = normalize_pid_path(path.as_ref());
+    let pid = read_pid_file(&path)?;
     #[cfg(target_os = "linux")]
     let pidfd = open_pidfd(pid)?;
-    if !daemon_lock_is_held(path)? {
+    if !daemon_lock_is_held(&path)? {
         return Err(DaemonError::PidFile(format!(
             "refusing to signal unlocked or stale PID file {}",
             path.display()
@@ -390,10 +417,10 @@ pub enum DaemonStatus {
 /// Checks daemon status without modifying the PID or lock file.
 #[allow(dead_code)]
 pub fn check_status<P: AsRef<Path>>(path: P) -> DaemonStatus {
-    let path = path.as_ref();
-    match read_pid_file_if_exists(path) {
+    let path = normalize_pid_path(path.as_ref());
+    match read_pid_file_if_exists(&path) {
         Ok(Some(pid))
-            if daemon_lock_is_held(path).unwrap_or(false) && is_process_running(pid) =>
+            if daemon_lock_is_held(&path).unwrap_or(false) && is_process_running(pid) =>
         {
             DaemonStatus::Running(pid)
         }

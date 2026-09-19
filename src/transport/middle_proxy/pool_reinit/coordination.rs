@@ -307,6 +307,7 @@ impl MePool {
         self.desired_dc_endpoints_from_snapshot(&endpoint_snapshot)
     }
 
+    /// Projects desired per-DC endpoint sets from one immutable endpoint revision.
     pub(super) fn desired_dc_endpoints_from_snapshot(
         &self,
         endpoint_snapshot: &EndpointSnapshot,

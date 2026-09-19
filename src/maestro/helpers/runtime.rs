@@ -12,6 +12,7 @@ use crate::transport::middle_proxy::{
 
 use super::print_maestro_line;
 
+/// Prints configured MTProxy links through the direct MAESTRO output channel.
 pub(crate) fn print_proxy_links(host: &str, port: u16, config: &ProxyConfig) {
     print_maestro_line(format!("Proxy links ({host})"));
     for user_name in config
@@ -94,6 +95,7 @@ pub(crate) fn print_web_proxy_links(config: &ProxyConfig) {
     }
 }
 
+/// Durably replaces one Beobachten snapshot without following Unix symlinks.
 pub(crate) async fn write_beobachten_snapshot(path: &str, payload: &str) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -115,10 +117,12 @@ pub(crate) async fn write_beobachten_snapshot(path: &str, payload: &str) -> std:
     }
 }
 
+/// Selects a singular or plural display label for one integer value.
 pub(crate) fn unit_label(value: u64, singular: &'static str, plural: &'static str) -> &'static str {
     if value == 1 { singular } else { plural }
 }
 
+/// Formats process uptime into bounded human-readable units and exact seconds.
 pub(crate) fn format_uptime(total_secs: u64) -> String {
     const SECS_PER_MINUTE: u64 = 60;
     const SECS_PER_HOUR: u64 = 60 * SECS_PER_MINUTE;
@@ -172,6 +176,7 @@ pub(crate) fn format_uptime(total_secs: u64) -> String {
 }
 
 #[allow(dead_code)]
+/// Waits until admission opens or its watch channel closes.
 pub(crate) async fn wait_until_admission_open(admission_rx: &mut watch::Receiver<bool>) -> bool {
     loop {
         if *admission_rx.borrow() {
@@ -183,10 +188,12 @@ pub(crate) async fn wait_until_admission_open(admission_rx: &mut watch::Receiver
     }
 }
 
+/// Classifies peer closure that is expected during an incomplete handshake.
 pub(crate) fn is_expected_handshake_eof(err: &crate::error::ProxyError) -> bool {
     expected_handshake_close_description(err).is_some()
 }
 
+/// Returns a stable diagnostic description for transport-level peer closure.
 pub(crate) fn peer_close_description(err: &crate::error::ProxyError) -> Option<&'static str> {
     fn from_kind(kind: std::io::ErrorKind) -> Option<&'static str> {
         match kind {
@@ -209,6 +216,7 @@ pub(crate) fn peer_close_description(err: &crate::error::ProxyError) -> Option<&
     }
 }
 
+/// Returns a stable diagnostic description for expected handshake closure.
 pub(crate) fn expected_handshake_close_description(
     err: &crate::error::ProxyError,
 ) -> Option<&'static str> {
@@ -243,6 +251,7 @@ pub(crate) fn expected_handshake_close_description(
     }
 }
 
+/// Loads a non-empty startup endpoint snapshot with bounded cache fallback.
 pub(crate) async fn load_startup_proxy_config_snapshot(
     url: &str,
     cache_path: Option<&str>,

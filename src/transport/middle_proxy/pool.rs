@@ -266,16 +266,22 @@ pub struct RoutingCore {
     pub(super) writers: Arc<WritersState>,
     pub(super) rr: AtomicU64,
     pub(super) writer_epoch: watch::Sender<u64>,
+    /// Coherent immutable authority for endpoint maps and reverse indexes.
     pub(super) endpoint_snapshot: ArcSwap<EndpointSnapshot>,
 }
 
 /// Immutable endpoint routing authority published as one coherent revision.
 #[derive(Clone, Debug)]
 pub(super) struct EndpointSnapshot {
+    /// Monotonic revision covering every endpoint-derived index in this snapshot.
     pub(super) revision: u64,
+    /// IPv4 endpoint map by Telegram DC.
     pub(super) map_v4: HashMap<i32, Vec<(IpAddr, u16)>>,
+    /// IPv6 endpoint map by Telegram DC.
     pub(super) map_v6: HashMap<i32, Vec<(IpAddr, u16)>>,
+    /// Reverse lookup from an endpoint to its optional Telegram DC.
     pub(super) endpoint_dc_map: HashMap<SocketAddr, Option<i32>>,
+    /// Ordered endpoint candidates used for per-DC writer selection.
     pub(super) preferred_endpoints_by_dc: HashMap<i32, Vec<SocketAddr>>,
 }
 
@@ -312,6 +318,7 @@ pub(super) struct ReinitPendingState {
     pub(super) generation: u64,
     pub(super) started_at_epoch_secs: u64,
     pub(super) map_hash: u64,
+    /// Endpoint authority revision targeted by the pending generation.
     pub(super) endpoint_revision: u64,
 }
 
@@ -319,6 +326,7 @@ pub(super) struct ReinitPendingState {
 pub(super) struct ReinitAttemptState {
     pub(super) generation: u64,
     pub(super) map_hash: u64,
+    /// Endpoint authority revision captured by this attempt.
     pub(super) endpoint_revision: u64,
     pub(super) hardswap: bool,
     pub(super) committed: bool,
@@ -328,6 +336,7 @@ pub(super) struct ReinitCoordinatorState {
     pub(super) next_attempt_id: u64,
     pub(super) active_generation: u64,
     pub(super) desired_map_hash: u64,
+    /// Latest endpoint authority revision accepted by the coordinator.
     pub(super) endpoint_revision: u64,
     pub(super) pending: Option<ReinitPendingState>,
     pub(super) attempts: HashMap<u64, ReinitAttemptState>,
@@ -492,8 +501,10 @@ pub struct MePool {
     pub(super) next_writer_id: AtomicU64,
     pub(super) writer_connect_active_reserved: AtomicUsize,
     pub(super) writer_connect_warm_reserved: AtomicUsize,
+    /// Replacement connections opened but not yet committed to writer visibility.
     pub(super) writer_replacement_open_reserved: AtomicUsize,
     pub(super) rtt_stats: Arc<Mutex<HashMap<u64, (f64, f64)>>>,
+    /// Coalesced refill state keyed by exact generation and contour ownership.
     pub(super) refill_states: Arc<ParkingMutex<HashMap<RefillTargetKey, RefillTargetState>>>,
     pub(super) refill_running: AtomicUsize,
     pub(super) refill_pending: AtomicUsize,

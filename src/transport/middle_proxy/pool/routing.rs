@@ -144,6 +144,7 @@ impl MePool {
         }
     }
 
+    /// Builds all endpoint-derived indexes under one immutable revision.
     pub(in crate::transport::middle_proxy) fn build_endpoint_snapshot(
         decision: &NetworkDecision,
         mut map_v4: HashMap<i32, Vec<(IpAddr, u16)>>,
@@ -272,6 +273,7 @@ impl MePool {
         endpoint_dc_map
     }
 
+    /// Removes runtime endpoint state absent from the current coherent snapshot.
     pub(in crate::transport::middle_proxy) async fn prune_endpoint_runtime_state(&self) {
         let configured_endpoints = self
             .endpoint_snapshot

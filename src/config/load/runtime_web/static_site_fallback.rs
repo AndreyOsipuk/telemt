@@ -4,6 +4,7 @@ use std::path::Path;
 
 use super::*;
 
+/// Builds a bounded static-site snapshot on platforms without directory descriptors.
 pub(super) fn load_static_site_by_path(
     root: &Path,
     limits: &WebLimitsConfig,

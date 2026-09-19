@@ -30,6 +30,7 @@ impl MePool {
         self.api_hardswap_snapshot_for_reinit(reinit.as_ref()).await
     }
 
+    /// Builds the bounded projection from one coherent reinitialization snapshot.
     pub(super) async fn api_hardswap_snapshot_for_reinit(
         &self,
         reinit: &ReinitStatusSnapshot,

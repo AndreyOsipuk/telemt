@@ -56,17 +56,25 @@ pub(crate) enum ConntrackClosePolicy {
 
 pub(crate) struct HandshakeSharedState {
     pub(crate) auth_probe: DashMap<IpAddr, AuthProbeState>,
+    /// Exact capacity authority for the authentication probe registry.
     pub(crate) auth_probe_slots: SlotBudget,
     pub(crate) auth_probe_saturation: Mutex<Option<AuthProbeSaturationState>>,
     pub(crate) auth_probe_eviction_hasher: RandomState,
     pub(crate) invalid_secret_warned: Mutex<HashSet<(String, String)>>,
     pub(crate) unknown_sni_warn_next_allowed: Mutex<Option<Instant>>,
+    /// Stable credential hints keyed by exact peer IP.
     pub(crate) sticky_user_by_ip: DashMap<IpAddr, u64>,
+    /// Exact capacity authority for peer-IP credential hints.
     pub(crate) sticky_user_by_ip_slots: SlotBudget,
+    /// Stable credential hints keyed by bounded peer network prefix.
     pub(crate) sticky_user_by_ip_prefix: DashMap<u64, u64>,
+    /// Exact capacity authority for peer-prefix credential hints.
     pub(crate) sticky_user_by_ip_prefix_slots: SlotBudget,
+    /// Stable credential hints keyed by normalized SNI hash.
     pub(crate) sticky_user_by_sni_hash: DashMap<u64, u64>,
+    /// Exact capacity authority for SNI credential hints.
     pub(crate) sticky_user_by_sni_hash_slots: SlotBudget,
+    /// Bounded recent credential-hint ring used as an authentication fallback.
     pub(crate) recent_user_ring: Box<[AtomicU64]>,
     pub(crate) recent_user_ring_seq: AtomicU64,
     pub(crate) auth_expensive_checks_total: AtomicU64,

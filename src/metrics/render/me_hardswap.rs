@@ -2,6 +2,7 @@ use std::fmt::Write;
 
 use crate::transport::middle_proxy::MeApiHardswapSnapshot;
 
+/// Renders fixed-cardinality hardswap and writer-replacement gauges.
 pub(super) fn render(
     out: &mut String,
     snapshot: Option<&MeApiHardswapSnapshot>,

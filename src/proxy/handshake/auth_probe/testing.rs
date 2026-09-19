@@ -1,5 +1,6 @@
 use super::*;
 
+/// Records one deterministic authentication failure against an isolated shared state.
 pub(crate) fn auth_probe_record_failure_for_testing(
     shared: &ProxySharedState,
     peer_ip: IpAddr,
@@ -8,6 +9,7 @@ pub(crate) fn auth_probe_record_failure_for_testing(
     auth_probe_record_failure_in(shared, peer_ip, now);
 }
 
+/// Returns the normalized peer failure streak from an isolated shared state.
 pub(crate) fn auth_probe_fail_streak_for_testing_in_shared(
     shared: &ProxySharedState,
     peer_ip: IpAddr,
@@ -20,6 +22,7 @@ pub(crate) fn auth_probe_fail_streak_for_testing_in_shared(
         .map(|entry| entry.fail_streak)
 }
 
+/// Clears probe entries, exact capacity accounting, and saturation state together.
 pub(crate) fn clear_auth_probe_state_for_testing_in_shared(shared: &ProxySharedState) {
     let removed = shared.handshake.auth_probe.len();
     assert_eq!(shared.handshake.auth_probe_slots.used(), removed);
@@ -37,6 +40,7 @@ pub(crate) fn clear_auth_probe_state_for_testing_in_shared(shared: &ProxySharedS
     }
 }
 
+/// Inserts one fixture entry while preserving exact registry capacity accounting.
 pub(crate) fn insert_auth_probe_state_for_testing_in_shared(
     shared: &ProxySharedState,
     peer_ip: IpAddr,
@@ -59,22 +63,26 @@ pub(crate) fn insert_auth_probe_state_for_testing_in_shared(
     }
 }
 
+/// Exposes the isolated probe registry to adversarial tests.
 pub(crate) fn auth_probe_state_for_testing_in_shared(
     shared: &ProxySharedState,
 ) -> &DashMap<IpAddr, AuthProbeState> {
     &shared.handshake.auth_probe
 }
 
+/// Returns exact committed probe slots for capacity assertions.
 pub(crate) fn auth_probe_slots_for_testing_in_shared(shared: &ProxySharedState) -> usize {
     shared.handshake.auth_probe_slots.used()
 }
 
+/// Exposes the isolated saturation state mutex to tests.
 pub(crate) fn auth_probe_saturation_state_for_testing_in_shared(
     shared: &ProxySharedState,
 ) -> &Mutex<Option<AuthProbeSaturationState>> {
     &shared.handshake.auth_probe_saturation
 }
 
+/// Locks isolated saturation state while recovering poisoned test fixtures.
 pub(crate) fn auth_probe_saturation_state_lock_for_testing_in_shared(
     shared: &ProxySharedState,
 ) -> std::sync::MutexGuard<'_, Option<AuthProbeSaturationState>> {
@@ -85,6 +93,7 @@ pub(crate) fn auth_probe_saturation_state_lock_for_testing_in_shared(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Resets the isolated unknown-SNI warning rate limiter.
 pub(crate) fn clear_unknown_sni_warn_state_for_testing_in_shared(shared: &ProxySharedState) {
     let mut guard = shared
         .handshake
@@ -94,6 +103,7 @@ pub(crate) fn clear_unknown_sni_warn_state_for_testing_in_shared(shared: &ProxyS
     *guard = None;
 }
 
+/// Evaluates unknown-SNI warning admission at a deterministic instant.
 pub(crate) fn should_emit_unknown_sni_warn_for_testing_in_shared(
     shared: &ProxySharedState,
     now: Instant,
@@ -101,18 +111,21 @@ pub(crate) fn should_emit_unknown_sni_warn_for_testing_in_shared(
     should_emit_unknown_sni_warn_in(shared, now)
 }
 
+/// Clears the isolated invalid-secret warning deduplication set.
 pub(crate) fn clear_warned_secrets_for_testing_in_shared(shared: &ProxySharedState) {
     if let Ok(mut guard) = shared.handshake.invalid_secret_warned.lock() {
         guard.clear();
     }
 }
 
+/// Exposes the isolated invalid-secret warning set to tests.
 pub(crate) fn warned_secrets_for_testing_in_shared(
     shared: &ProxySharedState,
 ) -> &Mutex<HashSet<(String, String)>> {
     &shared.handshake.invalid_secret_warned
 }
 
+/// Evaluates peer throttling against the current test clock.
 pub(crate) fn auth_probe_is_throttled_for_testing_in_shared(
     shared: &ProxySharedState,
     peer_ip: IpAddr,
@@ -120,12 +133,14 @@ pub(crate) fn auth_probe_is_throttled_for_testing_in_shared(
     auth_probe_is_throttled_in(shared, peer_ip, Instant::now())
 }
 
+/// Evaluates global saturation throttling against the current test clock.
 pub(crate) fn auth_probe_saturation_is_throttled_for_testing_in_shared(
     shared: &ProxySharedState,
 ) -> bool {
     auth_probe_saturation_is_throttled_in(shared, Instant::now())
 }
 
+/// Evaluates global saturation throttling at a deterministic instant.
 pub(crate) fn auth_probe_saturation_is_throttled_at_for_testing_in_shared(
     shared: &ProxySharedState,
     now: Instant,

@@ -117,12 +117,14 @@ impl UserAuthSnapshot {
         self.entries.get(idx)
     }
 
+    /// Returns the stable credential identity for an exact configured username.
     pub(crate) fn credential_id_by_name(&self, user: &str) -> Option<[u8; 16]> {
         self.user_id_by_name(user)
             .and_then(|user_id| self.entry_by_id(user_id))
             .map(|entry| entry.credential_id)
     }
 
+    /// Returns every bounded authentication candidate sharing a stable hint key.
     pub(crate) fn candidate_ids_by_hint_key(&self, hint_key: u64) -> Option<&[u32]> {
         self.by_hint_key.get(&hint_key).map(Vec::as_slice)
     }

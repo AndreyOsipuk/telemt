@@ -39,6 +39,25 @@ fn pid_file_remains_send_and_sync() {
 }
 
 #[test]
+fn system_var_run_alias_keeps_the_default_pid_path_usable() {
+    let Ok(metadata) = fs::symlink_metadata("/var/run") else {
+        return;
+    };
+    let Ok(target) = fs::read_link("/var/run") else {
+        return;
+    };
+    if !metadata.file_type().is_symlink()
+        || (target != Path::new("/run") && target != Path::new("../run"))
+    {
+        return;
+    }
+
+    let pid_file = PidFile::new("/var/run/telemt.pid");
+
+    assert_eq!(pid_file.path(), Path::new("/run/telemt.pid"));
+}
+
+#[test]
 fn lock_holder_subprocess() {
     let Some(pid_path) = std::env::var_os(HELPER_PID_PATH) else {
         return;

@@ -2,7 +2,18 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 const TRUSTED_HELPER_DIRS: [&str; 4] = ["/usr/sbin", "/usr/bin", "/sbin", "/bin"];
-const TRUSTED_HELPERS: [&str; 5] = ["nft", "iptables", "ip6tables", "conntrack", "pfctl"];
+const TRUSTED_HELPERS: [&str; 10] = [
+    "nft",
+    "iptables",
+    "ip6tables",
+    "conntrack",
+    "pfctl",
+    "systemctl",
+    "rc-update",
+    "rc-service",
+    "sysrc",
+    "service",
+];
 
 /// Resolves a privileged helper only through the fixed system allowlist.
 pub(crate) fn resolve_trusted_helper(binary: &str) -> Option<PathBuf> {
