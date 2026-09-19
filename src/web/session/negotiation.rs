@@ -34,6 +34,9 @@ impl WebSession {
         &self,
         state: &SessionState,
     ) -> Result<(), crate::web::manager::ManagerError> {
+        if self.cancel.is_cancelled() {
+            return Err(crate::web::manager::ManagerError::Closed);
+        }
         if state.negotiation_phase == SessionNegotiationPhase::Uncommitted
             && self
                 .carrier_deadline_at

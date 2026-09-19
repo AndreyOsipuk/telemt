@@ -31,6 +31,11 @@ struct ExistingTarget {
     metadata: std::fs::Metadata,
 }
 
+struct GraphFence<'a> {
+    config_path: &'a Path,
+    expected_revision: &'a str,
+}
+
 struct ConfigWriteLock {
     #[cfg(unix)]
     _file: Flock<File>,
@@ -38,9 +43,10 @@ struct ConfigWriteLock {
 
 impl ConfigWriteLock {
     fn acquire(path: &Path) -> std::io::Result<Self> {
+        let path = normalize_path(path);
         #[cfg(unix)]
         {
-            let lock_path = sibling_lock_path(path);
+            let lock_path = sibling_lock_path(&path);
             let anchored = AnchoredPath::open_creating_parents(&lock_path, 0o750)?;
             let descriptor = openat(
                 anchored.parent(),
@@ -76,7 +82,7 @@ pub(in crate::api) async fn write_atomic(
 ) -> Result<(), ApiFailure> {
     tokio::task::spawn_blocking(move || {
         let _lock = ConfigWriteLock::acquire(&path)?;
-        write_atomic_sync(&path, None, &contents)
+        write_atomic_sync(&path, None, &contents, None).map(|_| ())
     })
         .await
         .map_err(|error| ApiFailure::internal(format!("failed to join writer: {error}")))?
@@ -90,8 +96,10 @@ pub(in crate::api) async fn write_atomic_if_unchanged(
     path: PathBuf,
     expected_contents: String,
     contents: String,
-) -> Result<(), ApiFailure> {
+) -> Result<String, ApiFailure> {
     tokio::task::spawn_blocking(move || {
+        let config_path = normalize_path(&config_path);
+        let path = normalize_path(&path);
         // Every API mutation locks the root source so writes to different includes serialize.
         let _lock = ConfigWriteLock::acquire(&config_path).map_err(AtomicWriteError::Io)?;
         let graph = ProxyConfig::read_source_graph(&config_path)
@@ -99,12 +107,26 @@ pub(in crate::api) async fn write_atomic_if_unchanged(
         if compute_source_revision(&graph) != expected_revision {
             return Err(AtomicWriteError::Conflict);
         }
-        write_atomic_sync(&path, Some(&expected_contents), &contents).map_err(|error| {
+        write_atomic_sync(
+            &path,
+            Some(&expected_contents),
+            &contents,
+            Some(GraphFence {
+                config_path: &config_path,
+                expected_revision: &expected_revision,
+            }),
+        )
+        .map_err(|error| {
             if error.kind() == std::io::ErrorKind::AlreadyExists {
                 AtomicWriteError::Conflict
             } else {
                 AtomicWriteError::Io(error)
             }
+        })?
+        .ok_or_else(|| {
+            AtomicWriteError::Io(std::io::Error::other(
+                "config graph fence did not produce a committed revision",
+            ))
         })
     })
     .await
@@ -135,6 +157,51 @@ fn sibling_lock_path(path: &Path) -> PathBuf {
         .to_os_string();
     name.push(".lock");
     path.parent().unwrap_or_else(|| Path::new(".")).join(name)
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|current| current.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn fenced_post_commit_revision(
+    fence: GraphFence<'_>,
+    path: &Path,
+    contents: &str,
+) -> std::io::Result<String> {
+    let mut graph = ProxyConfig::read_source_graph(fence.config_path)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    if compute_source_revision(&graph) != fence.expected_revision {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "config graph changed during persistence",
+        ));
+    }
+    let path = normalize_path(path);
+    let Some(owner) = graph.source_contents.get_mut(&path) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "config source owner left the source graph during persistence",
+        ));
+    };
+    *owner = contents.to_string();
+    Ok(compute_source_revision(&graph))
 }
 
 #[cfg(unix)]
@@ -210,7 +277,8 @@ fn write_atomic_sync(
     path: &Path,
     expected_contents: Option<&str>,
     contents: &str,
-) -> std::io::Result<()> {
+    graph_fence: Option<GraphFence<'_>>,
+) -> std::io::Result<Option<String>> {
     let anchored = AnchoredPath::open_creating_parents(path, 0o750)?;
     let existing = open_existing_target(&anchored)?;
     validate_expected_contents(existing.as_ref(), expected_contents)?;
@@ -234,10 +302,12 @@ fn write_atomic_sync(
     .map_err(errno_to_io)?;
     let write_result = write_and_publish(
         descriptor,
+        path,
         &anchored,
         &temp_name,
         existing.as_ref(),
         contents,
+        graph_fence,
     );
     if write_result.is_err() {
         let _ = unlinkat(
@@ -252,11 +322,13 @@ fn write_atomic_sync(
 #[cfg(unix)]
 fn write_and_publish(
     descriptor: std::os::fd::OwnedFd,
+    path: &Path,
     anchored: &AnchoredPath,
     temp_name: &str,
     existing: Option<&ExistingTarget>,
     contents: &str,
-) -> std::io::Result<()> {
+    graph_fence: Option<GraphFence<'_>>,
+) -> std::io::Result<Option<String>> {
     let mut file = File::from(descriptor);
     if let Some(existing) = existing {
         use nix::unistd::{Gid, Uid, fchown};
@@ -280,6 +352,9 @@ fn write_and_publish(
             "config target changed during persistence",
         ));
     }
+    let committed_revision = graph_fence
+        .map(|fence| fenced_post_commit_revision(fence, path, contents))
+        .transpose()?;
     renameat(
         anchored.parent(),
         temp_name,
@@ -287,7 +362,8 @@ fn write_and_publish(
         anchored.name(),
     )
     .map_err(errno_to_io)?;
-    fsync(anchored.parent()).map_err(errno_to_io)
+    fsync(anchored.parent()).map_err(errno_to_io)?;
+    Ok(committed_revision)
 }
 
 #[cfg(not(unix))]
@@ -295,7 +371,8 @@ fn write_atomic_sync(
     path: &Path,
     expected_contents: Option<&str>,
     contents: &str,
-) -> std::io::Result<()> {
+    graph_fence: Option<GraphFence<'_>>,
+) -> std::io::Result<Option<String>> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
     let existing = open_existing_target(path)?;
@@ -310,7 +387,11 @@ fn write_atomic_sync(
             "config target changed during persistence",
         ));
     }
-    std::fs::rename(temp, path)
+    let committed_revision = graph_fence
+        .map(|fence| fenced_post_commit_revision(fence, path, contents))
+        .transpose()?;
+    std::fs::rename(temp, path)?;
+    Ok(committed_revision)
 }
 
 fn validate_expected_contents(

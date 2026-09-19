@@ -133,38 +133,55 @@ pub(super) async fn handle(
             ));
         }
         let expected_revision = parse_if_match(req.headers());
-        let _mutation_guard = shared.mutation_lock.lock().await;
-        let (disk_cfg, _) =
-            load_config_for_mutation(&shared.config_path, expected_revision.as_deref()).await?;
-        if !disk_cfg.access.users.contains_key(user) {
-            return Ok(error_response(
-                request_id,
-                ApiFailure::new(StatusCode::NOT_FOUND, "not_found", "User not found"),
-            ));
-        }
-        let configured_users = disk_cfg
-            .access
-            .users
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let snapshot = match shared.quota_state.reset_user(&configured_users, user).await {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                shared.runtime_events.record(
-                    "api.user.reset_quota.failed",
-                    format!("username={} error={}", user, error),
+        let completion_shared = shared.as_ref().clone();
+        let user_owned = user.to_string();
+        let completion = shared
+            .run_mutation_completion(async move {
+                let _mutation_guard = completion_shared.mutation_lock.lock().await;
+                let (disk_cfg, _) = load_config_for_mutation(
+                    &completion_shared.config_path,
+                    expected_revision.as_deref(),
+                )
+                .await?;
+                if !disk_cfg.access.users.contains_key(&user_owned) {
+                    return Err(ApiFailure::new(
+                        StatusCode::NOT_FOUND,
+                        "not_found",
+                        "User not found",
+                    ));
+                }
+                let configured_users = disk_cfg
+                    .access
+                    .users
+                    .keys()
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let snapshot = completion_shared
+                    .quota_state
+                    .reset_user(&configured_users, &user_owned)
+                    .await
+                    .map_err(|error| {
+                        completion_shared.runtime_events.record(
+                            "api.user.reset_quota.failed",
+                            format!("username={} error={}", user_owned, error),
+                        );
+                        ApiFailure::internal(format!("Failed to reset user quota: {}", error))
+                    })?;
+                completion_shared.runtime_events.record(
+                    "api.user.reset_quota.ok",
+                    format!("username={}", user_owned),
                 );
-                return Err(ApiFailure::internal(format!(
-                    "Failed to reset user quota: {}",
-                    error
-                )));
+                let revision = current_revision(&completion_shared.config_path).await?;
+                Ok((snapshot, revision))
+            })
+            .await;
+        let (snapshot, revision) = match completion {
+            Ok(result) => result,
+            Err(error) if error.code == "not_found" => {
+                return Ok(error_response(request_id, error));
             }
+            Err(error) => return Err(error),
         };
-        shared
-            .runtime_events
-            .record("api.user.reset_quota.ok", format!("username={}", user));
-        let revision = current_revision(&shared.config_path).await?;
         return Ok(success_response(
             StatusCode::OK,
             ResetUserQuotaResponse {

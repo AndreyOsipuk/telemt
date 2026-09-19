@@ -102,26 +102,10 @@ impl MePool {
             ));
         };
         let required = match contour {
-            WriterContour::Active => self.required_writers_for_dc(
+            WriterContour::Active | WriterContour::Warm => self.required_writers_for_dc(
                 endpoints
                     .iter()
                     .filter(|endpoint| endpoint.is_ipv4() == writer.addr.is_ipv4())
-                    .count(),
-            ),
-            WriterContour::Warm => self.required_writers_for_dc(
-                endpoints
-                    .iter()
-                    .filter(|endpoint| {
-                        let endpoint_family = if endpoint.is_ipv4() {
-                            crate::network::IpFamily::V4
-                        } else {
-                            crate::network::IpFamily::V6
-                        };
-                        self.family_enabled_for_drain_coverage(
-                            endpoint_family,
-                            now_epoch_secs,
-                        )
-                    })
                     .count(),
             ),
             WriterContour::Draining => 0,
@@ -134,18 +118,8 @@ impl MePool {
                     && candidate.generation == writer.generation
                     && WriterContour::from_u8(candidate.contour.load(Ordering::Acquire))
                         == contour
-                    && (contour == WriterContour::Warm
-                        || candidate.addr.is_ipv4() == writer.addr.is_ipv4())
+                    && candidate.addr.is_ipv4() == writer.addr.is_ipv4()
                     && endpoints.contains(&candidate.addr)
-                    && (contour != WriterContour::Warm
-                        || self.family_enabled_for_drain_coverage(
-                            if candidate.addr.is_ipv4() {
-                                crate::network::IpFamily::V4
-                            } else {
-                                crate::network::IpFamily::V6
-                            },
-                            now_epoch_secs,
-                        ))
             })
             .count();
         if current >= required {

@@ -116,19 +116,9 @@ impl WebProcessRuntime {
                 .record_rejection(WebRejectionReason::BootstrapCapacity);
             return Err(ManagerError::Limit);
         }
-        if !allow_rate(
-            &mut state.bootstrap_rate,
-            now,
-            self.limits.new_bootstraps_per_minute,
-            self.limits.new_bootstraps_burst,
-        ) {
-            self.record_limit_hit();
-            self.telemetry
-                .record_rejection(WebRejectionReason::BootstrapRate);
-            return Err(ManagerError::Limit);
-        }
-        if state.bootstraps.len() >= self.limits.max_bootstraps_global
-            && !evict_oldest_unused_bootstrap(&mut state)
+        let global_capacity_full = state.bootstraps.len() >= self.limits.max_bootstraps_global;
+        if global_capacity_full
+            && !state.bootstraps.values().any(|bootstrap| !bootstrap.used)
         {
             self.record_limit_hit();
             self.telemetry
@@ -152,6 +142,23 @@ impl WebProcessRuntime {
         let Some(user_registration) = user_publication.take_registration() else {
             return Err(ManagerError::Closed);
         };
+        if !allow_rate(
+            &mut state.bootstrap_rate,
+            now,
+            self.limits.new_bootstraps_per_minute,
+            self.limits.new_bootstraps_burst,
+        ) {
+            self.record_limit_hit();
+            self.telemetry
+                .record_rejection(WebRejectionReason::BootstrapRate);
+            return Err(ManagerError::Limit);
+        }
+        let evicted_bootstrap = global_capacity_full
+            .then(|| evict_oldest_unused_bootstrap(&mut state))
+            .flatten();
+        if global_capacity_full && evicted_bootstrap.is_none() {
+            return Err(ManagerError::Limit);
+        }
         let trace_session_id = self.trace.next_session_id();
         let bridge_diagnostics_enabled = config.web.debug.bridge_diagnostics_enabled();
         let (user_agent, user_agent_id) = bounded_user_agent(user_agent);
@@ -196,6 +203,7 @@ impl WebProcessRuntime {
         *state.bootstraps_per_ip.entry(client_ip).or_insert(0) += 1;
         user_publication.commit();
         drop(state);
+        drop(evicted_bootstrap);
         if recovery {
             self.telemetry
                 .record_bridge_recovery(WebBridgeRecoveryEvent::BootstrapIssued);
@@ -243,7 +251,11 @@ impl WebProcessRuntime {
             .lock()
             .bootstraps
             .get(&hash)
-            .filter(|entry| entry.profile.host == host && now <= entry.expires_at)
+            .filter(|entry| {
+                entry.profile.host == host
+                    && now <= entry.expires_at
+                    && !entry.user_registration.is_cancelled()
+            })
             .map(|entry| {
                 (
                     entry.trace_session_id,
@@ -263,20 +275,23 @@ impl WebProcessRuntime {
         host: &str,
     ) -> std::result::Result<Arc<WebSession>, ManagerError> {
         let state = self.state.lock();
-        if let Some(session) = state
+        let session = state
             .sessions
             .get(&hash)
             .cloned()
-            .filter(|session| session.matches_host(host))
-        {
-            return Ok(session);
-        }
+            .filter(|session| session.matches_host(host));
         let retired_carrier = state
             .closed_tokens
             .get(&hash)
             .filter(|closed| closed.host == host)
             .map(|closed| closed.carrier);
         drop(state);
+        if let Some(session) = session {
+            if session.close_if_cancelled() {
+                return Err(ManagerError::Closed);
+            }
+            return Ok(session);
+        }
         if let Some(carrier) = retired_carrier {
             self.telemetry.record_session_observation(
                 carrier,
@@ -294,14 +309,16 @@ impl WebProcessRuntime {
         profile: &WebRuntimeProfile,
     ) -> Option<Arc<WebSession>> {
         let expected_profile = profile_key(profile);
-        self.state
+        let session = self
+            .state
             .lock()
             .sessions
             .get(&hash)
             .filter(|session| {
                 session.matches_host(host) && session.profile_key() == expected_profile
             })
-            .cloned()
+            .cloned();
+        session.filter(|session| !session.close_if_cancelled())
     }
 
     /// Closes a live token and accepts bounded tombstone retries.

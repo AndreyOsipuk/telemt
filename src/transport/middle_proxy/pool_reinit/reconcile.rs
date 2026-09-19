@@ -15,101 +15,117 @@ impl MePool {
         let total_passes = 1 + extra_passes;
 
         for (dc, endpoints) in desired_by_dc {
-            if endpoints.is_empty() {
-                continue;
-            }
-
-            let mut endpoint_list: Vec<SocketAddr> = endpoints.iter().copied().collect();
-            endpoint_list.sort_unstable();
-            let required = self.required_writers_for_dc(endpoint_list.len());
-            let mut completed = false;
-            let mut last_fresh_count = self
-                .fresh_writer_count_for_dc_endpoints(generation, *dc, endpoints)
-                .await;
-
-            for pass_idx in 0..total_passes {
-                if last_fresh_count >= required {
-                    completed = true;
-                    break;
+            for family in [IpFamily::V4, IpFamily::V6] {
+                let family_endpoints = endpoints
+                    .iter()
+                    .copied()
+                    .filter(|endpoint| endpoint.is_ipv4() == (family == IpFamily::V4))
+                    .collect::<HashSet<_>>();
+                if family_endpoints.is_empty() {
+                    continue;
                 }
 
-                let missing = required.saturating_sub(last_fresh_count);
-                debug!(
-                    dc = *dc,
-                    pass = pass_idx + 1,
-                    total_passes,
-                    fresh_count = last_fresh_count,
-                    required,
-                    missing,
-                    endpoint_count = endpoint_list.len(),
-                    "ME hardswap warmup pass started"
-                );
+                let mut endpoint_list = family_endpoints.iter().copied().collect::<Vec<_>>();
+                endpoint_list.sort_unstable();
+                let required = self.required_writers_for_dc(endpoint_list.len());
+                let mut completed = false;
+                let mut last_fresh_count = self
+                    .fresh_writer_count_for_dc_endpoints(generation, *dc, &family_endpoints)
+                    .await;
 
-                for attempt_idx in 0..missing {
-                    let delay_ms = self.hardswap_warmup_connect_delay_ms();
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                for pass_idx in 0..total_passes {
+                    if last_fresh_count >= required {
+                        completed = true;
+                        break;
+                    }
 
-                    let connected = self
-                        .connect_endpoints_round_robin_with_generation_contour(
-                            *dc,
-                            &endpoint_list,
-                            rng,
+                    let missing = required.saturating_sub(last_fresh_count);
+                    debug!(
+                        dc = *dc,
+                        family = ?family,
+                        pass = pass_idx + 1,
+                        total_passes,
+                        fresh_count = last_fresh_count,
+                        required,
+                        missing,
+                        endpoint_count = endpoint_list.len(),
+                        "ME hardswap family warmup pass started"
+                    );
+
+                    for attempt_idx in 0..missing {
+                        let delay_ms = self.hardswap_warmup_connect_delay_ms();
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+
+                        let connected = self
+                            .connect_endpoints_round_robin_with_generation_contour(
+                                *dc,
+                                &endpoint_list,
+                                rng,
+                                generation,
+                                WriterContour::Warm,
+                                WriterOpenIntent::Coverage,
+                            )
+                            .await;
+                        debug!(
+                            dc = *dc,
+                            family = ?family,
+                            pass = pass_idx + 1,
+                            total_passes,
+                            attempt = attempt_idx + 1,
+                            delay_ms,
+                            connected,
+                            "ME hardswap family warmup connect attempt finished"
+                        );
+                    }
+
+                    last_fresh_count = self
+                        .fresh_writer_count_for_dc_endpoints(
                             generation,
-                            WriterContour::Warm,
-                            WriterOpenIntent::Normal,
+                            *dc,
+                            &family_endpoints,
                         )
                         .await;
-                    debug!(
-                        dc = *dc,
-                        pass = pass_idx + 1,
-                        total_passes,
-                        attempt = attempt_idx + 1,
-                        delay_ms,
-                        connected,
-                        "ME hardswap warmup connect attempt finished"
-                    );
+                    if last_fresh_count >= required {
+                        completed = true;
+                        info!(
+                            dc = *dc,
+                            family = ?family,
+                            pass = pass_idx + 1,
+                            total_passes,
+                            fresh_count = last_fresh_count,
+                            required,
+                            "ME hardswap writer floor reached for DC family"
+                        );
+                        break;
+                    }
+
+                    if pass_idx + 1 < total_passes {
+                        let backoff_ms = self.hardswap_warmup_backoff_ms(pass_idx);
+                        debug!(
+                            dc = *dc,
+                            family = ?family,
+                            pass = pass_idx + 1,
+                            total_passes,
+                            fresh_count = last_fresh_count,
+                            required,
+                            backoff_ms,
+                            "ME hardswap family warmup incomplete, delaying next pass"
+                        );
+                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    }
                 }
 
-                last_fresh_count = self
-                    .fresh_writer_count_for_dc_endpoints(generation, *dc, endpoints)
-                    .await;
-                if last_fresh_count >= required {
-                    completed = true;
-                    info!(
+                if !completed {
+                    warn!(
                         dc = *dc,
-                        pass = pass_idx + 1,
-                        total_passes,
+                        family = ?family,
                         fresh_count = last_fresh_count,
                         required,
-                        "ME hardswap warmup floor reached for DC"
-                    );
-                    break;
-                }
-
-                if pass_idx + 1 < total_passes {
-                    let backoff_ms = self.hardswap_warmup_backoff_ms(pass_idx);
-                    debug!(
-                        dc = *dc,
-                        pass = pass_idx + 1,
+                        endpoint_count = endpoint_list.len(),
                         total_passes,
-                        fresh_count = last_fresh_count,
-                        required,
-                        backoff_ms,
-                        "ME hardswap warmup pass incomplete, delaying next pass"
+                        "ME warmup stopped below the required DC-family writer floor"
                     );
-                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 }
-            }
-
-            if !completed {
-                warn!(
-                    dc = *dc,
-                    fresh_count = last_fresh_count,
-                    required,
-                    endpoint_count = endpoint_list.len(),
-                    total_passes,
-                    "ME warmup stopped: unable to reach required writer floor for DC"
-                );
             }
         }
     }
@@ -220,27 +236,27 @@ impl MePool {
         }
 
         if hardswap {
-            let fresh_writer_addrs: HashSet<(i32, SocketAddr)> = writers
+            let fresh_writer_addrs: Vec<(i32, SocketAddr)> = writers
                 .iter()
                 .filter(|w| !w.draining.load(Ordering::Relaxed))
                 .filter(|w| w.generation == generation)
                 .map(|w| (w.writer_dc, w.addr))
                 .collect();
-            let (fresh_coverage_ratio, fresh_missing_dc) =
-                Self::coverage_ratio(&desired_by_dc, &fresh_writer_addrs);
-            if fresh_coverage_ratio < min_ratio {
+            let fresh_coverage = self.hardswap_coverage(&desired_by_dc, &fresh_writer_addrs);
+            if fresh_coverage.ratio < min_ratio {
                 self.set_last_drain_gate(
                     false,
-                    fresh_missing_dc.is_empty(),
+                    fresh_coverage.missing_groups.is_empty(),
                     MeDrainGateReason::CoverageQuorum,
                     now_epoch_secs,
                 );
                 warn!(
                     previous_generation,
                     generation,
-                    fresh_coverage_ratio = format_args!("{fresh_coverage_ratio:.3}"),
-                    missing_dc = ?fresh_missing_dc,
-                    "ME hardswap pending: fresh generation DC coverage incomplete"
+                    fresh_coverage_ratio = format_args!("{:.3}", fresh_coverage.ratio),
+                    writer_deficit = fresh_coverage.writer_deficit,
+                    missing_groups = ?fresh_coverage.missing_groups,
+                    "ME hardswap pending: fresh generation DC-family floors incomplete"
                 );
                 return false;
             }
@@ -263,6 +279,7 @@ impl MePool {
             Err(ReinitCommitFailure::Coverage {
                 coverage_ratio,
                 missing_dc,
+                missing_groups,
             }) => {
                 self.set_last_drain_gate(
                     false,
@@ -276,6 +293,7 @@ impl MePool {
                     coverage_ratio = format_args!("{coverage_ratio:.3}"),
                     min_ratio = format_args!("{min_ratio:.3}"),
                     missing_dc = ?missing_dc,
+                    missing_groups = ?missing_groups,
                     "ME reinit coverage changed before commit; keeping current generation"
                 );
                 return false;
@@ -283,6 +301,7 @@ impl MePool {
             Err(ReinitCommitFailure::Redundancy {
                 coverage_ratio,
                 missing_dc,
+                missing_groups,
             }) => {
                 self.set_last_drain_gate(
                     true,
@@ -296,6 +315,7 @@ impl MePool {
                     coverage_ratio = format_args!("{coverage_ratio:.3}"),
                     min_ratio = format_args!("{min_ratio:.3}"),
                     missing_dc = ?missing_dc,
+                    missing_groups = ?missing_groups,
                     "ME hardswap weighted quorum requires stale-binding fallback"
                 );
                 return false;
@@ -310,9 +330,10 @@ impl MePool {
         if !outcome.missing_dc.is_empty() {
             warn!(
                 missing_dc = ?outcome.missing_dc,
+                missing_groups = ?outcome.missing_groups,
                 coverage_ratio = format_args!("{:.3}", outcome.coverage_ratio),
                 min_ratio = format_args!("{min_ratio:.3}"),
-                "ME reinit committed with bounded stale fallback for uncovered DC groups"
+                "ME reinit committed with bounded stale fallback for uncovered DC-family groups"
             );
         }
 

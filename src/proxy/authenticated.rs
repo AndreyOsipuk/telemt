@@ -15,7 +15,7 @@ use crate::proxy::middle_relay::{handle_via_middle_proxy, handle_via_middle_prox
 use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
 use crate::proxy::shared_state::{ConntrackClosePolicy, ProxySharedState};
 use crate::proxy::user_admission::UserIncarnation;
-use crate::stats::Stats;
+use crate::stats::{Stats, UserQuotaHandle};
 use crate::stream::{BufferPool, CryptoReader, CryptoWriter};
 use crate::transport::UpstreamManager;
 use crate::transport::middle_proxy::MePool;
@@ -85,6 +85,7 @@ where
         warn!(user = %user, error = %error, "User admission check failed");
         error
     })?;
+    let quota_handle = user_reservation.quota_handle();
 
     let route_snapshot = deps.route_runtime.snapshot();
     let session_id = deps.rng.u64();
@@ -137,6 +138,7 @@ where
                     session_id,
                     session_cancel.clone(),
                     Arc::clone(&deps.shared),
+                    quota_handle.clone(),
                 )
                 .await
             } else {
@@ -156,6 +158,7 @@ where
                     session_cancel.clone(),
                     Arc::clone(&deps.shared),
                     ConntrackClosePolicy::Suppress,
+                    quota_handle.clone(),
                 )
                 .await
             }
@@ -171,6 +174,7 @@ where
                 local_addr,
                 session_cancel.clone(),
                 conntrack_close_policy,
+                quota_handle.clone(),
             )
             .await
         }
@@ -185,6 +189,7 @@ where
             local_addr,
             session_cancel,
             conntrack_close_policy,
+            quota_handle,
         )
         .await
     };
@@ -202,6 +207,7 @@ async fn run_direct<R, W>(
     local_addr: SocketAddr,
     session_cancel: tokio_util::sync::CancellationToken,
     conntrack_close_policy: ConntrackClosePolicy,
+    quota_handle: UserQuotaHandle,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -223,6 +229,7 @@ where
         session_cancel,
         Arc::clone(&deps.shared),
         conntrack_close_policy,
+        quota_handle,
     )
     .await
 }
@@ -235,6 +242,7 @@ pub(crate) struct UserConnectionReservation {
     user: String,
     ip: IpAddr,
     incarnation: UserIncarnation,
+    quota_handle: UserQuotaHandle,
     tracks_ip: bool,
     active: bool,
 }
@@ -248,7 +256,16 @@ impl UserConnectionReservation {
         ip: IpAddr,
         tracks_ip: bool,
     ) -> Self {
-        Self::new_for_incarnation(stats, ip_tracker, user, ip, 0, tracks_ip)
+        let quota_handle = stats.current_user_quota_handle(&user);
+        Self::new_for_incarnation(
+            stats,
+            ip_tracker,
+            user,
+            ip,
+            0,
+            quota_handle,
+            tracks_ip,
+        )
     }
 
     /// Creates a reservation fenced to one authenticated user incarnation.
@@ -258,6 +275,7 @@ impl UserConnectionReservation {
         user: String,
         ip: IpAddr,
         incarnation: UserIncarnation,
+        quota_handle: UserQuotaHandle,
         tracks_ip: bool,
     ) -> Self {
         Self {
@@ -266,9 +284,15 @@ impl UserConnectionReservation {
             user,
             ip,
             incarnation,
+            quota_handle,
             tracks_ip,
             active: true,
         }
+    }
+
+    /// Returns quota ownership pinned to the authenticated user incarnation.
+    pub(crate) fn quota_handle(&self) -> UserQuotaHandle {
+        self.quota_handle.clone()
     }
 
     /// Releases both admission counters through the asynchronous cleanup path.
@@ -354,8 +378,13 @@ async fn acquire_user_connection_reservation_for_incarnation(
             user: user.to_string(),
         });
     }
+    let Some(quota_handle) = stats.quota_handle_for_incarnation(user, incarnation) else {
+        return Err(ProxyError::UserDisabled {
+            user: user.to_string(),
+        });
+    };
     if let Some(quota) = config.access.user_data_quota.get(user)
-        && stats.get_user_quota_used(user) >= *quota
+        && quota_handle.used() >= *quota
     {
         return Err(ProxyError::DataQuotaExceeded {
             user: user.to_string(),
@@ -399,6 +428,7 @@ async fn acquire_user_connection_reservation_for_incarnation(
         user.to_string(),
         peer_addr.ip(),
         incarnation,
+        quota_handle,
         true,
     ))
 }

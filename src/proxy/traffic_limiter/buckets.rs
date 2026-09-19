@@ -71,11 +71,11 @@ impl DirectionBucket {
     }
 
     pub(super) fn try_reserve_at(
-        &self,
+        self: &Arc<Self>,
         epoch: u64,
         cap: u64,
         requested: u64,
-    ) -> Option<DirectionDebit<'_>> {
+    ) -> Option<DirectionDebit> {
         if requested == 0 || cap == 0 || epoch > PACKED_EPOCH_MAX {
             return None;
         }
@@ -109,7 +109,7 @@ impl DirectionBucket {
             ) {
                 Ok(_) => {
                     return Some(DirectionDebit {
-                        bucket: self,
+                        bucket: Arc::clone(self),
                         epoch,
                         refundable: grant,
                     });
@@ -144,7 +144,7 @@ impl DirectionBucket {
     }
 }
 
-impl DirectionDebit<'_> {
+impl DirectionDebit {
     fn granted(&self) -> u64 {
         self.refundable
     }
@@ -168,7 +168,7 @@ impl DirectionDebit<'_> {
     }
 }
 
-impl Drop for DirectionDebit<'_> {
+impl Drop for DirectionDebit {
     fn drop(&mut self) {
         self.bucket.refund_at(self.epoch, self.refundable);
     }
@@ -178,8 +178,8 @@ impl UserBucket {
     pub(super) fn new(revision: u64, limits: RateLimitBps) -> Self {
         Self {
             rates: AtomicRatePair::new(revision, limits),
-            up: DirectionBucket::default(),
-            down: DirectionBucket::default(),
+            up: Arc::new(DirectionBucket::default()),
+            down: Arc::new(DirectionBucket::default()),
             active_leases: AtomicU64::new(0),
         }
     }
@@ -192,7 +192,7 @@ impl UserBucket {
         &self,
         direction: RateDirection,
         requested: u64,
-    ) -> (u64, Option<DirectionDebit<'_>>) {
+    ) -> (u64, Option<DirectionDebit>) {
         let cap_bps = self.rates.get(direction);
         if cap_bps == 0 {
             return (requested, None);
@@ -208,12 +208,12 @@ impl UserBucket {
 }
 
 impl CidrDirectionBucket {
-    pub(super) fn try_reserve<'a>(
-        &'a self,
-        user_state: &'a CidrUserDirectionState,
+    pub(super) fn try_reserve(
+        &self,
+        user_state: &CidrUserDirectionState,
         cap_epoch: u64,
         requested: u64,
-    ) -> (u64, Option<DirectionDebit<'a>>, Option<DirectionDebit<'a>>) {
+    ) -> (u64, Option<DirectionDebit>, Option<DirectionDebit>) {
         if requested == 0 || cap_epoch == 0 {
             return (0, None, None);
         }
@@ -260,7 +260,7 @@ impl CidrDirectionBucket {
 }
 
 impl CidrUserDirectionState {
-    pub(super) fn ensure_active(&self, epoch: u64, active_users: &DirectionBucket) -> bool {
+    pub(super) fn ensure_active(&self, epoch: u64, active_users: &Arc<DirectionBucket>) -> bool {
         if epoch > PACKED_EPOCH_MAX {
             return false;
         }
@@ -340,12 +340,12 @@ impl CidrBucket {
         });
     }
 
-    pub(super) fn try_reserve_for_user<'a>(
-        &'a self,
+    pub(super) fn try_reserve_for_user(
+        &self,
         direction: RateDirection,
-        share: &'a CidrUserShare,
+        share: &CidrUserShare,
         requested: u64,
-    ) -> (u64, Option<DirectionDebit<'a>>, Option<DirectionDebit<'a>>) {
+    ) -> (u64, Option<DirectionDebit>, Option<DirectionDebit>) {
         let cap_bps = self.rates.get(direction);
         if cap_bps == 0 {
             return (requested, None, None);

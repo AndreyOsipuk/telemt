@@ -198,15 +198,27 @@ impl ProxySharedState {
         self.user_admission.apply_config(users, user_enabled)
     }
 
-    /// Applies a candidate user policy only when its captured epoch is current.
-    pub(crate) fn apply_user_config_if_epoch(
+    /// Transfers user-policy ownership to one runtime generation.
+    pub(crate) fn activate_user_config_source(
         &self,
-        expected_epoch: u64,
+        source_generation: u64,
+        expected_epoch: Option<u64>,
         users: &HashMap<String, String>,
         user_enabled: &HashMap<String, bool>,
     ) -> Option<Vec<(String, usize)>> {
         self.user_admission
-            .apply_config_if_epoch(expected_epoch, users, user_enabled)
+            .activate_config_source(source_generation, expected_epoch, users, user_enabled)
+    }
+
+    /// Applies an update only from the active runtime generation.
+    pub(crate) fn apply_user_config_from_source(
+        &self,
+        source_generation: u64,
+        users: &HashMap<String, String>,
+        user_enabled: &HashMap<String, bool>,
+    ) -> Option<Vec<(String, usize)>> {
+        self.user_admission
+            .apply_config_from_source(source_generation, users, user_enabled)
     }
 
     /// Applies one persisted user mutation before asynchronous config reload.
@@ -217,6 +229,17 @@ impl ProxySharedState {
         enabled: bool,
     ) -> Option<UserMutationResult> {
         self.user_admission.stage_user(user, secret, enabled)
+    }
+
+    /// Applies one prevalidated persisted credential before asynchronous reload.
+    pub(crate) fn stage_user_credential(
+        &self,
+        user: &str,
+        credential_id: UserCredentialId,
+        enabled: bool,
+    ) -> UserMutationResult {
+        self.user_admission
+            .stage_user_credential(user, credential_id, enabled)
     }
 
     /// Installs a deletion tombstone and cancels every current owner.

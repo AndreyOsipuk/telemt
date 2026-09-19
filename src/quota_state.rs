@@ -116,22 +116,19 @@ impl QuotaStateOwner {
         wait_for_blocking_io(task).await
     }
 
-    /// Removes a deleted user's persisted and in-memory quota ownership.
+    /// Removes a deleted user's persisted quota checkpoint.
     pub(crate) async fn remove_user(
         &self,
         configured_users: &BTreeSet<String>,
         user: &str,
     ) -> std::io::Result<()> {
         let guard = Arc::clone(&self.mutation).lock_owned().await;
+        debug_assert!(!configured_users.contains(user));
         let state = self.state_for_users(configured_users, None);
         let path = self.path.clone();
-        let store = Arc::clone(&self.store);
-        let user = user.to_string();
         let task = tokio::task::spawn_blocking(move || {
             let _guard = guard;
-            let persisted = write_state_file_blocking(&path, &state);
-            store.remove(&user);
-            persisted
+            write_state_file_blocking(&path, &state)
         });
         wait_for_blocking_io(task).await
     }

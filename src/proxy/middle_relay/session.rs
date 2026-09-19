@@ -61,6 +61,7 @@ pub(crate) async fn handle_via_middle_proxy_with_conntrack<R, W>(
     session_cancel: CancellationToken,
     shared: Arc<ProxySharedState>,
     conntrack_close_policy: ConntrackClosePolicy,
+    quota_handle: UserQuotaHandle,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -73,6 +74,7 @@ where
 
     let quota_limit = config.access.user_data_quota.get(&user).copied();
     let quota_user_stats = quota_limit.map(|_| stats.get_or_create_user_stats_handle(&user));
+    let quota_handle = quota_limit.map(|_| quota_handle);
     let peer = success.peer;
     let traffic_lease = shared.traffic_limiter.acquire_lease(&user, peer.ip());
     let proto_tag = success.proto_tag;
@@ -200,6 +202,7 @@ where
     let rng_clone = rng.clone();
     let user_clone = user.clone();
     let quota_user_stats_me_writer = quota_user_stats.clone();
+    let quota_handle_me_writer = quota_handle.clone();
     let traffic_lease_me_writer = traffic_lease.clone();
     let flow_cancel_me_writer = flow_cancel.clone();
     let last_downstream_activity_ms_clone = last_downstream_activity_ms.clone();
@@ -212,6 +215,7 @@ where
         rng_clone,
         user_clone,
         quota_user_stats_me_writer,
+        quota_handle_me_writer,
         quota_limit,
         traffic_lease_me_writer,
         flow_cancel_me_writer,
@@ -340,11 +344,11 @@ where
                         forensics.bytes_c2me = forensics
                             .bytes_c2me
                             .saturating_add(payload.len() as u64);
-                        if let (Some(limit), Some(user_stats)) =
-                            (quota_limit, quota_user_stats.as_deref())
+                        if let (Some(limit), Some(quota_handle)) =
+                            (quota_limit, quota_handle.as_ref())
                         {
                             match reserve_user_quota_with_yield(
-                                user_stats,
+                                quota_handle,
                                 payload.len() as u64,
                                 limit,
                                 stats.as_ref(),
@@ -379,7 +383,11 @@ where
                                     break;
                                 }
                             }
-                            stats.add_user_octets_from_handle(user_stats, payload.len() as u64);
+                            if let Some(user_stats) = quota_user_stats.as_deref() {
+                                stats.add_user_octets_from_handle(user_stats, payload.len() as u64);
+                            } else {
+                                stats.add_user_octets_from(&user, payload.len() as u64);
+                            }
                         } else {
                             stats.add_user_octets_from(&user, payload.len() as u64);
                         }

@@ -31,7 +31,8 @@ use crate::proxy::shared_state::{
 };
 use crate::proxy::traffic_limiter::{RateDirection, TrafficLease, next_refill_delay};
 use crate::stats::{
-    MeD2cFlushReason, MeD2cQuotaRejectStage, MeD2cWriteMode, QuotaReserveError, Stats, UserStats,
+    MeD2cFlushReason, MeD2cQuotaRejectStage, MeD2cWriteMode, QuotaReserveError, Stats,
+    UserQuotaHandle, UserStats,
 };
 use crate::stream::{BufferPool, CryptoReader, CryptoWriter, PooledBuffer};
 use crate::transport::middle_proxy::{ConnLease, MePool, MeResponse, proto_flags_for_tag};
@@ -108,6 +109,7 @@ pub(crate) async fn handle_via_middle_proxy<R, W>(
     session_id: u64,
     session_cancel: CancellationToken,
     shared: Arc<ProxySharedState>,
+    quota_handle: UserQuotaHandle,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -129,6 +131,7 @@ where
         session_cancel,
         shared,
         ConntrackClosePolicy::Publish,
+        quota_handle,
     )
     .await
 }

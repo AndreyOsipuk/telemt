@@ -223,6 +223,11 @@ mod tests {
                 WriterContour::Active,
                 WriterOpenIntent::Replacement,
                 writer_dc,
+                if addr.is_ipv4() {
+                    crate::network::IpFamily::V4
+                } else {
+                    crate::network::IpFamily::V6
+                },
             )
             .await
             .expect("replacement open must be admitted");

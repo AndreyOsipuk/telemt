@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use super::pool::{MePool, ReinitStatusSnapshot, WriterContour};
 use crate::config::{MeBindStaleMode, MeFloorMode, MeSocksKdfPolicy};
+use crate::network::IpFamily;
 use crate::transport::upstream::IpPreference;
 
 // ME writer and DC coverage snapshots.
@@ -105,7 +106,7 @@ pub(crate) struct MeApiRuntimeSnapshot {
     pub pending_writers_current: usize,
     /// Number of writers still required to reach the pending generation floor.
     pub pending_writer_deficit: usize,
-    /// Number of desired DC groups without pending-generation coverage.
+    /// Number of desired DC-family groups below their pending-generation floor.
     pub pending_missing_dc_groups: usize,
     /// Whether the pending generation targets the current desired endpoint map.
     pub pending_map_current: Option<bool>,

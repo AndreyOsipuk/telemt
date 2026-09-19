@@ -100,66 +100,64 @@ impl MePool {
         contour: WriterContour,
         intent: WriterOpenIntent,
         writer_dc: i32,
+        family: IpFamily,
     ) -> bool {
         if intent == WriterOpenIntent::Replacement {
             return true;
         }
         let (active_writers, warm_writers, _) = self.non_draining_writer_counts_by_contour().await;
-        match contour {
-            WriterContour::Active => {
-                let active_cap = self.adaptive_floor_active_cap_configured_total();
-                if active_writers < active_cap {
-                    return true;
-                }
-                if intent != WriterOpenIntent::Coverage {
-                    return false;
-                }
-
-                let mut endpoints_len = 0;
-                let now_epoch = Self::now_epoch_secs();
-                let endpoint_snapshot = self.endpoint_snapshot.load();
-                if self.family_enabled_for_drain_coverage(IpFamily::V4, now_epoch) {
-                    if let Some(addrs) = endpoint_snapshot.map_v4.get(&writer_dc) {
-                        endpoints_len += addrs.len();
-                    }
-                }
-                if self.family_enabled_for_drain_coverage(IpFamily::V6, now_epoch) {
-                    if let Some(addrs) = endpoint_snapshot.map_v6.get(&writer_dc) {
-                        endpoints_len += addrs.len();
-                    }
-                }
-
-                if endpoints_len > 0 {
-                    let base_req =
-                        self.required_writers_for_dc_with_floor_mode(endpoints_len, false);
-                    let active_generation = self.reinit.status.load().active_generation;
-                    let active_for_dc = {
-                        let ws = self.writers.read().await;
-                        ws.iter()
-                            .filter(|w| {
-                                !w.draining.load(std::sync::atomic::Ordering::Relaxed)
-                                    && w.writer_dc == writer_dc
-                                    && w.generation == active_generation
-                                    && matches!(
-                                        WriterContour::from_u8(
-                                            w.contour.load(std::sync::atomic::Ordering::Relaxed),
-                                        ),
-                                        WriterContour::Active
-                                    )
-                            })
-                            .count()
-                    };
-                    if active_for_dc < base_req {
-                        return true;
-                    }
-                }
-
-                let coverage_required = self.active_coverage_required_total().await;
-                active_writers < coverage_required
-            }
-            WriterContour::Warm => warm_writers < self.adaptive_floor_warm_cap_configured_total(),
-            WriterContour::Draining => true,
+        let live = match contour {
+            WriterContour::Active => active_writers,
+            WriterContour::Warm => warm_writers,
+            WriterContour::Draining => return true,
+        };
+        let configured_cap = match contour {
+            WriterContour::Active => self.adaptive_floor_active_cap_configured_total(),
+            WriterContour::Warm => self.adaptive_floor_warm_cap_configured_total(),
+            WriterContour::Draining => usize::MAX,
+        };
+        if live < configured_cap {
+            return true;
         }
+        if intent != WriterOpenIntent::Coverage {
+            return false;
+        }
+
+        let endpoint_snapshot = self.endpoint_snapshot.load();
+        let endpoint_count = match family {
+            IpFamily::V4 => endpoint_snapshot.map_v4.get(&writer_dc),
+            IpFamily::V6 => endpoint_snapshot.map_v6.get(&writer_dc),
+        }
+        .map(Vec::len)
+        .unwrap_or(0);
+        if endpoint_count == 0 {
+            return false;
+        }
+        let required = self.required_writers_for_dc_with_floor_mode(endpoint_count, false);
+        let status = self.reinit.status.load();
+        let generation = match contour {
+            WriterContour::Active => status.active_generation,
+            WriterContour::Warm => status.pending_hardswap_generation,
+            WriterContour::Draining => 0,
+        };
+        let family_count = {
+            let writers = self.writers.read().await;
+            writers
+                .iter()
+                .filter(|writer| {
+                    !writer.draining.load(Ordering::Relaxed)
+                        && writer.writer_dc == writer_dc
+                        && writer.generation == generation
+                        && WriterContour::from_u8(writer.contour.load(Ordering::Relaxed)) == contour
+                        && writer.addr.is_ipv4() == (family == IpFamily::V4)
+                })
+                .count()
+        };
+        if family_count < required {
+            return true;
+        }
+
+        live < self.active_coverage_required_total().await
     }
 
     /// Reserves bounded transient capacity for a writer open attempt.
@@ -168,6 +166,7 @@ impl MePool {
         contour: WriterContour,
         intent: WriterOpenIntent,
         writer_dc: i32,
+        family: IpFamily,
     ) -> Option<WriterOpenReservation<'_>> {
         let counter = match contour {
             WriterContour::Active => &self.writer_connect_active_reserved,
@@ -222,7 +221,7 @@ impl MePool {
 
         loop {
             if !self
-                .can_open_writer_for_contour(contour, intent, writer_dc)
+                .can_open_writer_for_contour(contour, intent, writer_dc, family)
                 .await
             {
                 return None;
@@ -239,7 +238,9 @@ impl MePool {
                 WriterContour::Warm => self.adaptive_floor_warm_cap_configured_total(),
                 WriterContour::Draining => usize::MAX,
             };
-            if contour == WriterContour::Active && intent == WriterOpenIntent::Coverage {
+            if intent == WriterOpenIntent::Coverage
+                && matches!(contour, WriterContour::Active | WriterContour::Warm)
+            {
                 limit = limit
                     .max(self.active_coverage_required_total().await)
                     .saturating_add(

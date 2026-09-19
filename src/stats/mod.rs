@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
-pub(crate) use self::quota_store::{QuotaReservation, QuotaStore};
+pub(crate) use self::quota_store::{QuotaReservation, QuotaStore, UserQuotaHandle};
 #[allow(unused_imports)]
 pub use self::replay::{ReplayChecker, ReplayStats};
 use self::telemetry::TelemetryPolicy;
@@ -429,6 +429,11 @@ impl Stats {
         stats.refresh_cached_epoch_secs();
         *stats.start_time.write() = Some(Instant::now());
         stats
+    }
+
+    #[cfg(test)]
+    pub(crate) fn quota_store(&self) -> Arc<QuotaStore> {
+        Arc::clone(&self.quota_store)
     }
 }
 

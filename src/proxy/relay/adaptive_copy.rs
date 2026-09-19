@@ -19,7 +19,7 @@ use crate::proxy::direct_buffer_budget::{
     DIRECT_BASE_C2S_BYTES, DIRECT_BASE_S2C_BYTES, DirectBufferBudget, DirectBufferLease,
 };
 use crate::proxy::traffic_limiter::TrafficLease;
-use crate::stats::Stats;
+use crate::stats::{Stats, UserQuotaHandle};
 
 use super::WATCHDOG_INTERVAL;
 use super::io::{SharedCounters, StatsIo, is_quota_io_error};
@@ -141,6 +141,7 @@ pub(crate) async fn relay_direct_adaptive<CR, CW, SR, SW>(
     max_connections: u32,
     user: &str,
     stats: Arc<Stats>,
+    quota_handle: UserQuotaHandle,
     quota_limit: Option<u64>,
     traffic_lease: Option<Arc<TrafficLease>>,
     activity_timeout: Duration,
@@ -200,6 +201,7 @@ where
         Arc::clone(&counters),
         Arc::clone(&stats),
         user_owned.clone(),
+        quota_handle.clone(),
         traffic_lease.clone(),
         quota_limit,
         Arc::clone(&quota_exceeded),
@@ -210,6 +212,7 @@ where
         Arc::clone(&counters),
         Arc::clone(&stats),
         user_owned.clone(),
+        quota_handle,
         traffic_lease,
         quota_limit,
         Arc::clone(&quota_exceeded),

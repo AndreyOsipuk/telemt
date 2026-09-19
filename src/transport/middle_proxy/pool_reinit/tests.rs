@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
@@ -7,7 +7,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::{MePool, ReinitCommitFailure, commit_reinit_state};
+use super::{DcFamilyGroup, MePool, ReinitCommitFailure, commit_reinit_state};
 use crate::config::MeBindStaleMode;
 use crate::transport::middle_proxy::codec::WriterCommand;
 use crate::transport::middle_proxy::pool::{
@@ -17,6 +17,13 @@ use crate::transport::middle_proxy::pool_writer_security_tests::make_pool;
 
 fn addr(octet: u8, port: u16) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, octet)), port)
+}
+
+fn addr_v6(segment: u16, port: u16) -> SocketAddr {
+    SocketAddr::new(
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, segment)),
+        port,
+    )
 }
 
 async fn insert_writer(
@@ -54,6 +61,32 @@ async fn insert_writer(
     pool.writers.write().await.push(writer.clone());
     pool.conn_count.fetch_add(1, Ordering::Relaxed);
     writer
+}
+
+async fn insert_writer_floor(
+    pool: &Arc<MePool>,
+    first_writer_id: u64,
+    writer_dc: i32,
+    endpoint: SocketAddr,
+    generation: u64,
+    contour: WriterContour,
+) -> Vec<MeWriter> {
+    let required = pool.required_writers_for_dc(1);
+    let mut writers = Vec::with_capacity(required);
+    for offset in 0..required {
+        writers.push(
+            insert_writer(
+                pool,
+                first_writer_id + offset as u64,
+                writer_dc,
+                endpoint,
+                generation,
+                contour,
+            )
+            .await,
+        );
+    }
+    writers
 }
 
 fn desired_two_dcs() -> HashMap<i32, HashSet<SocketAddr>> {
@@ -181,7 +214,7 @@ async fn partial_hardswap_is_rejected_when_stale_binding_is_disabled() {
     let reservation = pool
         .reserve_reinit_attempt(true, map_hash, endpoint_revision, 100)
         .expect("endpoint revision must remain current");
-    insert_writer(
+    insert_writer_floor(
         &pool,
         201,
         1,
@@ -232,7 +265,7 @@ async fn partial_hardswap_preserves_fallback_only_for_missing_dc() {
     let reservation = pool
         .reserve_reinit_attempt(true, map_hash, endpoint_revision, 100)
         .expect("endpoint revision must remain current");
-    let fresh_dc1 = insert_writer(
+    let fresh_dc1 = insert_writer_floor(
         &pool,
         401,
         1,
@@ -255,9 +288,70 @@ async fn partial_hardswap_preserves_fallback_only_for_missing_dc() {
     assert!(old_dc2.draining.load(Ordering::Acquire));
     assert!(old_dc2.allow_drain_fallback.load(Ordering::Acquire));
     assert_eq!(
-        WriterContour::from_u8(fresh_dc1.contour.load(Ordering::Acquire)),
+        WriterContour::from_u8(fresh_dc1[0].contour.load(Ordering::Acquire)),
         WriterContour::Active
     );
+}
+
+#[tokio::test]
+async fn partial_hardswap_preserves_fallback_only_for_underfloor_family() {
+    let pool = make_pool().await;
+    pool.binding_policy
+        .me_bind_stale_mode
+        .store(MeBindStaleMode::Ttl.as_u8(), Ordering::Release);
+    let v4 = addr(1, 2001);
+    let v6 = addr_v6(1, 2001);
+    let desired_by_dc = HashMap::from([(1, HashSet::from([v4, v6]))]);
+    let active_generation = pool.current_generation();
+    let old_v4 = insert_writer(
+        &pool,
+        451,
+        1,
+        v4,
+        active_generation,
+        WriterContour::Active,
+    )
+    .await;
+    let old_v6 = insert_writer(
+        &pool,
+        452,
+        1,
+        v6,
+        active_generation,
+        WriterContour::Active,
+    )
+    .await;
+    let map_hash = MePool::desired_map_hash(&desired_by_dc);
+    let endpoint_revision = pool.endpoint_snapshot.load().revision;
+    let reservation = pool
+        .reserve_reinit_attempt(true, map_hash, endpoint_revision, 100)
+        .expect("endpoint revision must remain current");
+    insert_writer_floor(
+        &pool,
+        461,
+        1,
+        v4,
+        reservation.attempt.generation,
+        WriterContour::Warm,
+    )
+    .await;
+
+    let outcome = pool
+        .commit_reinit_attempt(&reservation.attempt, &desired_by_dc, 0.5)
+        .await
+        .expect("one covered family satisfies the configured weighted quorum");
+
+    assert_eq!(
+        outcome.missing_groups,
+        vec![DcFamilyGroup {
+            dc: 1,
+            family: crate::network::IpFamily::V6,
+        }]
+    );
+    assert!(outcome.force_close_writer_ids.contains(&old_v4.id));
+    assert!(!outcome.force_close_writer_ids.contains(&old_v6.id));
+    assert!(!old_v4.allow_drain_fallback.load(Ordering::Acquire));
+    assert!(old_v6.allow_drain_fallback.load(Ordering::Acquire));
 }
 
 #[tokio::test]
@@ -288,7 +382,7 @@ async fn complete_hardswap_promotes_fresh_generation_and_retires_old_writers() {
     let reservation = pool
         .reserve_reinit_attempt(true, map_hash, endpoint_revision, 100)
         .expect("endpoint revision must remain current");
-    let fresh_dc1 = insert_writer(
+    let fresh_dc1 = insert_writer_floor(
         &pool,
         601,
         1,
@@ -297,9 +391,9 @@ async fn complete_hardswap_promotes_fresh_generation_and_retires_old_writers() {
         WriterContour::Warm,
     )
     .await;
-    let fresh_dc2 = insert_writer(
+    let fresh_dc2 = insert_writer_floor(
         &pool,
-        602,
+        611,
         2,
         addr(2, 2002),
         reservation.attempt.generation,
@@ -318,11 +412,11 @@ async fn complete_hardswap_promotes_fresh_generation_and_retires_old_writers() {
     assert!(old_dc1.draining.load(Ordering::Acquire));
     assert!(old_dc2.draining.load(Ordering::Acquire));
     assert_eq!(
-        WriterContour::from_u8(fresh_dc1.contour.load(Ordering::Acquire)),
+        WriterContour::from_u8(fresh_dc1[0].contour.load(Ordering::Acquire)),
         WriterContour::Active
     );
     assert_eq!(
-        WriterContour::from_u8(fresh_dc2.contour.load(Ordering::Acquire)),
+        WriterContour::from_u8(fresh_dc2[0].contour.load(Ordering::Acquire)),
         WriterContour::Active
     );
 }
@@ -442,10 +536,8 @@ async fn generation_role_reconciliation_promotes_active_warm_and_drains_orphans(
     );
     assert!(orphan_warm.draining.load(Ordering::Acquire));
     assert!(!orphan_warm.allow_drain_fallback.load(Ordering::Acquire));
-    assert_eq!(
-        pool.api_hardswap_snapshot()
-            .await
-            .orphan_warm_writers_current,
-        0
-    );
+    let snapshot = pool.api_hardswap_snapshot().await;
+    assert_eq!(snapshot.orphan_warm_writers_current, 0);
+    assert_eq!(snapshot.pending_writer_deficit, 2);
+    assert_eq!(snapshot.pending_missing_dc_groups, 1);
 }

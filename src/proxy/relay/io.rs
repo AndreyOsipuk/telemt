@@ -1,5 +1,5 @@
 use crate::proxy::traffic_limiter::{RateDirection, TrafficLease, next_refill_delay};
-use crate::stats::{Stats, UserStats};
+use crate::stats::{Stats, UserQuotaHandle, UserStats};
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -40,6 +40,7 @@ pub(super) struct StatsIo<S> {
     stats: Arc<Stats>,
     user: String,
     user_stats: Arc<UserStats>,
+    quota_handle: UserQuotaHandle,
     traffic_lease: Option<Arc<TrafficLease>>,
     c2s_rate_debt_bytes: u64,
     c2s_wait: RateWaitState,
@@ -71,11 +72,13 @@ impl<S> StatsIo<S> {
         quota_exceeded: Arc<AtomicBool>,
         epoch: Instant,
     ) -> Self {
+        let quota_handle = stats.current_user_quota_handle(&user);
         Self::new_with_traffic_lease(
             inner,
             counters,
             stats,
             user,
+            quota_handle,
             None,
             quota_limit,
             quota_exceeded,
@@ -88,6 +91,7 @@ impl<S> StatsIo<S> {
         counters: Arc<SharedCounters>,
         stats: Arc<Stats>,
         user: String,
+        quota_handle: UserQuotaHandle,
         traffic_lease: Option<Arc<TrafficLease>>,
         quota_limit: Option<u64>,
         quota_exceeded: Arc<AtomicBool>,
@@ -102,6 +106,7 @@ impl<S> StatsIo<S> {
             stats,
             user,
             user_stats,
+            quota_handle,
             traffic_lease,
             c2s_rate_debt_bytes: 0,
             c2s_wait: RateWaitState::default(),
@@ -213,7 +218,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for StatsIo<S> {
         let mut quota_reservation = None;
         let mut read_limit = buf.remaining();
         if let Some(limit) = this.quota_limit {
-            let used_before = this.user_stats.quota_used();
+            let used_before = this.quota_handle.used();
             let remaining = limit.saturating_sub(used_before);
             if remaining == 0 {
                 this.quota_exceeded.store(true, Ordering::Release);
@@ -230,7 +235,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for StatsIo<S> {
             let mut reserve_rounds = 0usize;
             while quota_reservation.is_none() {
                 for _ in 0..QUOTA_RESERVE_SPIN_RETRIES {
-                    match this.user_stats.quota_reserve(desired, limit) {
+                    match this.quota_handle.try_reserve(desired, limit) {
                         Ok(reservation) => {
                             quota_reservation = Some(reservation);
                             break;
@@ -305,7 +310,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for StatsIo<S> {
                         }
                     }
                     if let Some(limit) = this.quota_limit
-                        && this.user_stats.quota_used() >= limit
+                        && this.quota_handle.used() >= limit
                     {
                         this.quota_exceeded.store(true, Ordering::Release);
                     }
@@ -401,7 +406,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StatsIo<S> {
             if !write_buf.is_empty() {
                 let mut reserve_rounds = 0usize;
                 while quota_reservation.is_none() {
-                    let used_before = this.user_stats.quota_used();
+                    let used_before = this.quota_handle.used();
                     let remaining = limit.saturating_sub(used_before);
                     if remaining == 0 {
                         this.quota_exceeded.store(true, Ordering::Release);
@@ -412,7 +417,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StatsIo<S> {
                     let desired = remaining.min(write_buf.len() as u64);
                     let mut saw_contention = false;
                     for _ in 0..QUOTA_RESERVE_SPIN_RETRIES {
-                        match this.user_stats.quota_reserve(desired, limit) {
+                        match this.quota_handle.try_reserve(desired, limit) {
                             Ok(reservation) => {
                                 quota_reservation = Some(reservation);
                                 write_buf = &write_buf[..desired as usize];
@@ -442,7 +447,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StatsIo<S> {
                     }
                 }
             } else {
-                let used_before = this.user_stats.quota_used();
+                let used_before = this.quota_handle.used();
                 let remaining = limit.saturating_sub(used_before);
                 if remaining == 0 {
                     this.quota_exceeded.store(true, Ordering::Release);
@@ -481,7 +486,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StatsIo<S> {
                     if let (Some(limit), Some(remaining)) = (this.quota_limit, remaining_before) {
                         if should_immediate_quota_check(remaining, n_to_charge) {
                             this.quota_bytes_since_check = 0;
-                            if this.user_stats.quota_used() >= limit {
+                            if this.quota_handle.used() >= limit {
                                 this.quota_exceeded.store(true, Ordering::Release);
                             }
                         } else {
@@ -490,7 +495,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StatsIo<S> {
                             let interval = quota_adaptive_interval_bytes(remaining);
                             if this.quota_bytes_since_check >= interval {
                                 this.quota_bytes_since_check = 0;
-                                if this.user_stats.quota_used() >= limit {
+                                if this.quota_handle.used() >= limit {
                                     this.quota_exceeded.store(true, Ordering::Release);
                                 }
                             }

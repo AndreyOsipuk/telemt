@@ -303,8 +303,9 @@ impl ReloadSupervisor {
         let replaced = {
             let listener_manager = self.listener_manager.lock().await;
             let config = new_runtime.config();
-            let _ = new_runtime.proxy_shared.apply_user_config_if_epoch(
-                user_admission_epoch,
+            let _ = new_runtime.proxy_shared.activate_user_config_source(
+                new_runtime.id,
+                Some(user_admission_epoch),
                 &config.access.users,
                 &config.access.user_enabled,
             );

@@ -77,7 +77,7 @@ fn auto_cidr_bucket_key_canonicalizes_network_address() {
 
 #[test]
 fn refund_from_an_old_epoch_does_not_reduce_the_current_epoch() {
-    let bucket = DirectionBucket::default();
+    let bucket = Arc::new(DirectionBucket::default());
     let old_debit = bucket.try_reserve_at(7, 100, 80).unwrap();
     let current_debit = bucket.try_reserve_at(8, 100, 60).unwrap();
 
@@ -166,7 +166,7 @@ fn stale_policy_revision_cannot_restore_an_old_rate() {
 
 #[test]
 fn dropped_debit_refunds_only_its_packed_epoch() {
-    let bucket = DirectionBucket::default();
+    let bucket = Arc::new(DirectionBucket::default());
     let debit = bucket.try_reserve_at(11, 100, 80).unwrap();
 
     drop(debit);
@@ -229,9 +229,10 @@ fn dropped_traffic_reservation_refunds_user_and_cidr_debits() {
     let epoch = reservation.user.as_ref().unwrap().epoch;
     drop(reservation);
 
-    let user_bucket = lease.user_bucket.as_ref().unwrap();
-    let cidr_bucket = lease.cidr_bucket.as_ref().unwrap();
-    let cidr_user = lease.cidr_user_share.as_ref().unwrap();
+    let binding = lease.binding.load_full();
+    let user_bucket = binding.user_bucket.as_ref().unwrap();
+    let cidr_bucket = binding.cidr_bucket.as_ref().unwrap();
+    let cidr_user = binding.cidr_user_share.as_ref().unwrap();
     assert_eq!(user_bucket.down.used_at(epoch), Some(0));
     assert_eq!(cidr_bucket.down.used.used_at(epoch), Some(0));
     assert_eq!(cidr_user.down.used.used_at(epoch), Some(0));
@@ -252,7 +253,31 @@ fn partial_traffic_settlement_charges_only_committed_bytes() {
     reservation.settle_written(300);
 
     assert_eq!(
-        lease.user_bucket.as_ref().unwrap().down.used_at(epoch),
+        lease
+            .binding
+            .load_full()
+            .user_bucket
+            .as_ref()
+            .unwrap()
+            .down
+            .used_at(epoch),
         Some(300)
     );
+}
+
+#[test]
+fn active_lease_observes_policy_removal() {
+    let limiter = TrafficLimiter::new();
+    let mut user_limits = HashMap::new();
+    user_limits.insert("alice".to_string(), rate(1, 0));
+    limiter.apply_policy(user_limits, HashMap::new());
+    let lease = limiter
+        .acquire_lease("alice", "203.0.113.7".parse().unwrap())
+        .unwrap();
+    assert_eq!(lease.try_consume(RateDirection::Up, 1).granted, 1);
+    assert_eq!(lease.try_consume(RateDirection::Up, 1).granted, 0);
+
+    limiter.apply_policy(HashMap::new(), HashMap::new());
+
+    assert_eq!(lease.try_consume(RateDirection::Up, 1).granted, 1);
 }

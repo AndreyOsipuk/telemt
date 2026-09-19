@@ -63,6 +63,21 @@ pub(super) async fn patch_config(
     reload_request: Option<ReloadRequest>,
     shared: &ApiShared,
 ) -> Result<PatchConfigResponse, ApiFailure> {
+    let shared = shared.clone();
+    shared
+        .clone()
+        .run_mutation_completion(async move {
+            patch_config_to_completion(patch_json, expected_revision, reload_request, &shared).await
+        })
+        .await
+}
+
+async fn patch_config_to_completion(
+    patch_json: Json,
+    expected_revision: Option<String>,
+    reload_request: Option<ReloadRequest>,
+    shared: &ApiShared,
+) -> Result<PatchConfigResponse, ApiFailure> {
     let _guard = shared.mutation_lock.lock().await;
     let active_config = shared.active_runtime.load_full().config();
     let mut prepared =
@@ -83,7 +98,7 @@ pub(super) async fn patch_config(
     } else {
         None
     };
-    write_atomic_if_unchanged(
+    prepared.response.revision = write_atomic_if_unchanged(
         prepared.config_path,
         prepared.expected_revision,
         prepared.owner_path,
@@ -123,8 +138,8 @@ pub(super) async fn apply_patch_to_path(
     patch_json: &Json,
     expected_revision: Option<String>,
 ) -> Result<PatchConfigResponse, ApiFailure> {
-    let prepared = prepare_patch_to_path(config_path, patch_json, expected_revision).await?;
-    write_atomic_if_unchanged(
+    let mut prepared = prepare_patch_to_path(config_path, patch_json, expected_revision).await?;
+    let revision = write_atomic_if_unchanged(
         prepared.config_path,
         prepared.expected_revision,
         prepared.owner_path,
@@ -132,6 +147,7 @@ pub(super) async fn apply_patch_to_path(
         prepared.owner_contents,
     )
     .await?;
+    prepared.response.revision = revision;
     Ok(prepared.response)
 }
 

@@ -11,7 +11,7 @@ pub(crate) struct MeApiHardswapSnapshot {
     pub pending_writers_current: usize,
     /// Number of writers still required to reach the pending generation floor.
     pub pending_writer_deficit: usize,
-    /// Number of desired DC groups without a pending-generation writer.
+    /// Number of desired DC-family groups below their pending-generation writer floor.
     pub pending_missing_dc_groups: usize,
     /// Whether the pending generation targets the current desired endpoint map.
     pub pending_map_current: Option<bool>,
@@ -41,7 +41,7 @@ impl MePool {
         let pending_generation = reinit.pending_hardswap_generation;
         let pending = pending_generation != 0;
         let mut pending_writers_current = 0usize;
-        let mut pending_by_dc = HashMap::<i32, usize>::new();
+        let mut pending_by_group = HashMap::<(i32, IpFamily), usize>::new();
         let mut orphan_warm_writers_current = 0usize;
 
         for writer in writers.iter() {
@@ -60,7 +60,14 @@ impl MePool {
                     .is_some_and(|endpoints| endpoints.contains(&writer.addr))
             {
                 pending_writers_current = pending_writers_current.saturating_add(1);
-                *pending_by_dc.entry(writer.writer_dc).or_insert(0) += 1;
+                let family = if writer.addr.is_ipv4() {
+                    IpFamily::V4
+                } else {
+                    IpFamily::V6
+                };
+                *pending_by_group
+                    .entry((writer.writer_dc, family))
+                    .or_insert(0) += 1;
             }
         }
 
@@ -68,15 +75,22 @@ impl MePool {
         let mut pending_missing_dc_groups = 0usize;
         if pending {
             for (dc, endpoints) in &desired_by_dc {
-                if endpoints.is_empty() {
-                    continue;
-                }
-                let alive = pending_by_dc.get(dc).copied().unwrap_or(0);
-                let required = self.required_writers_for_dc(endpoints.len());
-                pending_writer_deficit = pending_writer_deficit
-                    .saturating_add(required.saturating_sub(alive));
-                if alive == 0 {
-                    pending_missing_dc_groups = pending_missing_dc_groups.saturating_add(1);
+                for family in [IpFamily::V4, IpFamily::V6] {
+                    let endpoint_count = endpoints
+                        .iter()
+                        .filter(|endpoint| endpoint.is_ipv4() == (family == IpFamily::V4))
+                        .count();
+                    if endpoint_count == 0 {
+                        continue;
+                    }
+                    let alive = pending_by_group.get(&(*dc, family)).copied().unwrap_or(0);
+                    let required = self.required_writers_for_dc(endpoint_count);
+                    let deficit = required.saturating_sub(alive);
+                    pending_writer_deficit = pending_writer_deficit.saturating_add(deficit);
+                    if deficit > 0 {
+                        pending_missing_dc_groups =
+                            pending_missing_dc_groups.saturating_add(1);
+                    }
                 }
             }
         }

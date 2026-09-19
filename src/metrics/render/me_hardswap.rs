@@ -76,7 +76,7 @@ pub(super) fn render(
     );
     let _ = writeln!(
         out,
-        "# HELP telemt_me_hardswap_pending_missing_dc_groups Desired DC groups missing pending-generation coverage"
+        "# HELP telemt_me_hardswap_pending_missing_dc_groups Desired DC-family groups below the pending-generation floor"
     );
     let _ = writeln!(
         out,

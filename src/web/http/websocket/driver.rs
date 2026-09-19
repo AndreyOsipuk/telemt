@@ -45,6 +45,7 @@ pub(super) async fn run_upgraded(
         UpgradeDeadlineLease::deadline,
     );
     let upgraded = tokio::select! {
+        biased;
         _ = cancellation.cancelled() => return,
         result = tokio::time::timeout_at(deadline, on_upgrade) => result,
     };
@@ -137,6 +138,7 @@ async fn run_multiplex(
         let down = session.poll_down_websocket(cursor);
         tokio::pin!(down);
         let event = tokio::select! {
+            biased;
             _ = cancellation.cancelled() => return Err(()),
             _ = tokio::time::sleep_until(open_deadline.into()), if !active => return Err(()),
             _ = tokio::time::sleep_until(next_ping.into()) => DriverEvent::Liveness,

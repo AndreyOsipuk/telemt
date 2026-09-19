@@ -42,9 +42,14 @@ impl WebSession {
         if !self.carrier().uses_lanes() || lane_id > frame::MAX_STREAM_ID {
             return Err(ManagerError::Protocol);
         }
+        if self.close_if_cancelled() {
+            return Err(ManagerError::Closed);
+        }
         let lane_ready = if let Some(expected_instance) = expected_instance {
             let state = self.state.lock();
-            if state.closed {
+            if state.closed || self.cancel.is_cancelled() {
+                drop(state);
+                self.close_if_cancelled();
                 return Err(ManagerError::Closed);
             }
             state
@@ -63,7 +68,9 @@ impl WebSession {
         }
         let (instance, epoch, notify, healthy) = {
             let mut state = self.state.lock();
-            if state.closed {
+            if state.closed || self.cancel.is_cancelled() {
+                drop(state);
+                self.close_if_cancelled();
                 return Err(ManagerError::Closed);
             }
             let (acknowledged, replay) = {
@@ -175,7 +182,9 @@ impl WebSession {
                 notified.as_mut().enable();
                 {
                     let mut state = self.state.lock();
-                    if state.closed {
+                    if state.closed || self.cancel.is_cancelled() {
+                        drop(state);
+                        self.close_if_cancelled();
                         return Err(ManagerError::Closed);
                     }
                     let carrier_health_eligible = lane_id != 0
@@ -245,55 +254,72 @@ impl WebSession {
                 notified.await;
             }
         };
-        match tokio::time::timeout(deadline, poll).await {
-            Ok(result) => result,
-            Err(_) => {
-                let mut state = self.state.lock();
-                if state.closed {
-                    return Err(ManagerError::Closed);
-                }
-                if !state.carrier_lanes.contains_key(&lane_id) {
-                    return Ok(PollResult {
-                        body: Bytes::new(),
-                        next_cursor: cursor,
-                        lane_closed: true,
-                    });
-                }
-                if lane_id != 0
-                    && !state.streams.contains_key(&lane_id)
-                    && state.closed_streams.contains(&lane_id)
-                {
-                    return Ok(PollResult {
-                        body: Bytes::new(),
-                        next_cursor: cursor,
-                        lane_closed: true,
-                    });
-                }
-                if let Some(lane) = state.carrier_lanes.get(&lane_id) {
-                    if lane.instance != instance {
+        tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => {
+                self.close_if_cancelled();
+                Err(ManagerError::Closed)
+            }
+            result = tokio::time::timeout(deadline, poll) => match result {
+                Ok(result) => result,
+                Err(_) => {
+                    if self.close_if_cancelled() {
+                        return Err(ManagerError::Closed);
+                    }
+                    let mut state = self.state.lock();
+                    if state.closed || self.cancel.is_cancelled() {
+                        drop(state);
+                        self.close_if_cancelled();
+                        return Err(ManagerError::Closed);
+                    }
+                    if !state.carrier_lanes.contains_key(&lane_id) {
                         return Ok(PollResult {
                             body: Bytes::new(),
                             next_cursor: cursor,
                             lane_closed: true,
                         });
                     }
-                    if lane.down_epoch == epoch {
-                        state.activity.touch_progress(Instant::now());
+                    if lane_id != 0
+                        && !state.streams.contains_key(&lane_id)
+                        && state.closed_streams.contains(&lane_id)
+                    {
+                        return Ok(PollResult {
+                            body: Bytes::new(),
+                            next_cursor: cursor,
+                            lane_closed: true,
+                        });
                     }
+                    if let Some(lane) = state.carrier_lanes.get(&lane_id) {
+                        if lane.instance != instance {
+                            return Ok(PollResult {
+                                body: Bytes::new(),
+                                next_cursor: cursor,
+                                lane_closed: true,
+                            });
+                        }
+                        if lane.down_epoch == epoch {
+                            state.activity.touch_progress(Instant::now());
+                        }
+                    }
+                    Ok(PollResult {
+                        body: Bytes::new(),
+                        next_cursor: cursor,
+                        lane_closed: false,
+                    })
                 }
-                Ok(PollResult {
-                    body: Bytes::new(),
-                    next_cursor: cursor,
-                    lane_closed: false,
-                })
             }
         }
     }
 
     async fn wait_for_lane_open(&self, lane_id: u32, cursor: u64) -> Result<bool, ManagerError> {
+        if self.close_if_cancelled() {
+            return Err(ManagerError::Closed);
+        }
         let wait = {
             let mut state = self.state.lock();
-            if state.closed {
+            if state.closed || self.cancel.is_cancelled() {
+                drop(state);
+                self.close_if_cancelled();
                 return Err(ManagerError::Closed);
             }
             if state.carrier_lanes.contains_key(&lane_id) {
@@ -334,7 +360,9 @@ impl WebSession {
                 notified.as_mut().enable();
                 {
                     let state = self.state.lock();
-                    if state.closed {
+                    if state.closed || self.cancel.is_cancelled() {
+                        drop(state);
+                        self.close_if_cancelled();
                         return Err(ManagerError::Closed);
                     }
                     if state.carrier_lanes.contains_key(&lane_id)
@@ -346,14 +374,24 @@ impl WebSession {
                 }
                 notified.await;
             }
-        })
-        .await;
+        });
+        let opened = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => {
+                drop(wait);
+                self.close_if_cancelled();
+                return Err(ManagerError::Closed);
+            }
+            opened = opened => opened,
+        };
         drop(wait);
         match opened {
             Ok(result) => result,
             Err(_) => {
                 let state = self.state.lock();
-                if state.closed {
+                if state.closed || self.cancel.is_cancelled() {
+                    drop(state);
+                    self.close_if_cancelled();
                     Err(ManagerError::Closed)
                 } else {
                     Ok(state.carrier_lanes.contains_key(&lane_id)

@@ -90,20 +90,20 @@ struct DirectionBucket {
 
 struct UserBucket {
     rates: AtomicRatePair,
-    up: DirectionBucket,
-    down: DirectionBucket,
+    up: Arc<DirectionBucket>,
+    down: Arc<DirectionBucket>,
     active_leases: AtomicU64,
 }
 
 #[derive(Default)]
 struct CidrDirectionBucket {
-    used: DirectionBucket,
-    active_users: DirectionBucket,
+    used: Arc<DirectionBucket>,
+    active_users: Arc<DirectionBucket>,
 }
 
 #[derive(Default)]
 struct CidrUserDirectionState {
-    used: DirectionBucket,
+    used: Arc<DirectionBucket>,
 }
 
 struct CidrUserShare {
@@ -155,17 +155,27 @@ struct ShardedRegistry<T> {
     mask: usize,
 }
 
-pub struct TrafficLease {
+struct TrafficLeaseBinding {
     limiter: Arc<TrafficLimiter>,
+    revision: u64,
     user_bucket: Option<Arc<UserBucket>>,
     cidr_bucket: Option<Arc<CidrBucket>>,
     cidr_user_key: Option<String>,
     cidr_user_share: Option<Arc<CidrUserShare>>,
 }
 
+pub struct TrafficLease {
+    limiter: Arc<TrafficLimiter>,
+    user: String,
+    client_ip: IpAddr,
+    binding: ArcSwap<TrafficLeaseBinding>,
+    refresh: ParkingMutex<()>,
+}
+
 pub struct TrafficLimiter {
     policy: ArcSwap<PolicySnapshot>,
     policy_update: ParkingMutex<()>,
+    published_revision: AtomicU64,
     user_buckets: ShardedRegistry<UserBucket>,
     cidr_buckets: ShardedRegistry<CidrBucket>,
     user_scope: ScopeMetrics,
@@ -173,17 +183,18 @@ pub struct TrafficLimiter {
     last_cleanup_epoch_secs: AtomicU64,
 }
 
-struct DirectionDebit<'a> {
-    bucket: &'a DirectionBucket,
+struct DirectionDebit {
+    bucket: Arc<DirectionBucket>,
     epoch: u64,
     refundable: u64,
 }
 
 /// Refunds uncommitted shaping budget when an I/O attempt is cancelled.
 #[must_use = "traffic reservations must be settled after the I/O attempt"]
-pub(crate) struct TrafficReservation<'a> {
+pub(crate) struct TrafficReservation {
     result: TrafficConsumeResult,
-    user: Option<DirectionDebit<'a>>,
-    cidr: Option<DirectionDebit<'a>>,
-    cidr_user: Option<DirectionDebit<'a>>,
+    _binding: Arc<TrafficLeaseBinding>,
+    user: Option<DirectionDebit>,
+    cidr: Option<DirectionDebit>,
+    cidr_user: Option<DirectionDebit>,
 }

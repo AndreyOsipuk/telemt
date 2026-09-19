@@ -69,6 +69,9 @@ impl WebSession {
         if !self.carrier().is_multiplexed() {
             return Err(ManagerError::Protocol);
         }
+        if self.close_if_cancelled() {
+            return Err(ManagerError::Closed);
+        }
         if self
             .up_active
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -155,6 +158,10 @@ impl WebSession {
             }
         };
         if matches!(result, Err(ManagerError::Backpressure)) {
+            return result;
+        }
+        if matches!(result, Err(ManagerError::Closed)) && self.close_if_cancelled() {
+            drop(opened);
             return result;
         }
         if result.is_err() {

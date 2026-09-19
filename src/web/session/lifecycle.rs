@@ -121,6 +121,15 @@ impl CarrierSupersedeCompletion<'_> {
 }
 
 impl WebSession {
+    /// Closes a bearer as soon as its process-owned user registration is revoked.
+    pub(crate) fn close_if_cancelled(&self) -> bool {
+        if !self.cancel.is_cancelled() {
+            return false;
+        }
+        self.close(SessionCloseReason::UserDisabled);
+        true
+    }
+
     /// Closes carrier state while relay tasks retain their admission until exit.
     pub(crate) fn close(&self, reason: SessionCloseReason) -> SessionCloseOutcome {
         let mut state = self.state.lock();
@@ -221,19 +230,8 @@ impl WebSession {
 
     /// Atomically closes a session only when reconnect grace is still due.
     pub(crate) fn close_if_due(&self, now: Instant) -> bool {
-        if self.cancel.is_cancelled() {
-            let released = {
-                let mut state = self.state.lock();
-                if state.closed || state.close_requested.is_some() {
-                    None
-                } else {
-                    Some(self.release_on_close_locked(&mut state, SessionCloseReason::UserDisabled))
-                }
-            };
-            if let Some(released) = released {
-                self.finish_close(released);
-                return true;
-            }
+        if self.close_if_cancelled() {
+            return true;
         }
         let healthy = {
             let mut state = self.state.lock();

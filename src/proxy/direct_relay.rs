@@ -27,6 +27,7 @@ use crate::proxy::shared_state::{
     ProxySharedState,
 };
 use crate::stats::Stats;
+use crate::stats::UserQuotaHandle;
 use crate::stream::{BufferPool, CryptoReader, CryptoWriter};
 use crate::transport::UpstreamManager;
 #[cfg(unix)]

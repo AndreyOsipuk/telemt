@@ -39,6 +39,7 @@ pub(super) async fn run_lane(
         let down = session.poll_down_websocket_lane(reservation.lane_identity(), cursor);
         tokio::pin!(down);
         let event = tokio::select! {
+            biased;
             _ = cancellation.cancelled() => return Err(()),
             _ = tokio::time::sleep_until(open_deadline.into()), if !active => return Err(()),
             _ = tokio::time::sleep_until(next_ping.into()) => DriverEvent::Liveness,

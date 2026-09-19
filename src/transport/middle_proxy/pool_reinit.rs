@@ -56,8 +56,21 @@ struct ReinitReservation {
 struct ReinitCommitOutcome {
     coverage_ratio: f32,
     missing_dc: Vec<i32>,
+    missing_groups: Vec<DcFamilyGroup>,
     stale_writer_ids: Vec<u64>,
     force_close_writer_ids: Vec<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct DcFamilyGroup {
+    dc: i32,
+    family: IpFamily,
+}
+
+struct HardswapCoverage {
+    ratio: f32,
+    missing_groups: Vec<DcFamilyGroup>,
+    writer_deficit: usize,
 }
 
 #[derive(Debug)]
@@ -66,10 +79,12 @@ enum ReinitCommitFailure {
     Coverage {
         coverage_ratio: f32,
         missing_dc: Vec<i32>,
+        missing_groups: Vec<DcFamilyGroup>,
     },
     Redundancy {
         coverage_ratio: f32,
         missing_dc: Vec<i32>,
+        missing_groups: Vec<DcFamilyGroup>,
     },
 }
 

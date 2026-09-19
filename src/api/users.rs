@@ -5,6 +5,7 @@ use hyper::StatusCode;
 use crate::config::ProxyConfig;
 use crate::config::RateLimitBps;
 use crate::ip_tracker::UserIpTracker;
+use crate::proxy::user_admission::credential_id_from_hex;
 use crate::stats::Stats;
 
 use super::ApiShared;

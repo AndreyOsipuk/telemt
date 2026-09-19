@@ -12,6 +12,7 @@ use crate::network::probe::{decide_network_capabilities, log_probe_result, run_p
 use crate::proxy::direct_buffer_budget::{DirectBufferBudget, resolve_direct_buffer_hard_limit};
 use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
 use crate::proxy::shared_state::ProxySharedState;
+use crate::proxy::user_admission::UserAdmissionAuthority;
 use crate::startup::{COMPONENT_API_BOOTSTRAP, COMPONENT_NETWORK_PROBE};
 use crate::stats::telemetry::TelemetryPolicy;
 use crate::stats::{QuotaStore, Stats};
@@ -106,9 +107,17 @@ pub(super) async fn run_telemt_core(
         configured_override_bytes = config.general.direct_relay_buffer_budget_max_bytes,
         "Direct relay buffer budget initialized"
     );
-    let shared_state =
-        ProxySharedState::new_with_direct_buffer_budget(direct_buffer_budget.clone());
-    shared_state.apply_user_config(&config.access.users, &config.access.user_enabled);
+    let user_admission = UserAdmissionAuthority::new_with_quota_store(quota_store.clone());
+    let shared_state = ProxySharedState::new_with_direct_buffer_budget_and_user_admission(
+        direct_buffer_budget.clone(),
+        user_admission,
+    );
+    let _ = shared_state.activate_user_config_source(
+        1,
+        None,
+        &config.access.users,
+        &config.access.user_enabled,
+    );
     shared_state.traffic_limiter.apply_policy(
         config.access.user_rate_limits.clone(),
         config.access.cidr_rate_limits.clone(),

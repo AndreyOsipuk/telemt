@@ -229,6 +229,7 @@ pub(super) async fn prepare_runtime(
     }
 
     let runtime_watches = runtime_tasks::spawn_runtime_tasks(
+        1,
         &config,
         config_path,
         probe,

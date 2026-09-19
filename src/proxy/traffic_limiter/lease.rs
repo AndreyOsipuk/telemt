@@ -1,12 +1,41 @@
 use super::*;
 
 impl TrafficLease {
+    fn current_binding(&self) -> Arc<TrafficLeaseBinding> {
+        let published_revision = self.limiter.published_revision.load(Ordering::Acquire);
+        let current = self.binding.load_full();
+        if current.revision == published_revision {
+            return current;
+        }
+
+        let refresh = self.refresh.lock();
+        let published_revision = self.limiter.published_revision.load(Ordering::Acquire);
+        let current = self.binding.load_full();
+        if current.revision == published_revision {
+            return current;
+        }
+        let policy_update = self.limiter.policy_update.lock();
+        let policy = self.limiter.policy.load_full();
+        if current.revision == policy.revision {
+            return current;
+        }
+        let next = self
+            .limiter
+            .build_binding(&self.user, self.client_ip, &policy);
+        self.binding.store(Arc::clone(&next));
+        drop(policy_update);
+        drop(refresh);
+        self.limiter.maybe_cleanup();
+        next
+    }
+
     /// Reserves shaping budget until the associated I/O result is settled.
     pub(crate) fn try_reserve(
         &self,
         direction: RateDirection,
         requested: u64,
-    ) -> TrafficReservation<'_> {
+    ) -> TrafficReservation {
+        let binding = self.current_binding();
         if requested == 0 {
             return TrafficReservation {
                 result: TrafficConsumeResult {
@@ -14,6 +43,7 @@ impl TrafficLease {
                     blocked_user: false,
                     blocked_cidr: false,
                 },
+                _binding: binding,
                 user: None,
                 cidr: None,
                 cidr_user: None,
@@ -22,7 +52,7 @@ impl TrafficLease {
 
         let mut granted = requested;
         let mut user_debit = None;
-        if let Some(user_bucket) = self.user_bucket.as_ref() {
+        if let Some(user_bucket) = binding.user_bucket.as_ref() {
             let (user_granted, debit) = user_bucket.try_reserve(direction, granted);
             user_debit = debit;
             if user_granted == 0 {
@@ -33,6 +63,7 @@ impl TrafficLease {
                         blocked_user: true,
                         blocked_cidr: false,
                     },
+                    _binding: binding,
                     user: user_debit,
                     cidr: None,
                     cidr_user: None,
@@ -44,7 +75,7 @@ impl TrafficLease {
         let mut cidr_debit = None;
         let mut cidr_user_debit = None;
         if let (Some(cidr_bucket), Some(cidr_user_share)) =
-            (self.cidr_bucket.as_ref(), self.cidr_user_share.as_ref())
+            (binding.cidr_bucket.as_ref(), binding.cidr_user_share.as_ref())
         {
             let (cidr_granted, aggregate_debit, share_debit) =
                 cidr_bucket.try_reserve_for_user(direction, cidr_user_share, granted);
@@ -63,6 +94,7 @@ impl TrafficLease {
                         blocked_user: false,
                         blocked_cidr: true,
                     },
+                    _binding: binding,
                     user: user_debit,
                     cidr: cidr_debit,
                     cidr_user: cidr_user_debit,
@@ -77,6 +109,7 @@ impl TrafficLease {
                 blocked_user: false,
                 blocked_cidr: false,
             },
+            _binding: binding,
             user: user_debit,
             cidr: cidr_debit,
             cidr_user: cidr_user_debit,
@@ -105,7 +138,7 @@ impl TrafficLease {
     }
 }
 
-impl TrafficReservation<'_> {
+impl TrafficReservation {
     /// Returns the shaping decision associated with this reservation.
     pub(crate) fn result(&self) -> TrafficConsumeResult {
         self.result
@@ -126,7 +159,7 @@ impl TrafficReservation<'_> {
     }
 }
 
-impl Drop for TrafficLease {
+impl Drop for TrafficLeaseBinding {
     fn drop(&mut self) {
         if let Some(bucket) = self.user_bucket.as_ref() {
             decrement_atomic_saturating(&bucket.active_leases, 1);

@@ -73,6 +73,7 @@ pub struct ReplayChecker {
     checks: AtomicU64,
     hits: AtomicU64,
     additions: AtomicU64,
+    capacity_rejections: AtomicU64,
     cleanups: AtomicU64,
     next_claim_token: AtomicU64,
 }
@@ -141,21 +142,25 @@ impl ReplayShard {
         self.cache.get(key).is_some() || self.pending.contains_key(key)
     }
 
-    fn add_owned(&mut self, key: ReplayKey, now: Instant, window: Duration) {
+    fn add_owned(&mut self, key: ReplayKey, now: Instant, window: Duration) -> bool {
         if window.is_zero() {
-            return;
+            return true;
         }
         self.cleanup(now, window);
         if self.cache.peek(key.as_slice()).is_some() || self.pending.contains_key(key.as_slice()) {
-            return;
+            return true;
         }
-        while self.queue.len() >= self.capacity {
+        while self.cache.len().saturating_add(self.pending.len()) >= self.capacity {
+            if self.queue.is_empty() {
+                return false;
+            }
             self.evict_queue_front();
         }
 
         let seq = self.next_seq();
         self.cache.put(key.clone(), ReplayEntry { seq });
         self.queue.push_back((now, key, seq));
+        true
     }
 
     fn claim_owned(
@@ -218,7 +223,12 @@ impl TlsReplayClaim<'_> {
         if !shard.remove_pending(key.as_slice(), self.token) {
             return false;
         }
-        shard.add_owned(key, Instant::now(), self.checker.tls_window);
+        if !shard.add_owned(key, Instant::now(), self.checker.tls_window) {
+            self.checker
+                .capacity_rejections
+                .fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
         self.checker.additions.fetch_add(1, Ordering::Relaxed);
         self.reserved = false;
         true
@@ -261,6 +271,7 @@ impl ReplayChecker {
             checks: AtomicU64::new(0),
             hits: AtomicU64::new(0),
             additions: AtomicU64::new(0),
+            capacity_rejections: AtomicU64::new(0),
             cleanups: AtomicU64::new(0),
             next_claim_token: AtomicU64::new(1),
         }
@@ -304,11 +315,15 @@ impl ReplayChecker {
         let found = shard.check(data, now, window);
         if found {
             self.hits.fetch_add(1, Ordering::Relaxed);
-        } else {
-            shard.add_owned(owned_key, now, window);
-            self.additions.fetch_add(1, Ordering::Relaxed);
+            return true;
         }
-        found
+        if shard.add_owned(owned_key, now, window) {
+            self.additions.fetch_add(1, Ordering::Relaxed);
+            false
+        } else {
+            self.capacity_rejections.fetch_add(1, Ordering::Relaxed);
+            true
+        }
     }
 
     fn check_only_internal(
@@ -328,11 +343,14 @@ impl ReplayChecker {
     }
 
     fn add_only(&self, data: &[u8], shards: &[Mutex<ReplayShard>], window: Duration) {
-        self.additions.fetch_add(1, Ordering::Relaxed);
         let idx = self.get_shard_idx(data);
         let owned_key = ReplayKey::from_slice(data);
         let mut shard = shards[idx].lock();
-        shard.add_owned(owned_key, Instant::now(), window);
+        if shard.add_owned(owned_key, Instant::now(), window) {
+            self.additions.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.capacity_rejections.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     pub fn check_and_add_handshake(&self, data: &[u8]) -> bool {
@@ -394,12 +412,12 @@ impl ReplayChecker {
         let mut total_queue_len = 0;
         for shard in &self.handshake_shards {
             let s = shard.lock();
-            total_entries += s.cache.len();
+            total_entries += s.len();
             total_queue_len += s.queue.len();
         }
         for shard in &self.tls_shards {
             let s = shard.lock();
-            total_entries += s.cache.len();
+            total_entries += s.len();
             total_queue_len += s.queue.len();
         }
 
@@ -409,6 +427,7 @@ impl ReplayChecker {
             total_checks: self.checks.load(Ordering::Relaxed),
             total_hits: self.hits.load(Ordering::Relaxed),
             total_additions: self.additions.load(Ordering::Relaxed),
+            total_capacity_rejections: self.capacity_rejections.load(Ordering::Relaxed),
             total_cleanups: self.cleanups.load(Ordering::Relaxed),
             num_shards: self.handshake_shards.len() + self.tls_shards.len(),
             window_secs: self.window.as_secs(),
@@ -459,6 +478,7 @@ pub struct ReplayStats {
     pub total_checks: u64,
     pub total_hits: u64,
     pub total_additions: u64,
+    pub total_capacity_rejections: u64,
     pub total_cleanups: u64,
     pub num_shards: usize,
     pub window_secs: u64,
@@ -479,5 +499,26 @@ impl ReplayStats {
         } else {
             self.total_queue_len as f64 / self.total_entries as f64
         }
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+
+    #[test]
+    fn committed_and_pending_entries_share_one_shard_capacity() {
+        let capacity = NonZeroUsize::new(2).unwrap();
+        let mut shard = ReplayShard::new(capacity);
+        let now = Instant::now();
+        let window = Duration::from_secs(60);
+        assert!(shard.claim_owned(ReplayKey::from_slice(b"pending-a"), now, window, 1));
+        assert!(shard.claim_owned(ReplayKey::from_slice(b"pending-b"), now, window, 2));
+
+        shard.add_owned(ReplayKey::from_slice(b"committed"), now, window);
+
+        assert!(shard.len() <= capacity.get());
+        assert!(shard.pending.contains_key(b"pending-a".as_slice()));
+        assert!(shard.pending.contains_key(b"pending-b".as_slice()));
     }
 }

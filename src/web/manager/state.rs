@@ -307,8 +307,8 @@ pub(super) fn allow_rate(state: &mut RateState, now: Instant, per_minute: u32, b
     true
 }
 
-/// Evicts the oldest unused bootstrap while preserving used retry state.
-pub(super) fn evict_oldest_unused_bootstrap(state: &mut ManagerState) -> bool {
+/// Detaches the oldest unused bootstrap while preserving used retry state.
+pub(super) fn evict_oldest_unused_bootstrap(state: &mut ManagerState) -> Option<Bootstrap> {
     let Some(hash) = state
         .bootstraps
         .iter()
@@ -316,10 +316,11 @@ pub(super) fn evict_oldest_unused_bootstrap(state: &mut ManagerState) -> bool {
         .min_by_key(|(_, bootstrap)| bootstrap.issued_at)
         .map(|(hash, _)| *hash)
     else {
-        return false;
+        return None;
     };
-    remove_bootstrap_locked(state, hash);
-    true
+    let bootstrap = state.bootstraps.remove(&hash)?;
+    decrement_map(&mut state.bootstraps_per_ip, &bootstrap.issuance_ip);
+    Some(bootstrap)
 }
 
 /// Removes expired bootstrap and closed-token entries while the manager lock is held.

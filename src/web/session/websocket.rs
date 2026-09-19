@@ -39,8 +39,12 @@ pub(crate) struct WebSocketProbeReservation {
 impl WebSocketProbeReservation {
     /// Binds the admitted process connection to the future commit acknowledgement.
     pub(crate) fn bind(&mut self, owner: u64) -> Result<(), ManagerError> {
+        if self.session.close_if_cancelled() {
+            return Err(ManagerError::Closed);
+        }
         let mut state = self.session.state.lock();
         if state.closed
+            || self.session.cancel.is_cancelled()
             || !state.websocket_probe_claimed
             || state.websocket_commit_ack_owner.is_some()
         {
@@ -85,8 +89,12 @@ impl WebSocketLaneReservation {
         if self.phase != WebSocketLaneReservationPhase::Reserved {
             return Err(ManagerError::Concurrent);
         }
+        if self.session.close_if_cancelled() {
+            return Err(ManagerError::Closed);
+        }
         let mut state = self.session.state.lock();
         if state.closed
+            || self.session.cancel.is_cancelled()
             || state
                 .carrier_lanes
                 .get(&self.claim.lane.lane_id)
@@ -113,8 +121,12 @@ impl WebSocketLaneReservation {
         {
             return Err(ManagerError::Protocol);
         }
+        if self.session.close_if_cancelled() {
+            return Err(ManagerError::Closed);
+        }
         let mut state = self.session.state.lock();
-        if state
+        if self.session.cancel.is_cancelled()
+            || state
             .carrier_lanes
             .get(&self.claim.lane.lane_id)
             .is_none_or(|lane| lane.instance != self.claim.lane.instance)
@@ -174,8 +186,11 @@ impl WebSession {
         self: &Arc<Self>,
         acknowledge_commit: bool,
     ) -> Result<Option<WebSocketProbeReservation>, ManagerError> {
+        if self.close_if_cancelled() {
+            return Err(ManagerError::Closed);
+        }
         let mut state = self.state.lock();
-        if state.closed {
+        if state.closed || self.cancel.is_cancelled() {
             return Err(ManagerError::Closed);
         }
         self.ensure_carrier_active_locked(&state)?;
@@ -216,8 +231,11 @@ impl WebSession {
         {
             return Err(ManagerError::Protocol);
         }
+        if self.close_if_cancelled() {
+            return Err(ManagerError::Closed);
+        }
         let mut state = self.state.lock();
-        if state.closed {
+        if state.closed || self.cancel.is_cancelled() {
             return Err(ManagerError::Closed);
         }
         if state.active_peer_ports.len() >= self.profile.max_streams_per_session
@@ -305,6 +323,9 @@ impl WebSession {
             )
         {
             return Err(ManagerError::Protocol);
+        }
+        if self.close_if_cancelled() {
+            return Err(ManagerError::Closed);
         }
         let lane_id = reservation.lane_id();
         let frames = frame::parse_all(body, &self.limits).map_err(|_| ManagerError::Protocol)?;

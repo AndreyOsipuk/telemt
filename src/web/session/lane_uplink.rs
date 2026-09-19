@@ -22,6 +22,9 @@ impl WebSession {
         if self.carrier() != WebCarrier::HttpsLanes || lane_id > frame::MAX_STREAM_ID {
             return Err(ManagerError::Protocol);
         }
+        if self.close_if_cancelled() {
+            return Err(ManagerError::Closed);
+        }
         let frames = match frame::parse_all(body, &self.limits) {
             Ok(frames) => frames,
             Err(_) => {
@@ -173,6 +176,10 @@ impl WebSession {
             applied.then_some(sequence).ok_or(ManagerError::Closed)
         };
         if matches!(result, Err(ManagerError::Backpressure)) {
+            return result;
+        }
+        if matches!(result, Err(ManagerError::Closed)) && self.close_if_cancelled() {
+            drop(opened);
             return result;
         }
         if result.is_err() {

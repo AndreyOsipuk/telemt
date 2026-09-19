@@ -91,6 +91,35 @@ async fn stop_runtime(
 }
 
 #[tokio::test]
+async fn user_revocation_interrupts_live_session_before_periodic_cleanup() {
+    let (runtime, generation, listener) = live_runtime().await;
+    let bootstrap = issue_bootstrap(&runtime);
+    let (_, token) = create_session(&listener, &runtime, &bootstrap).await;
+    let session_hash = token_hash(&token);
+    let session = runtime
+        .get_session(session_hash, "proxy.example.com")
+        .unwrap();
+    let polling = Arc::clone(&session);
+    let poll = tokio::spawn(async move { polling.poll_down(0).await });
+    tokio::task::yield_now().await;
+
+    let mutation = generation.proxy_shared.delete_user("alice");
+
+    assert!(mutation.cancelled >= 1);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_millis(250), poll)
+            .await
+            .unwrap()
+            .unwrap(),
+        Err(ManagerError::Closed)
+    ));
+    assert!(runtime
+        .get_session(session_hash, "proxy.example.com")
+        .is_err());
+    stop_runtime(runtime, generation).await;
+}
+
+#[tokio::test]
 async fn pause_preserves_decoy_retry_and_exact_session_replay() {
     let (runtime, generation, listener) = live_runtime().await;
     let bootstrap = issue_bootstrap(&runtime);

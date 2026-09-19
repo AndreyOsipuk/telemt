@@ -138,22 +138,35 @@ impl MePool {
                 }
             })
             .map(|writer| (writer.writer_dc, writer.addr))
-            .collect::<HashSet<_>>();
-        let (coverage_ratio, missing_dc) =
-            Self::coverage_ratio(desired_by_dc, &authoritative_writer_addrs);
+            .collect::<Vec<_>>();
+        let (coverage_ratio, missing_dc, missing_groups) = if attempt.hardswap {
+            let coverage = self.hardswap_coverage(desired_by_dc, &authoritative_writer_addrs);
+            let missing_dc = Self::missing_group_dcs(&coverage.missing_groups);
+            (coverage.ratio, missing_dc, coverage.missing_groups)
+        } else {
+            let authoritative_writer_addrs = authoritative_writer_addrs
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>();
+            let (coverage_ratio, missing_dc) =
+                Self::coverage_ratio(desired_by_dc, &authoritative_writer_addrs);
+            (coverage_ratio, missing_dc, Vec::new())
+        };
         if coverage_ratio < min_ratio {
             return Err(ReinitCommitFailure::Coverage {
                 coverage_ratio,
                 missing_dc,
+                missing_groups,
             });
         }
         if attempt.hardswap
-            && !missing_dc.is_empty()
+            && !missing_groups.is_empty()
             && self.bind_stale_mode() == MeBindStaleMode::Never
         {
             return Err(ReinitCommitFailure::Redundancy {
                 coverage_ratio,
                 missing_dc,
+                missing_groups,
             });
         }
         if !commit_reinit_state(
@@ -183,7 +196,7 @@ impl MePool {
             .iter()
             .flat_map(|(dc, endpoints)| endpoints.iter().copied().map(|addr| (*dc, addr)))
             .collect::<HashSet<_>>();
-        let missing_dc_set = missing_dc.iter().copied().collect::<HashSet<_>>();
+        let missing_group_set = missing_groups.iter().copied().collect::<HashSet<_>>();
         let mut stale_writer_ids = Vec::<u64>::new();
         let mut force_close_writer_ids = Vec::<u64>::new();
         for writer in writers.iter() {
@@ -199,8 +212,15 @@ impl MePool {
                 continue;
             }
 
-            let preserve_fallback = attempt.hardswap
-                && missing_dc_set.contains(&writer.writer_dc);
+            let writer_group = DcFamilyGroup {
+                dc: writer.writer_dc,
+                family: if writer.addr.is_ipv4() {
+                    IpFamily::V4
+                } else {
+                    IpFamily::V6
+                },
+            };
+            let preserve_fallback = attempt.hardswap && missing_group_set.contains(&writer_group);
             if !preserve_fallback && attempt.hardswap {
                 registry_registration.retire(writer.id);
             }
@@ -225,6 +245,7 @@ impl MePool {
         Ok(ReinitCommitOutcome {
             coverage_ratio,
             missing_dc,
+            missing_groups,
             stale_writer_ids,
             force_close_writer_ids,
         })
@@ -263,6 +284,65 @@ impl MePool {
         }
         let ratio = (covered as f32) / (total as f32);
         (ratio, missing_dc)
+    }
+
+    /// Evaluates full writer-floor coverage independently for every DC and address family.
+    pub(super) fn hardswap_coverage(
+        &self,
+        desired_by_dc: &HashMap<i32, HashSet<SocketAddr>>,
+        writer_addrs: &[(i32, SocketAddr)],
+    ) -> HardswapCoverage {
+        let mut covered = 0usize;
+        let mut total = 0usize;
+        let mut writer_deficit = 0usize;
+        let mut missing_groups = Vec::new();
+        for (dc, endpoints) in desired_by_dc {
+            for family in [IpFamily::V4, IpFamily::V6] {
+                let endpoint_count = endpoints
+                    .iter()
+                    .filter(|endpoint| endpoint.is_ipv4() == (family == IpFamily::V4))
+                    .count();
+                if endpoint_count == 0 {
+                    continue;
+                }
+                total = total.saturating_add(1);
+                let required = self.required_writers_for_dc(endpoint_count);
+                let alive = writer_addrs
+                    .iter()
+                    .filter(|(writer_dc, endpoint)| {
+                        *writer_dc == *dc
+                            && endpoint.is_ipv4() == (family == IpFamily::V4)
+                            && endpoints.contains(endpoint)
+                    })
+                    .count();
+                if alive >= required {
+                    covered = covered.saturating_add(1);
+                } else {
+                    writer_deficit =
+                        writer_deficit.saturating_add(required.saturating_sub(alive));
+                    missing_groups.push(DcFamilyGroup { dc: *dc, family });
+                }
+            }
+        }
+        missing_groups.sort_unstable_by_key(|group| {
+            (group.dc, matches!(group.family, IpFamily::V6))
+        });
+        HardswapCoverage {
+            ratio: if total == 0 {
+                1.0
+            } else {
+                (covered as f32) / (total as f32)
+            },
+            missing_groups,
+            writer_deficit,
+        }
+    }
+
+    fn missing_group_dcs(groups: &[DcFamilyGroup]) -> Vec<i32> {
+        let mut dcs = groups.iter().map(|group| group.dc).collect::<Vec<_>>();
+        dcs.sort_unstable();
+        dcs.dedup();
+        dcs
     }
 
     /// Restores at least one active writer for every enabled desired DC group.

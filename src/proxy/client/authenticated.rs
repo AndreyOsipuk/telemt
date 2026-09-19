@@ -38,7 +38,14 @@ impl RunningClientHandler {
         } else {
             config
         };
-        let shared = ProxySharedState::new();
+        let shared = ProxySharedState::new_with_direct_buffer_budget_and_user_admission(
+            crate::proxy::direct_buffer_budget::DirectBufferBudget::new(
+                crate::proxy::direct_buffer_budget::fallback_direct_buffer_hard_limit(),
+            ),
+            crate::proxy::user_admission::UserAdmissionAuthority::new_with_quota_store(
+                stats.quota_store(),
+            ),
+        );
         shared.apply_user_config(&config.access.users, &config.access.user_enabled);
         Self::handle_authenticated_static_with_shared(
             client_reader,

@@ -6,6 +6,7 @@ impl TrafficLimiter {
         Arc::new(Self {
             policy: ArcSwap::from_pointee(PolicySnapshot::default()),
             policy_update: ParkingMutex::new(()),
+            published_revision: AtomicU64::new(0),
             user_buckets: ShardedRegistry::new(REGISTRY_SHARDS),
             cidr_buckets: ShardedRegistry::new(REGISTRY_SHARDS),
             user_scope: ScopeMetrics::default(),
@@ -92,6 +93,7 @@ impl TrafficLimiter {
             cidr_auto_rules_v6,
             cidr_rule_keys,
         }));
+        self.published_revision.store(revision, Ordering::Release);
 
         drop(policy_update);
         self.maybe_cleanup();
@@ -102,7 +104,26 @@ impl TrafficLimiter {
         user: &str,
         client_ip: IpAddr,
     ) -> Option<Arc<TrafficLease>> {
+        let policy_update = self.policy_update.lock();
         let policy = self.policy.load_full();
+        let binding = self.build_binding(user, client_ip, &policy);
+        drop(policy_update);
+        self.maybe_cleanup();
+        Some(Arc::new(TrafficLease {
+            limiter: Arc::clone(self),
+            user: user.to_string(),
+            client_ip,
+            binding: ArcSwap::from(binding),
+            refresh: ParkingMutex::new(()),
+        }))
+    }
+
+    pub(super) fn build_binding(
+        self: &Arc<Self>,
+        user: &str,
+        client_ip: IpAddr,
+        policy: &PolicySnapshot,
+    ) -> Arc<TrafficLeaseBinding> {
         let mut user_bucket = None;
         if let Some(limit) = policy.user_limits.get(user).copied() {
             let bucket = self.user_buckets.get_or_insert_with(
@@ -144,18 +165,14 @@ impl TrafficLimiter {
             cidr_bucket = Some(bucket);
         }
 
-        if user_bucket.is_none() && cidr_bucket.is_none() {
-            return None;
-        }
-
-        self.maybe_cleanup();
-        Some(Arc::new(TrafficLease {
+        Arc::new(TrafficLeaseBinding {
             limiter: Arc::clone(self),
+            revision: policy.revision,
             user_bucket,
             cidr_bucket,
             cidr_user_key,
             cidr_user_share,
-        }))
+        })
     }
 
     pub fn metrics_snapshot(&self) -> TrafficLimiterMetricsSnapshot {

@@ -240,6 +240,7 @@ async fn me_writer_data_write_obeys_flow_cancellation() {
         user,
         None,
         None,
+        None,
         0,
         None,
         &cancel,

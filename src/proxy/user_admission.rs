@@ -6,6 +6,7 @@ use parking_lot::{Mutex, MutexGuard};
 use tokio_util::sync::CancellationToken;
 
 use crate::crypto::sha256;
+use crate::stats::QuotaStore;
 
 const REGISTRATION_PENDING: u8 = 0;
 const REGISTRATION_ACTIVE: u8 = 1;
@@ -54,6 +55,8 @@ struct RegisteredOwner {
 struct UserAdmissionState {
     initialized: bool,
     epoch: u64,
+    active_config_source: Option<u64>,
+    stale_config_source_rejections: u64,
     next_incarnation: UserIncarnation,
     next_registration_id: u64,
     users: HashMap<String, UserRecord>,
@@ -97,13 +100,20 @@ pub(crate) struct UserMutationResult {
 /// Process-owned user authentication and live-owner authority.
 pub(crate) struct UserAdmissionAuthority {
     state: Mutex<UserAdmissionState>,
+    quota_store: Arc<QuotaStore>,
 }
 
 impl UserAdmissionAuthority {
     /// Creates an uninitialized authority for isolated tests and startup wiring.
     pub(crate) fn new() -> Arc<Self> {
+        Self::new_with_quota_store(Arc::new(QuotaStore::default()))
+    }
+
+    /// Creates an authority coupled to the process-scoped quota identity store.
+    pub(crate) fn new_with_quota_store(quota_store: Arc<QuotaStore>) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(UserAdmissionState::default()),
+            quota_store,
         })
     }
 
@@ -118,23 +128,41 @@ impl UserAdmissionAuthority {
         users: &HashMap<String, String>,
         user_enabled: &HashMap<String, bool>,
     ) -> Vec<(String, usize)> {
-        self.apply_config_locked(None, users, user_enabled)
+        self.activate_config_source(0, None, users, user_enabled)
             .unwrap_or_default()
     }
 
-    /// Applies a candidate configuration only if no newer authority mutation occurred.
-    pub(crate) fn apply_config_if_epoch(
+    /// Transfers configuration ownership to one runtime generation.
+    pub(crate) fn activate_config_source(
         &self,
-        expected_epoch: u64,
+        source_generation: u64,
+        expected_epoch: Option<u64>,
         users: &HashMap<String, String>,
         user_enabled: &HashMap<String, bool>,
     ) -> Option<Vec<(String, usize)>> {
-        self.apply_config_locked(Some(expected_epoch), users, user_enabled)
+        self.apply_config_locked(source_generation, expected_epoch, true, users, user_enabled)
+    }
+
+    /// Reconciles an update only while its runtime generation owns configuration.
+    pub(crate) fn apply_config_from_source(
+        &self,
+        source_generation: u64,
+        users: &HashMap<String, String>,
+        user_enabled: &HashMap<String, bool>,
+    ) -> Option<Vec<(String, usize)>> {
+        self.apply_config_locked(source_generation, None, false, users, user_enabled)
+    }
+
+    /// Returns the number of rejected updates from non-owning generations.
+    pub(crate) fn stale_config_source_rejections(&self) -> u64 {
+        self.state.lock().stale_config_source_rejections
     }
 
     fn apply_config_locked(
         &self,
+        source_generation: u64,
         expected_epoch: Option<u64>,
+        activate_source: bool,
         users: &HashMap<String, String>,
         user_enabled: &HashMap<String, bool>,
     ) -> Option<Vec<(String, usize)>> {
@@ -154,6 +182,21 @@ impl UserAdmissionAuthority {
             .collect::<HashMap<_, _>>();
         let cancellations = {
             let mut state = self.state.lock();
+            if activate_source {
+                if state
+                    .active_config_source
+                    .is_some_and(|active| source_generation < active)
+                {
+                    state.stale_config_source_rejections =
+                        state.stale_config_source_rejections.saturating_add(1);
+                    return None;
+                }
+                state.active_config_source = Some(source_generation);
+            } else if state.active_config_source != Some(source_generation) {
+                state.stale_config_source_rejections =
+                    state.stale_config_source_rejections.saturating_add(1);
+                return None;
+            }
             if expected_epoch.is_some_and(|epoch| state.epoch != epoch) {
                 return None;
             }
@@ -195,6 +238,19 @@ impl UserAdmissionAuthority {
                         if let Some(record) = state.users.get_mut(&user) {
                             record.incarnation = incarnation;
                         }
+                        match (old_effective, new_effective) {
+                            (None, Some(_)) => {
+                                self.quota_store.activate_fresh(&user, incarnation);
+                            }
+                            (Some(_), Some(_)) => {
+                                self.quota_store
+                                    .advance_preserving_usage(&user, incarnation);
+                            }
+                            (Some(_), None) => {
+                                self.quota_store.retire_through(&user, incarnation);
+                            }
+                            (None, None) => {}
+                        }
                     }
                     if identity_changed
                         || old_effective.is_some_and(|entry| entry.enabled)
@@ -213,13 +269,14 @@ impl UserAdmissionAuthority {
                 changed = true;
                 let incarnation = state.allocate_incarnation();
                 state.users.insert(
-                    user,
+                    user.clone(),
                     UserRecord {
                         configured: Some(desired),
                         mutation_override: None,
                         incarnation,
                     },
                 );
+                self.quota_store.activate_fresh(&user, incarnation);
             }
 
             if changed {
@@ -238,6 +295,16 @@ impl UserAdmissionAuthority {
         enabled: bool,
     ) -> Option<UserMutationResult> {
         let credential_id = credential_id_from_hex(secret)?;
+        Some(self.stage_user_credential(user, credential_id, enabled))
+    }
+
+    /// Applies one already validated credential mutation ahead of runtime reload.
+    pub(crate) fn stage_user_credential(
+        &self,
+        user: &str,
+        credential_id: UserCredentialId,
+        enabled: bool,
+    ) -> UserMutationResult {
         let desired = EffectiveUser {
             credential_id,
             enabled,
@@ -262,6 +329,14 @@ impl UserAdmissionAuthority {
             });
             record.mutation_override = Some(UserOverride::Present(desired));
             record.incarnation = incarnation;
+            if identity_changed {
+                if previous.is_some() {
+                    self.quota_store
+                        .advance_preserving_usage(user, incarnation);
+                } else {
+                    self.quota_store.activate_fresh(user, incarnation);
+                }
+            }
             state.initialized = true;
             state.bump_epoch();
             let newly_disabled = previous.is_some_and(|entry| entry.enabled) && !enabled;
@@ -276,11 +351,11 @@ impl UserAdmissionAuthority {
         for token in tokens {
             token.cancel();
         }
-        Some(UserMutationResult {
+        UserMutationResult {
             incarnation,
             cancelled,
             newly_disabled,
-        })
+        }
     }
 
     /// Installs a deletion tombstone and cancels every owner of the old incarnation.
@@ -296,6 +371,7 @@ impl UserAdmissionAuthority {
             });
             record.mutation_override = Some(UserOverride::Deleted);
             record.incarnation = incarnation;
+            self.quota_store.retire_through(user, incarnation);
             state.initialized = true;
             state.bump_epoch();
             (

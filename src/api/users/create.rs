@@ -5,6 +5,20 @@ pub(in crate::api) async fn create_user(
     expected_revision: Option<String>,
     shared: &ApiShared,
 ) -> Result<(CreateUserResponse, String), ApiFailure> {
+    let shared = shared.clone();
+    shared
+        .clone()
+        .run_mutation_completion(async move {
+            create_user_to_completion(body, expected_revision, &shared).await
+        })
+        .await
+}
+
+async fn create_user_to_completion(
+    body: CreateUserRequest,
+    expected_revision: Option<String>,
+    shared: &ApiShared,
+) -> Result<(CreateUserResponse, String), ApiFailure> {
     let touches_user_ad_tags = body.user_ad_tag.is_some();
     let touches_user_max_tcp_conns = body.max_tcp_conns.is_some();
     let touches_user_expirations = body.expiration_rfc3339.is_some();
@@ -41,6 +55,8 @@ pub(in crate::api) async fn create_user(
     }
 
     let expiration = parse_optional_expiration(body.expiration_rfc3339.as_deref())?;
+    let credential_id = credential_id_from_hex(&secret)
+        .ok_or_else(|| ApiFailure::internal("validated user secret could not be decoded"))?;
     let _guard = shared.mutation_lock.lock().await;
     let (mut cfg, base_revision) =
         load_config_for_mutation(&shared.config_path, expected_revision.as_deref()).await?;
@@ -131,12 +147,11 @@ pub(in crate::api) async fn create_user(
     .await?;
     shared
         .proxy_shared
-        .stage_user(
+        .stage_user_credential(
             &body.username,
-            &secret,
+            credential_id,
             cfg.access.is_user_enabled(&body.username),
-        )
-        .ok_or_else(|| ApiFailure::internal("failed to stage user admission policy"))?;
+        );
 
     if let Some(limit) = updated_limit {
         shared

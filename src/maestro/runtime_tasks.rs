@@ -90,6 +90,7 @@ impl RuntimeLogFilter {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn spawn_runtime_tasks(
+    generation_id: u64,
     config: &Arc<ProxyConfig>,
     config_path: &Path,
     probe: &NetworkProbe,
@@ -288,9 +289,14 @@ pub(crate) async fn spawn_runtime_tasks(
                 break;
             }
             let cfg = config_rx_user_enabled.borrow_and_update().clone();
-            for (user, cancelled) in shared_user_enabled
-                .apply_user_config(&cfg.access.users, &cfg.access.user_enabled)
-            {
+            let Some(cancelled_users) = shared_user_enabled.apply_user_config_from_source(
+                generation_id,
+                &cfg.access.users,
+                &cfg.access.user_enabled,
+            ) else {
+                continue;
+            };
+            for (user, cancelled) in cancelled_users {
                 if cancelled > 0 {
                     info!(
                         user = %user,

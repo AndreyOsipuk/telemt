@@ -20,6 +20,13 @@ impl WebSession {
         completion: StreamCompletion,
         retain_reservation_on_reject: bool,
     ) -> bool {
+        if self.close_if_cancelled() {
+            completion
+                .retain_rejected
+                .store(retain_reservation_on_reject, Ordering::Release);
+            drop(completion);
+            return false;
+        }
         let stream = completion.stream;
         let peer_port = completion.peer_port;
         let Some(manager) = self.manager.upgrade() else {
@@ -60,6 +67,7 @@ impl WebSession {
             );
             let logical_stream = WebLogicalStream::new(Arc::clone(&session), stream);
             tokio::select! {
+                biased;
                 _ = cancel.cancelled() => {}
                 _ = run_stream(
                     Arc::clone(&session),

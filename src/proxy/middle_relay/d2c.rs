@@ -135,6 +135,7 @@ pub(crate) async fn process_me_writer_response<W>(
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    let quota_handle = quota_limit.map(|_| stats.current_user_quota_handle(user));
     process_me_writer_response_with_traffic_lease(
         response,
         client_writer,
@@ -144,6 +145,7 @@ where
         stats,
         user,
         quota_user_stats,
+        quota_handle.as_ref(),
         quota_limit,
         quota_soft_overshoot_bytes,
         None,
@@ -165,6 +167,7 @@ pub(crate) async fn process_me_writer_response_with_traffic_lease<W>(
     stats: &Stats,
     user: &str,
     quota_user_stats: Option<&UserStats>,
+    quota_handle: Option<&UserQuotaHandle>,
     quota_limit: Option<u64>,
     quota_soft_overshoot_bytes: u64,
     traffic_lease: Option<&Arc<TrafficLease>>,
@@ -185,10 +188,10 @@ where
                 trace!(conn_id, bytes = data.len(), flags, "ME->C data");
             }
             let data_len = data.len() as u64;
-            if let (Some(limit), Some(user_stats)) = (quota_limit, quota_user_stats) {
+            if let (Some(limit), Some(quota_handle)) = (quota_limit, quota_handle) {
                 let soft_limit = quota_soft_cap(limit, quota_soft_overshoot_bytes);
                 match reserve_user_quota_with_yield(
-                    user_stats, data_len, soft_limit, stats, cancel, None,
+                    quota_handle, data_len, soft_limit, stats, cancel, None,
                 )
                 .await
                 {

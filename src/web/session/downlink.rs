@@ -26,9 +26,14 @@ impl WebSession {
         if !self.carrier().is_multiplexed() {
             return Err(ManagerError::Protocol);
         }
+        if self.close_if_cancelled() {
+            return Err(ManagerError::Closed);
+        }
         let (epoch, healthy) = {
             let mut state = self.state.lock();
-            if state.closed {
+            if state.closed || self.cancel.is_cancelled() {
+                drop(state);
+                self.close_if_cancelled();
                 return Err(ManagerError::Closed);
             }
             if let Some(unacked) = &state.unacked {
@@ -92,6 +97,11 @@ impl WebSession {
                 notified.as_mut().enable();
                 {
                     let mut state = self.state.lock();
+                    if self.cancel.is_cancelled() {
+                        drop(state);
+                        self.close_if_cancelled();
+                        return Err(ManagerError::Closed);
+                    }
                     if state.down_epoch != epoch {
                         return Ok(PollResult {
                             body: Bytes::new(),
@@ -129,18 +139,33 @@ impl WebSession {
                 notified.await;
             }
         };
-        match tokio::time::timeout(deadline, poll).await {
-            Ok(result) => result,
-            Err(_) => {
-                let mut state = self.state.lock();
-                if state.down_epoch == epoch {
-                    state.activity.touch_progress(Instant::now());
+        tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => {
+                self.close_if_cancelled();
+                Err(ManagerError::Closed)
+            }
+            result = tokio::time::timeout(deadline, poll) => match result {
+                Ok(result) => result,
+                Err(_) => {
+                    if self.close_if_cancelled() {
+                        return Err(ManagerError::Closed);
+                    }
+                    let mut state = self.state.lock();
+                    if self.cancel.is_cancelled() {
+                        drop(state);
+                        self.close_if_cancelled();
+                        return Err(ManagerError::Closed);
+                    }
+                    if state.down_epoch == epoch {
+                        state.activity.touch_progress(Instant::now());
+                    }
+                    Ok(PollResult {
+                        body: Bytes::new(),
+                        next_cursor: cursor,
+                        lane_closed: false,
+                    })
                 }
-                Ok(PollResult {
-                    body: Bytes::new(),
-                    next_cursor: cursor,
-                    lane_closed: false,
-                })
             }
         }
     }

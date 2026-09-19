@@ -92,7 +92,16 @@ impl MePool {
         intent: WriterOpenIntent,
     ) -> Result<PreparedWriter<'a>> {
         let Some(writer_open_reservation) = self
-            .reserve_writer_open(contour, intent, writer_dc)
+            .reserve_writer_open(
+                contour,
+                intent,
+                writer_dc,
+                if addr.is_ipv4() {
+                    crate::network::IpFamily::V4
+                } else {
+                    crate::network::IpFamily::V6
+                },
+            )
             .await
         else {
             return Err(ProxyError::Proxy(format!(

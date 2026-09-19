@@ -159,8 +159,8 @@ pub(in crate::api) async fn save_access_sections_to_disk_if_revision(
         owner_contents.clone(),
     )
     .await?;
-    let revision = compute_snapshot_revision(&candidate);
-    write_atomic_if_unchanged(
+    let _candidate_revision = compute_snapshot_revision(&candidate);
+    let revision = write_atomic_if_unchanged(
         config_path.to_path_buf(),
         loaded_revision,
         owner_path,

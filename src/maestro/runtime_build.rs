@@ -192,6 +192,7 @@ pub(crate) async fn prepare_runtime(
     let max_connections = Arc::new(Semaphore::new(max_connections_limit));
     let (config_watcher_activation, config_watcher_activation_rx) = watch::channel(false);
     let watches = runtime_tasks::spawn_runtime_tasks(
+        generation_id,
         &config,
         config_path,
         &probe,
