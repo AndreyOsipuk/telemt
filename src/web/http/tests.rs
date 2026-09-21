@@ -17,8 +17,8 @@ use crate::config::{
 use crate::maestro::generation::test_runtime_generation;
 use crate::web::frame::{self, FrameType};
 use crate::web::manager::{
-    CloseOperationSelector, ControlError, ManagerError, SessionDetail, SessionFilter,
-    SessionListRequest, SessionRefError, WebProcessRuntime,
+    CloseOperationSelector, ControlError, SessionDetail, SessionFilter, SessionListRequest,
+    SessionRefError, WebProcessRuntime,
 };
 
 #[path = "legacy_tests.rs"]
@@ -34,6 +34,9 @@ mod diagnostic_tests;
 // Reload-stability tests for session-owned timeout policy.
 #[path = "session_policy_tests.rs"]
 mod session_policy_tests;
+// Runtime-generation authority fences for WEB bootstrap publication.
+#[path = "generation_fence_tests.rs"]
+mod generation_fence_tests;
 // Runtime control integration stays separate from carrier protocol scenarios.
 #[path = "control_tests.rs"]
 mod control_tests;
@@ -411,55 +414,6 @@ async fn unused_bootstrap_survives_equivalent_runtime_generation_swap() {
     generation.stop_background_tasks().await;
     replacement.stop_sessions().await;
     replacement.stop_background_tasks().await;
-}
-
-#[tokio::test]
-async fn bridge_bootstrap_uses_the_generation_that_selected_its_profile() {
-    let initial = test_runtime_generation(1, runtime_config([21; 32], WebCarrier::Https));
-    let active_runtime = Arc::new(ArcSwap::from(Arc::clone(&initial)));
-    let runtime = WebProcessRuntime::start(Arc::clone(&active_runtime));
-    let profile = initial.config().web.runtime.as_ref().unwrap().profiles[0].clone();
-    let replacement = test_runtime_generation(2, runtime_config([22; 32], WebCarrier::HttpsLanes));
-    active_runtime.store(Arc::clone(&replacement));
-
-    let result =
-        runtime.issue_bootstrap_for_generation(&initial, profile, "192.0.2.10".parse().unwrap());
-
-    assert!(result.is_ok());
-    runtime.shutdown().await;
-    initial.stop_sessions().await;
-    initial.stop_background_tasks().await;
-    replacement.stop_sessions().await;
-    replacement.stop_background_tasks().await;
-}
-
-#[tokio::test]
-async fn stale_generation_cannot_publish_bootstrap_after_disabled_cutover() {
-    let capability = [23u8; 32];
-    let initial = test_runtime_generation(1, runtime_config(capability, WebCarrier::Https));
-    let active_runtime = Arc::new(ArcSwap::from(Arc::clone(&initial)));
-    let runtime = WebProcessRuntime::start(active_runtime);
-    let profile = initial.config().web.runtime.as_ref().unwrap().profiles[0].clone();
-    let mut disabled_config = runtime_config(capability, WebCarrier::Https);
-    disabled_config.web.enabled = false;
-    let disabled = test_runtime_generation(2, disabled_config);
-
-    runtime.activate_generation(Arc::clone(&disabled));
-    let result = runtime.issue_bootstrap_for_generation(
-        &initial,
-        profile,
-        "192.0.2.10".parse().unwrap(),
-    );
-
-    assert!(matches!(result, Err(ManagerError::Closed)));
-    let status = serde_json::to_value(runtime.try_status()).unwrap();
-    assert_eq!(status["manager"]["bootstraps"], 0);
-
-    runtime.shutdown().await;
-    initial.stop_sessions().await;
-    initial.stop_background_tasks().await;
-    disabled.stop_sessions().await;
-    disabled.stop_background_tasks().await;
 }
 
 #[tokio::test]

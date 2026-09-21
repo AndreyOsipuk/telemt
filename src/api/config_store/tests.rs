@@ -346,13 +346,13 @@ async fn config_sidecar_lock_serializes_competing_revision_writers() {
     let second = second.await.unwrap();
 
     assert_ne!(first.is_ok(), second.is_ok());
-    let conflict = if let Err(error) = first {
-        error
-    } else {
-        second.unwrap_err()
+    let (winner_revision, conflict) = match (first, second) {
+        (Ok(revision), Err(error)) | (Err(error), Ok(revision)) => (revision, error),
+        _ => unreachable!("exactly one cooperative writer must commit"),
     };
     assert_eq!(conflict.code, "revision_conflict");
-    let persisted = tokio::fs::read_to_string(path).await.unwrap();
+    assert_eq!(winner_revision, current_revision(&path).await.unwrap());
+    let persisted = tokio::fs::read_to_string(&path).await.unwrap();
     assert!(persisted.contains("first.example") || persisted.contains("second.example"));
 }
 

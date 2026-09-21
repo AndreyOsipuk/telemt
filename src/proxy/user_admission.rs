@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::AtomicU8;
 
-use parking_lot::{Mutex, MutexGuard};
+use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::crypto::sha256;
@@ -11,6 +11,10 @@ use crate::stats::QuotaStore;
 const REGISTRATION_PENDING: u8 = 0;
 const REGISTRATION_ACTIVE: u8 = 1;
 const REGISTRATION_DROPPED: u8 = 2;
+
+// Authenticated-owner publication and RAII deregistration.
+mod registration;
+pub(crate) use registration::{UserAdmissionPublication, UserSessionRegistration};
 
 /// Stable secret identity used to fence authentication across runtime generations.
 pub(crate) type UserCredentialId = [u8; 16];
@@ -497,96 +501,6 @@ impl UserAdmissionAuthority {
             .unwrap_or(false);
         if remove_user {
             state.owners_by_user.remove(user);
-        }
-    }
-}
-
-/// Authority lock retained until the caller publishes its owned object.
-pub(crate) struct UserAdmissionPublication<'a> {
-    state: MutexGuard<'a, UserAdmissionState>,
-    authority: Arc<UserAdmissionAuthority>,
-    user: String,
-    registration_id: u64,
-    incarnation: UserIncarnation,
-    token: CancellationToken,
-    active: Arc<AtomicU8>,
-    registration_taken: bool,
-}
-
-impl UserAdmissionPublication<'_> {
-    /// Moves the registered owner out while retaining the authority lock.
-    pub(crate) fn take_registration(&mut self) -> Option<UserSessionRegistration> {
-        if self.registration_taken {
-            return None;
-        }
-        self.registration_taken = true;
-        Some(UserSessionRegistration {
-            authority: Arc::clone(&self.authority),
-            user: self.user.clone(),
-            registration_id: self.registration_id,
-            incarnation: self.incarnation,
-            token: self.token.clone(),
-            active: Arc::clone(&self.active),
-        })
-    }
-
-    /// Commits the owner record after the caller publishes its lifecycle object.
-    pub(crate) fn commit(mut self) {
-        if !self.registration_taken {
-            return;
-        }
-        if self.active.compare_exchange(
-            REGISTRATION_PENDING, REGISTRATION_ACTIVE, Ordering::AcqRel, Ordering::Acquire,
-        ).is_err() {
-            return;
-        }
-        self.state
-            .owners_by_user
-            .entry(self.user.clone())
-            .or_default()
-            .insert(
-                self.registration_id,
-                RegisteredOwner {
-                    token: self.token.clone(),
-                    incarnation: self.incarnation,
-                },
-            );
-    }
-}
-
-/// RAII ownership registered against one user incarnation.
-#[must_use = "registered user ownership must be retained until lifecycle completion"]
-pub(crate) struct UserSessionRegistration {
-    authority: Arc<UserAdmissionAuthority>,
-    user: String,
-    registration_id: u64,
-    incarnation: UserIncarnation,
-    token: CancellationToken,
-    active: Arc<AtomicU8>,
-}
-
-impl UserSessionRegistration {
-    /// Returns the cancellation signal for revocation or credential replacement.
-    pub(crate) fn token(&self) -> CancellationToken {
-        self.token.clone()
-    }
-
-    /// Returns the immutable user incarnation owned by this registration.
-    pub(crate) fn incarnation(&self) -> UserIncarnation {
-        self.incarnation
-    }
-
-    /// Returns whether revocation has cancelled this ownership.
-    pub(crate) fn is_cancelled(&self) -> bool {
-        self.token.is_cancelled()
-    }
-}
-
-impl Drop for UserSessionRegistration {
-    fn drop(&mut self) {
-        if self.active.swap(REGISTRATION_DROPPED, Ordering::AcqRel) == REGISTRATION_ACTIVE {
-            self.authority
-                .unregister(&self.user, self.registration_id, self.incarnation);
         }
     }
 }

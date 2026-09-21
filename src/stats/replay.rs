@@ -90,6 +90,13 @@ struct ReplayShard {
     capacity: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReplayClaimResult {
+    Claimed,
+    Duplicate,
+    Capacity,
+}
+
 impl ReplayShard {
     fn new(cap: NonZeroUsize) -> Self {
         Self {
@@ -169,22 +176,22 @@ impl ReplayShard {
         now: Instant,
         window: Duration,
         token: u64,
-    ) -> bool {
+    ) -> ReplayClaimResult {
         if window.is_zero() {
-            return true;
+            return ReplayClaimResult::Claimed;
         }
         self.cleanup(now, window);
         if self.cache.peek(key.as_slice()).is_some() || self.pending.contains_key(key.as_slice()) {
-            return false;
+            return ReplayClaimResult::Duplicate;
         }
         while self.cache.len().saturating_add(self.pending.len()) >= self.capacity {
             if self.queue.is_empty() {
-                return false;
+                return ReplayClaimResult::Capacity;
             }
             self.evict_queue_front();
         }
         self.pending.insert(key, token);
-        true
+        ReplayClaimResult::Claimed
     }
 
     fn remove_pending(&mut self, key: &[u8], token: u64) -> bool {
@@ -377,9 +384,16 @@ impl ReplayChecker {
         }
         let token = self.reserve_claim_token()?;
         let mut shard = self.tls_shards[shard_idx].lock();
-        if !shard.claim_owned(key.clone(), Instant::now(), self.tls_window, token) {
-            self.hits.fetch_add(1, Ordering::Relaxed);
-            return None;
+        match shard.claim_owned(key.clone(), Instant::now(), self.tls_window, token) {
+            ReplayClaimResult::Claimed => {}
+            ReplayClaimResult::Duplicate => {
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+            ReplayClaimResult::Capacity => {
+                self.capacity_rejections.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
         }
         drop(shard);
         Some(TlsReplayClaim {
@@ -478,6 +492,7 @@ pub struct ReplayStats {
     pub total_checks: u64,
     pub total_hits: u64,
     pub total_additions: u64,
+    /// Claims rejected because committed and pending entries exhausted a shard.
     pub total_capacity_rejections: u64,
     pub total_cleanups: u64,
     pub num_shards: usize,
@@ -503,22 +518,5 @@ impl ReplayStats {
 }
 
 #[cfg(test)]
-mod capacity_tests {
-    use super::*;
-
-    #[test]
-    fn committed_and_pending_entries_share_one_shard_capacity() {
-        let capacity = NonZeroUsize::new(2).unwrap();
-        let mut shard = ReplayShard::new(capacity);
-        let now = Instant::now();
-        let window = Duration::from_secs(60);
-        assert!(shard.claim_owned(ReplayKey::from_slice(b"pending-a"), now, window, 1));
-        assert!(shard.claim_owned(ReplayKey::from_slice(b"pending-b"), now, window, 2));
-
-        shard.add_owned(ReplayKey::from_slice(b"committed"), now, window);
-
-        assert!(shard.len() <= capacity.get());
-        assert!(shard.pending.contains_key(b"pending-a".as_slice()));
-        assert!(shard.pending.contains_key(b"pending-b".as_slice()));
-    }
-}
+#[path = "replay/tests.rs"]
+mod capacity_tests;

@@ -281,3 +281,47 @@ fn active_lease_observes_policy_removal() {
 
     assert_eq!(lease.try_consume(RateDirection::Up, 1).granted, 1);
 }
+
+#[test]
+fn active_lease_observes_policy_addition() {
+    let limiter = TrafficLimiter::new();
+    let lease = limiter
+        .acquire_lease("alice", "203.0.113.7".parse().unwrap())
+        .unwrap();
+    assert_eq!(lease.try_consume(RateDirection::Up, 2).granted, 2);
+
+    let mut user_limits = HashMap::new();
+    user_limits.insert("alice".to_string(), rate(1, 0));
+    limiter.apply_policy(user_limits, HashMap::new());
+
+    assert_eq!(lease.try_consume(RateDirection::Up, 1).granted, 1);
+    assert_eq!(lease.try_consume(RateDirection::Up, 1).granted, 0);
+}
+
+#[test]
+fn reservation_refund_stays_with_retired_binding() {
+    let limiter = TrafficLimiter::new();
+    let mut user_limits = HashMap::new();
+    user_limits.insert("alice".to_string(), rate(400_000, 400_000));
+    limiter.apply_policy(user_limits, HashMap::new());
+    let lease = limiter
+        .acquire_lease("alice", "203.0.113.7".parse().unwrap())
+        .unwrap();
+
+    let reservation = lease.try_reserve(RateDirection::Down, 800);
+    let old_bucket = Arc::clone(
+        reservation
+            ._binding
+            .user_bucket
+            .as_ref()
+            .expect("the original policy must bind a user bucket"),
+    );
+    let epoch = reservation.user.as_ref().unwrap().epoch;
+    limiter.apply_policy(HashMap::new(), HashMap::new());
+    assert_eq!(lease.try_consume(RateDirection::Down, 1).granted, 1);
+    assert!(lease.binding.load().user_bucket.is_none());
+
+    drop(reservation);
+
+    assert_eq!(old_bucket.down.used_at(epoch), Some(0));
+}

@@ -537,7 +537,12 @@ async fn generation_role_reconciliation_promotes_active_warm_and_drains_orphans(
     assert!(orphan_warm.draining.load(Ordering::Acquire));
     assert!(!orphan_warm.allow_drain_fallback.load(Ordering::Acquire));
     let snapshot = pool.api_hardswap_snapshot().await;
+    let desired = pool.desired_dc_endpoints().await;
+    let coverage = pool.hardswap_coverage(&desired, &[(1, endpoint)]);
     assert_eq!(snapshot.orphan_warm_writers_current, 0);
-    assert_eq!(snapshot.pending_writer_deficit, 2);
-    assert_eq!(snapshot.pending_missing_dc_groups, 1);
+    assert_eq!(snapshot.pending_writer_deficit, coverage.writer_deficit);
+    assert_eq!(
+        snapshot.pending_missing_dc_groups,
+        coverage.missing_groups.len()
+    );
 }

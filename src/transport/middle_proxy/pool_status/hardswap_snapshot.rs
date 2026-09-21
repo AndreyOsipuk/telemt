@@ -41,7 +41,7 @@ impl MePool {
         let pending_generation = reinit.pending_hardswap_generation;
         let pending = pending_generation != 0;
         let mut pending_writers_current = 0usize;
-        let mut pending_by_group = HashMap::<(i32, IpFamily), usize>::new();
+        let mut pending_writer_addrs = Vec::<(i32, SocketAddr)>::new();
         let mut orphan_warm_writers_current = 0usize;
 
         for writer in writers.iter() {
@@ -60,40 +60,18 @@ impl MePool {
                     .is_some_and(|endpoints| endpoints.contains(&writer.addr))
             {
                 pending_writers_current = pending_writers_current.saturating_add(1);
-                let family = if writer.addr.is_ipv4() {
-                    IpFamily::V4
-                } else {
-                    IpFamily::V6
-                };
-                *pending_by_group
-                    .entry((writer.writer_dc, family))
-                    .or_insert(0) += 1;
+                pending_writer_addrs.push((writer.writer_dc, writer.addr));
             }
         }
 
-        let mut pending_writer_deficit = 0usize;
-        let mut pending_missing_dc_groups = 0usize;
-        if pending {
-            for (dc, endpoints) in &desired_by_dc {
-                for family in [IpFamily::V4, IpFamily::V6] {
-                    let endpoint_count = endpoints
-                        .iter()
-                        .filter(|endpoint| endpoint.is_ipv4() == (family == IpFamily::V4))
-                        .count();
-                    if endpoint_count == 0 {
-                        continue;
-                    }
-                    let alive = pending_by_group.get(&(*dc, family)).copied().unwrap_or(0);
-                    let required = self.required_writers_for_dc(endpoint_count);
-                    let deficit = required.saturating_sub(alive);
-                    pending_writer_deficit = pending_writer_deficit.saturating_add(deficit);
-                    if deficit > 0 {
-                        pending_missing_dc_groups =
-                            pending_missing_dc_groups.saturating_add(1);
-                    }
-                }
-            }
-        }
+        let pending_coverage = pending
+            .then(|| self.hardswap_coverage(&desired_by_dc, &pending_writer_addrs));
+        let pending_writer_deficit = pending_coverage
+            .as_ref()
+            .map_or(0, |coverage| coverage.writer_deficit);
+        let pending_missing_dc_groups = pending_coverage
+            .as_ref()
+            .map_or(0, |coverage| coverage.missing_groups.len());
         let (replacement_preparing_current, replacement_retiring_current) =
             self.registry.writer_replacement_counts();
         let pending_age_secs = pending.then(|| {

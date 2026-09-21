@@ -60,6 +60,19 @@ fn stale_candidate_cannot_overwrite_newer_mutation() {
             .is_none()
     );
     assert!(!authority.is_user_enabled("alice"));
+
+    let disabled = HashMap::from([("alice".to_string(), false)]);
+    assert!(
+        authority
+            .apply_config_from_source(1, &users(secret), &disabled)
+            .is_none()
+    );
+    assert!(
+        authority
+            .apply_config_from_source(2, &users(secret), &disabled)
+            .is_some()
+    );
+    assert!(!authority.is_user_enabled("alice"));
 }
 
 #[test]

@@ -11,6 +11,8 @@ use nix::fcntl::{Flock, FlockArg, OFlag, openat, renameat};
 use nix::sys::stat::Mode;
 #[cfg(unix)]
 use nix::unistd::{UnlinkatFlags, fsync, unlinkat};
+#[cfg(unix)]
+use tracing::warn;
 
 use super::compute_source_revision;
 use crate::api::model::ApiFailure;
@@ -75,7 +77,7 @@ impl ConfigWriteLock {
     }
 }
 
-/// Replaces one config source through a durable same-directory rename.
+/// Replaces one config source through a same-directory rename after syncing file data.
 pub(in crate::api) async fn write_atomic(
     path: PathBuf,
     contents: String,
@@ -362,7 +364,15 @@ fn write_and_publish(
         anchored.name(),
     )
     .map_err(errno_to_io)?;
-    fsync(anchored.parent()).map_err(errno_to_io)?;
+    // Rename is the commit boundary. A later directory-sync error cannot be reported as an
+    // uncommitted mutation because mandatory in-process publication must still run.
+    if let Err(error) = fsync(anchored.parent()).map_err(errno_to_io) {
+        warn!(
+            path = %path.display(),
+            %error,
+            "Config rename committed but directory durability sync failed"
+        );
+    }
     Ok(committed_revision)
 }
 

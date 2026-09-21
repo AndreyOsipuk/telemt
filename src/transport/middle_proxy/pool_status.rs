@@ -6,7 +6,6 @@ use std::time::Instant;
 
 use super::pool::{MePool, ReinitStatusSnapshot, WriterContour};
 use crate::config::{MeBindStaleMode, MeFloorMode, MeSocksKdfPolicy};
-use crate::network::IpFamily;
 use crate::transport::upstream::IpPreference;
 
 // ME writer and DC coverage snapshots.

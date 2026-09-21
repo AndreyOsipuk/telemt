@@ -62,15 +62,22 @@ struct ReinitCommitOutcome {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct DcFamilyGroup {
-    dc: i32,
-    family: IpFamily,
+/// One independently enforced hardswap writer-floor group.
+pub(in crate::transport::middle_proxy) struct DcFamilyGroup {
+    /// Telegram DC owning the group.
+    pub(in crate::transport::middle_proxy) dc: i32,
+    /// Address family whose floor is evaluated independently.
+    pub(in crate::transport::middle_proxy) family: IpFamily,
 }
 
-struct HardswapCoverage {
-    ratio: f32,
-    missing_groups: Vec<DcFamilyGroup>,
-    writer_deficit: usize,
+/// Complete floor-coverage result for one candidate hardswap generation.
+pub(in crate::transport::middle_proxy) struct HardswapCoverage {
+    /// Fraction of configured DC-family groups that reached their full floor.
+    pub(in crate::transport::middle_proxy) ratio: f32,
+    /// Stable list of DC-family groups that remain below their floor.
+    pub(in crate::transport::middle_proxy) missing_groups: Vec<DcFamilyGroup>,
+    /// Total writer count still required across all missing groups.
+    pub(in crate::transport::middle_proxy) writer_deficit: usize,
 }
 
 #[derive(Debug)]

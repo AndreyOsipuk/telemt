@@ -287,7 +287,7 @@ impl MePool {
     }
 
     /// Evaluates full writer-floor coverage independently for every DC and address family.
-    pub(super) fn hardswap_coverage(
+    pub(in crate::transport::middle_proxy) fn hardswap_coverage(
         &self,
         desired_by_dc: &HashMap<i32, HashSet<SocketAddr>>,
         writer_addrs: &[(i32, SocketAddr)],
