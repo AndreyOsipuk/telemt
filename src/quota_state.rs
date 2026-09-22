@@ -104,14 +104,13 @@ impl QuotaStateOwner {
             used_bytes: 0,
             last_reset_epoch_secs,
         };
+        let reset_target = self.store.current_or_legacy_handle(user);
         let state = self.state_for_users(configured_users, Some((user, prospective.clone())));
         let path = self.path.clone();
-        let store = Arc::clone(&self.store);
-        let user = user.to_string();
         let task = tokio::task::spawn_blocking(move || {
             let _guard = guard;
             write_state_file_blocking(&path, &state)?;
-            Ok(store.reset(&user, last_reset_epoch_secs))
+            Ok(reset_target.reset(last_reset_epoch_secs))
         });
         wait_for_blocking_io(task).await
     }

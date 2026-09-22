@@ -1,25 +1,28 @@
 #![allow(clippy::too_many_arguments)]
 
-use std::cmp::Reverse;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, TryAcquireError};
 use tracing::{debug, warn};
 
 use super::MePool;
-use super::codec::{ProxyReqCommand, WriterBytePermit, WriterCommand};
+use super::codec::WriterCommand;
 use super::registry::{ConnMeta, WriterBindOutcome};
-use super::wire::{build_proxy_req_payload, proxy_req_payload_len};
-use crate::config::defaults::ME_WRITER_BYTE_PERMIT_UNIT_BYTES;
-use crate::config::{MeRouteNoWriterMode, MeWriterPickMode};
+use super::wire::build_proxy_req_payload;
+use crate::config::MeRouteNoWriterMode;
 use crate::error::{ProxyError, Result};
-use crate::stats::Stats;
-use crate::stream::PooledBuffer;
 use rand::seq::SliceRandom;
+
+use self::bound::BoundWriterSendOutcome;
+use self::reservation::{
+    LEGACY_PROXY_REQ_SOURCE_CAPACITY_OVERHEAD_BYTES, WriterByteReserveError,
+    WriterCommandReserveError, proxy_req_resident_permits, reserve_writer_bytes,
+    reserve_writer_command_slot, try_reserve_writer_bytes, writer_send_deadline,
+};
 
 const IDLE_WRITER_PENALTY_MID_SECS: u64 = 45;
 const IDLE_WRITER_PENALTY_HIGH_SECS: u64 = 55;
@@ -31,141 +34,14 @@ const PICK_PENALTY_WARM: u64 = 200;
 const PICK_PENALTY_DRAINING: u64 = 600;
 const PICK_PENALTY_STALE: u64 = 300;
 const PICK_PENALTY_DEGRADED: u64 = 250;
-const RPC_WRITER_FRAME_CAPACITY_OVERHEAD_BYTES: usize = 27;
-const LEGACY_PROXY_REQ_SOURCE_CAPACITY_OVERHEAD_BYTES: usize = 128;
 
+// Send-path submodules isolate delivery, close handling, recovery, reservations, and selection.
+mod bound;
 mod close;
+mod pooled;
 mod recovery;
+mod reservation;
 mod selection;
-
-enum WriterCommandReserveError {
-    Closed,
-    TimedOut,
-}
-
-enum WriterByteReserveError {
-    Closed,
-    TimedOut,
-}
-
-fn proxy_tag_array(tag: Option<&[u8]>) -> Option<[u8; 16]> {
-    tag.and_then(|tag| <[u8; 16]>::try_from(tag).ok())
-}
-
-fn proxy_req_payload_from_command(
-    cmd: WriterCommand,
-) -> Option<(PooledBuffer, OwnedSemaphorePermit)> {
-    match cmd {
-        WriterCommand::ProxyReq(command) => Some((command.payload, command._permit)),
-        _ => None,
-    }
-}
-
-fn payload_permit_from_data_command(cmd: WriterCommand) -> Option<OwnedSemaphorePermit> {
-    match cmd {
-        WriterCommand::Data { _permit, .. } => _permit,
-        _ => None,
-    }
-}
-
-async fn reserve_writer_command_slot(
-    tx: &mpsc::Sender<WriterCommand>,
-    deadline: Option<Instant>,
-) -> std::result::Result<mpsc::OwnedPermit<WriterCommand>, WriterCommandReserveError> {
-    let reserve = tx.clone().reserve_owned();
-    match deadline {
-        Some(deadline) => {
-            match tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), reserve)
-                .await
-            {
-                Ok(Ok(permit)) => Ok(permit),
-                Ok(Err(_)) => Err(WriterCommandReserveError::Closed),
-                Err(_) => Err(WriterCommandReserveError::TimedOut),
-            }
-        }
-        None => reserve.await.map_err(|_| WriterCommandReserveError::Closed),
-    }
-}
-
-fn writer_send_deadline(wait: Option<Duration>) -> Option<Instant> {
-    wait.map(|wait| Instant::now() + wait)
-}
-
-fn writer_resident_permits(
-    source_capacity: usize,
-    encoded_payload_len: usize,
-) -> Option<(u32, usize)> {
-    let resident_bytes = source_capacity
-        .checked_add(encoded_payload_len)?
-        .checked_add(RPC_WRITER_FRAME_CAPACITY_OVERHEAD_BYTES)?;
-    let permits = resident_bytes.div_ceil(ME_WRITER_BYTE_PERMIT_UNIT_BYTES);
-    let permits = u32::try_from(permits).ok()?;
-    let reserved_bytes = (permits as usize).checked_mul(ME_WRITER_BYTE_PERMIT_UNIT_BYTES)?;
-    Some((
-        permits.max(1),
-        reserved_bytes.max(ME_WRITER_BYTE_PERMIT_UNIT_BYTES),
-    ))
-}
-
-fn proxy_req_resident_permits(
-    source_capacity: usize,
-    data_len: usize,
-    proxy_tag: Option<&[u8]>,
-    proto_flags: u32,
-) -> Option<(u32, usize)> {
-    writer_resident_permits(
-        source_capacity,
-        proxy_req_payload_len(data_len, proxy_tag, proto_flags),
-    )
-}
-
-fn try_reserve_writer_bytes(
-    byte_budget: &Arc<Semaphore>,
-    permits: u32,
-    reserved_bytes: usize,
-    stats: &Arc<Stats>,
-) -> std::result::Result<WriterBytePermit, TryAcquireError> {
-    byte_budget
-        .clone()
-        .try_acquire_many_owned(permits)
-        .map(|permit| WriterBytePermit::new(permit, reserved_bytes, stats.clone()))
-}
-
-async fn reserve_writer_bytes(
-    byte_budget: &Arc<Semaphore>,
-    permits: u32,
-    reserved_bytes: usize,
-    deadline: Option<Instant>,
-    stats: &Arc<Stats>,
-) -> std::result::Result<WriterBytePermit, WriterByteReserveError> {
-    match try_reserve_writer_bytes(byte_budget, permits, reserved_bytes, stats) {
-        Ok(permit) => return Ok(permit),
-        Err(TryAcquireError::Closed) => return Err(WriterByteReserveError::Closed),
-        Err(TryAcquireError::NoPermits) => {
-            stats.increment_me_writer_byte_budget_wait_total();
-        }
-    }
-
-    let acquire = byte_budget.clone().acquire_many_owned(permits);
-    match deadline {
-        Some(deadline) => {
-            match tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), acquire)
-                .await
-            {
-                Ok(Ok(permit)) => Ok(WriterBytePermit::new(permit, reserved_bytes, stats.clone())),
-                Ok(Err(_)) => Err(WriterByteReserveError::Closed),
-                Err(_) => {
-                    stats.increment_me_writer_byte_budget_timeout_total();
-                    Err(WriterByteReserveError::TimedOut)
-                }
-            }
-        }
-        None => acquire
-            .await
-            .map(|permit| WriterBytePermit::new(permit, reserved_bytes, stats.clone()))
-            .map_err(|_| WriterByteReserveError::Closed),
-    }
-}
 
 impl MePool {
     /// Send RPC_PROXY_REQ. `tag_override`: per-user ad_tag (from access.user_ad_tags); if None, uses pool default.
@@ -243,78 +119,22 @@ impl MePool {
         let mut hybrid_wait_current = hybrid_wait_step;
 
         loop {
-            if let Some((current, current_meta)) = self.registry.get_writer_with_meta(conn_id).await
-            {
-                let deadline =
-                    writer_send_deadline(self.route_runtime.me_route_blocking_send_timeout);
-                let writer_permit = match reserve_writer_bytes(
-                    &current.byte_budget,
+            match self
+                .try_send_bound_writer(
+                    conn_id,
+                    client_addr,
+                    data,
+                    proto_flags,
+                    tag,
                     writer_byte_permits,
                     writer_reserved_bytes,
-                    deadline,
-                    &self.stats,
+                    payload_permit,
                 )
-                .await
-                {
-                    Ok(permit) => permit,
-                    Err(WriterByteReserveError::TimedOut) => {
-                        self.stats
-                            .increment_me_writer_pick_full_total(self.writer_pick_mode());
-                        return Err(ProxyError::Proxy(
-                            "ME writer byte budget full within blocking send timeout".into(),
-                        ));
-                    }
-                    Err(WriterByteReserveError::Closed) => {
-                        warn!(
-                            writer_id = current.writer_id,
-                            "ME writer byte budget closed"
-                        );
-                        self.remove_writer_and_close_clients(current.writer_id)
-                            .await;
-                        continue;
-                    }
-                };
-                let (current_payload, _) = build_routed_payload(current_meta.our_addr);
-                let command = WriterCommand::Data {
-                    payload: current_payload,
-                    _permit: payload_permit.take(),
-                    writer_permit,
-                };
-                match current.tx.try_send(command) {
-                    Ok(()) => {
-                        self.note_hybrid_route_success();
-                        return Ok(());
-                    }
-                    Err(TrySendError::Full(cmd)) => {
-                        match reserve_writer_command_slot(&current.tx, deadline).await {
-                            Ok(permit) => {
-                                permit.send(cmd);
-                                self.note_hybrid_route_success();
-                                return Ok(());
-                            }
-                            Err(WriterCommandReserveError::TimedOut) => {
-                                self.stats
-                                    .increment_me_writer_pick_full_total(self.writer_pick_mode());
-                                return Err(ProxyError::Proxy(
-                                    "ME writer channel full within blocking send timeout".into(),
-                                ));
-                            }
-                            Err(WriterCommandReserveError::Closed) => {
-                                payload_permit = payload_permit_from_data_command(cmd);
-                            }
-                        }
-                        warn!(writer_id = current.writer_id, "ME writer channel closed");
-                        self.remove_writer_and_close_clients(current.writer_id)
-                            .await;
-                        continue;
-                    }
-                    Err(TrySendError::Closed(cmd)) => {
-                        payload_permit = payload_permit_from_data_command(cmd);
-                        warn!(writer_id = current.writer_id, "ME writer channel closed");
-                        self.remove_writer_and_close_clients(current.writer_id)
-                            .await;
-                        continue;
-                    }
+                .await?
+            {
+                BoundWriterSendOutcome::Sent => return Ok(()),
+                BoundWriterSendOutcome::Retry(retry_permit) => {
+                    payload_permit = retry_permit;
                 }
             }
 
@@ -537,88 +357,9 @@ impl MePool {
             }
             hybrid_wait_current = hybrid_wait_step;
             let pick_mode = self.writer_pick_mode();
-            let pick_sample_size = self.writer_pick_sample_size();
-            let writer_ids: Vec<u64> = candidate_indices
-                .iter()
-                .map(|idx| writers_snapshot[*idx].id)
-                .collect();
-            let writer_idle_since = self
-                .registry
-                .writer_idle_since_for_writer_ids(&writer_ids)
+            let ordered_candidate_indices = self
+                .ordered_candidate_indices(candidate_indices, &writers_snapshot, pick_mode)
                 .await;
-            let now_epoch_secs = Self::now_epoch_secs();
-            let start = self.rr.fetch_add(1, Ordering::Relaxed) as usize % candidate_indices.len();
-            let ordered_candidate_indices = if pick_mode == MeWriterPickMode::P2c {
-                self.p2c_ordered_candidate_indices(
-                    &candidate_indices,
-                    &writers_snapshot,
-                    &writer_idle_since,
-                    now_epoch_secs,
-                    start,
-                    pick_sample_size,
-                )
-            } else {
-                if self
-                    .writer_selection_policy
-                    .me_deterministic_writer_sort
-                    .load(Ordering::Relaxed)
-                {
-                    candidate_indices.sort_by(|lhs, rhs| {
-                        let left = &writers_snapshot[*lhs];
-                        let right = &writers_snapshot[*rhs];
-                        let left_key = (
-                            self.writer_contour_rank_for_selection(left),
-                            (left.generation < self.current_generation()) as usize,
-                            left.degraded.load(Ordering::Relaxed) as usize,
-                            self.writer_idle_rank_for_selection(
-                                left,
-                                &writer_idle_since,
-                                now_epoch_secs,
-                            ),
-                            Reverse(left.tx.capacity()),
-                            left.addr,
-                            left.id,
-                        );
-                        let right_key = (
-                            self.writer_contour_rank_for_selection(right),
-                            (right.generation < self.current_generation()) as usize,
-                            right.degraded.load(Ordering::Relaxed) as usize,
-                            self.writer_idle_rank_for_selection(
-                                right,
-                                &writer_idle_since,
-                                now_epoch_secs,
-                            ),
-                            Reverse(right.tx.capacity()),
-                            right.addr,
-                            right.id,
-                        );
-                        left_key.cmp(&right_key)
-                    });
-                } else {
-                    candidate_indices.sort_by_key(|idx| {
-                        let w = &writers_snapshot[*idx];
-                        let degraded = w.degraded.load(Ordering::Relaxed);
-                        let stale = (w.generation < self.current_generation()) as usize;
-                        (
-                            self.writer_contour_rank_for_selection(w),
-                            stale,
-                            degraded as usize,
-                            self.writer_idle_rank_for_selection(
-                                w,
-                                &writer_idle_since,
-                                now_epoch_secs,
-                            ),
-                            Reverse(w.tx.capacity()),
-                        )
-                    });
-                }
-
-                let mut ordered = Vec::<usize>::with_capacity(candidate_indices.len());
-                for offset in 0..candidate_indices.len() {
-                    ordered.push(candidate_indices[(start + offset) % candidate_indices.len()]);
-                }
-                ordered
-            };
             let mut fallback_blocking_idx: Option<usize> = None;
 
             for idx in ordered_candidate_indices {
@@ -804,167 +545,4 @@ impl MePool {
         }
     }
 
-    /// Send RPC_PROXY_REQ while keeping the first bound-writer path allocation-light.
-    /// The client byte permit follows the payload until writer completion or command drop.
-    pub async fn send_proxy_req_pooled(
-        self: &Arc<Self>,
-        conn_id: u64,
-        target_dc: i16,
-        client_addr: SocketAddr,
-        our_addr: SocketAddr,
-        payload: PooledBuffer,
-        _permit: OwnedSemaphorePermit,
-        proto_flags: u32,
-        tag_override: Option<[u8; 16]>,
-    ) -> Result<()> {
-        let tag = tag_override.or_else(|| proxy_tag_array(self.proxy_tag.as_deref()));
-        let Some((writer_byte_permits, writer_reserved_bytes)) = proxy_req_resident_permits(
-            payload.capacity(),
-            payload.len(),
-            tag.as_ref().map(|tag| tag.as_slice()),
-            proto_flags,
-        ) else {
-            self.stats.increment_me_writer_byte_budget_oversize_total();
-            return Err(ProxyError::Proxy(
-                "ME writer payload residency calculation overflow".into(),
-            ));
-        };
-        if writer_byte_permits as usize > self.writer_lifecycle.writer_byte_budget_permits {
-            self.stats.increment_me_writer_byte_budget_oversize_total();
-            return Err(ProxyError::Proxy(
-                "ME writer payload exceeds configured byte budget".into(),
-            ));
-        }
-
-        if let Some((current, current_meta)) = self.registry.get_writer_with_meta(conn_id).await {
-            let deadline = writer_send_deadline(self.route_runtime.me_route_blocking_send_timeout);
-            let writer_permit = match reserve_writer_bytes(
-                &current.byte_budget,
-                writer_byte_permits,
-                writer_reserved_bytes,
-                deadline,
-                &self.stats,
-            )
-            .await
-            {
-                Ok(permit) => permit,
-                Err(WriterByteReserveError::TimedOut) => {
-                    self.stats
-                        .increment_me_writer_pick_full_total(self.writer_pick_mode());
-                    return Err(ProxyError::Proxy(
-                        "ME writer byte budget full within blocking send timeout".into(),
-                    ));
-                }
-                Err(WriterByteReserveError::Closed) => {
-                    warn!(
-                        writer_id = current.writer_id,
-                        "ME writer byte budget closed"
-                    );
-                    self.remove_writer_and_close_clients(current.writer_id)
-                        .await;
-                    return self
-                        .send_proxy_req(
-                            conn_id,
-                            target_dc,
-                            client_addr,
-                            our_addr,
-                            payload.as_ref(),
-                            proto_flags,
-                            tag.as_ref().map(|tag| tag.as_slice()),
-                            Some(_permit),
-                        )
-                        .await;
-                }
-            };
-            let command = WriterCommand::ProxyReq(ProxyReqCommand {
-                conn_id,
-                client_addr,
-                our_addr: current_meta.our_addr,
-                proto_flags,
-                proxy_tag: tag,
-                payload,
-                _permit,
-                writer_permit,
-            });
-            match current.tx.try_send(command) {
-                Ok(()) => {
-                    self.note_hybrid_route_success();
-                    return Ok(());
-                }
-                Err(TrySendError::Full(cmd)) => {
-                    match reserve_writer_command_slot(&current.tx, deadline).await {
-                        Ok(permit) => {
-                            permit.send(cmd);
-                            self.note_hybrid_route_success();
-                            return Ok(());
-                        }
-                        Err(WriterCommandReserveError::TimedOut) => {
-                            self.stats
-                                .increment_me_writer_pick_full_total(self.writer_pick_mode());
-                            return Err(ProxyError::Proxy(
-                                "ME writer channel full within blocking send timeout".into(),
-                            ));
-                        }
-                        Err(WriterCommandReserveError::Closed) => {
-                            let Some((payload, _permit)) = proxy_req_payload_from_command(cmd)
-                            else {
-                                return Err(ProxyError::Proxy(
-                                    "ME writer rejected unexpected command type".into(),
-                                ));
-                            };
-                            warn!(writer_id = current.writer_id, "ME writer channel closed");
-                            self.remove_writer_and_close_clients(current.writer_id)
-                                .await;
-                            return self
-                                .send_proxy_req(
-                                    conn_id,
-                                    target_dc,
-                                    client_addr,
-                                    our_addr,
-                                    payload.as_ref(),
-                                    proto_flags,
-                                    tag.as_ref().map(|tag| tag.as_slice()),
-                                    Some(_permit),
-                                )
-                                .await;
-                        }
-                    }
-                }
-                Err(TrySendError::Closed(cmd)) => {
-                    let Some((payload, _permit)) = proxy_req_payload_from_command(cmd) else {
-                        return Err(ProxyError::Proxy(
-                            "ME writer rejected unexpected command type".into(),
-                        ));
-                    };
-                    warn!(writer_id = current.writer_id, "ME writer channel closed");
-                    self.remove_writer_and_close_clients(current.writer_id)
-                        .await;
-                    return self
-                        .send_proxy_req(
-                            conn_id,
-                            target_dc,
-                            client_addr,
-                            our_addr,
-                            payload.as_ref(),
-                            proto_flags,
-                            tag.as_ref().map(|tag| tag.as_slice()),
-                            Some(_permit),
-                        )
-                        .await;
-                }
-            }
-        }
-
-        self.send_proxy_req(
-            conn_id,
-            target_dc,
-            client_addr,
-            our_addr,
-            payload.as_ref(),
-            proto_flags,
-            tag.as_ref().map(|tag| tag.as_slice()),
-            Some(_permit),
-        )
-        .await
-    }
 }

@@ -86,7 +86,6 @@ impl MePool {
                 ));
             }
             let endpoint_snapshot = self.endpoint_snapshot.load();
-            let preferred = &endpoint_snapshot.preferred_endpoints_by_dc;
             let donor_count = writers
                 .iter()
                 .filter(|candidate| {
@@ -95,9 +94,8 @@ impl MePool {
                         && candidate.generation == expected_victim_role.generation
                         && WriterContour::from_u8(candidate.contour.load(Ordering::Acquire))
                             == WriterContour::Active
-                        && preferred
-                            .get(&candidate.writer_dc)
-                            .is_some_and(|endpoints| endpoints.contains(&candidate.addr))
+                        && endpoint_snapshot
+                            .contains_dc_endpoint(candidate.writer_dc, candidate.addr)
                         && (candidate.addr.is_ipv4()
                             == matches!(expected_victim_role.family, crate::network::IpFamily::V4))
                 })
@@ -115,9 +113,8 @@ impl MePool {
                         && candidate.generation == writer.generation
                         && WriterContour::from_u8(candidate.contour.load(Ordering::Acquire))
                             == WriterContour::Active
-                        && preferred
-                            .get(&candidate.writer_dc)
-                            .is_some_and(|endpoints| endpoints.contains(&candidate.addr))
+                        && endpoint_snapshot
+                            .contains_dc_endpoint(candidate.writer_dc, candidate.addr)
                         && (if candidate.addr.is_ipv4() {
                             crate::network::IpFamily::V4
                         } else {
@@ -223,11 +220,7 @@ mod tests {
                 WriterContour::Active,
                 WriterOpenIntent::Replacement,
                 writer_dc,
-                if addr.is_ipv4() {
-                    crate::network::IpFamily::V4
-                } else {
-                    crate::network::IpFamily::V6
-                },
+                addr,
             )
             .await
             .expect("replacement open must be admitted");

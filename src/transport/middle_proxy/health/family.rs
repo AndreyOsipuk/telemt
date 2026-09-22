@@ -26,6 +26,7 @@ pub(super) async fn check_family(
 
     let mut dc_endpoints = HashMap::<i32, Vec<SocketAddr>>::new();
     let endpoint_snapshot = pool.endpoint_snapshot.load();
+    let endpoint_revision = endpoint_snapshot.revision;
     let map_guard = match family {
         IpFamily::V4 => &endpoint_snapshot.map_v4,
         IpFamily::V6 => &endpoint_snapshot.map_v6,
@@ -253,6 +254,7 @@ pub(super) async fn check_family(
                 dc,
                 family,
                 generation: pool.current_generation(),
+                endpoint_revision,
                 contour: WriterContour::Active,
             })
             .await

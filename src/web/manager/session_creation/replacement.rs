@@ -57,6 +57,8 @@ impl WebProcessRuntime {
             return Err(ManagerError::Closed);
         };
         let Some(user_registration) = user_publication.take_registration() else {
+            // Rollback callbacks can retire active user owners and must not run under authority.
+            drop(user_publication);
             drop(state);
             self.cancel_replacement(bootstrap_hash, &replacement.old_session);
             return Err(ManagerError::Closed);
@@ -65,6 +67,8 @@ impl WebProcessRuntime {
             self.record_limit_hit();
             self.telemetry
                 .record_rejection(crate::web::telemetry::WebRejectionReason::SessionCapacity);
+            drop(user_registration);
+            drop(user_publication);
             drop(state);
             self.cancel_replacement(bootstrap_hash, &replacement.old_session);
             return Err(ManagerError::Limit);
@@ -99,6 +103,7 @@ impl WebProcessRuntime {
             Some(user_registration),
         );
         let Some(supersede) = replacement.old_session.prepare_carrier_supersede() else {
+            drop(user_publication);
             drop(state);
             self.cancel_replacement(bootstrap_hash, &replacement.old_session);
             session.close(crate::web::session::SessionCloseReason::Protocol);

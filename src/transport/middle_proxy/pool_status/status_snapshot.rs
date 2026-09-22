@@ -62,7 +62,7 @@ impl MePool {
 
         let active_generation = self.reinit.status.load().active_generation;
         let writers = self.writers.read().await.clone();
-        let mut live_writers_by_dc = HashMap::<i16, usize>::new();
+        let mut live_writers_by_group = HashMap::<(i16, bool), usize>::new();
         for writer in writers.iter() {
             if writer.draining.load(Ordering::Relaxed)
                 || writer.generation != active_generation
@@ -72,19 +72,26 @@ impl MePool {
                 continue;
             }
             if let Ok(dc) = i16::try_from(writer.writer_dc) {
-                *live_writers_by_dc.entry(dc).or_insert(0) += 1;
+                *live_writers_by_group
+                    .entry((dc, writer.addr.is_ipv4()))
+                    .or_insert(0) += 1;
             }
         }
 
         for (dc, endpoints) in endpoints_by_dc {
-            let endpoint_count = endpoints.len();
-            if endpoint_count == 0 {
-                return false;
-            }
-            let required = self.required_writers_for_dc_with_floor_mode(endpoint_count, false);
-            let alive = live_writers_by_dc.get(&dc).copied().unwrap_or(0);
-            if alive < required {
-                return false;
+            for (ipv4, endpoint_count) in endpoint_family_counts(&endpoints) {
+                if endpoint_count == 0 {
+                    continue;
+                }
+                let required =
+                    self.required_writers_for_dc_with_floor_mode(endpoint_count, false);
+                let alive = live_writers_by_group
+                    .get(&(dc, ipv4))
+                    .copied()
+                    .unwrap_or(0);
+                if alive < required {
+                    return false;
+                }
             }
         }
 
@@ -123,7 +130,14 @@ impl MePool {
 
         let required_writers = endpoints_by_dc
             .values()
-            .map(|endpoints| self.required_writers_for_dc_with_floor_mode(endpoints.len(), false))
+            .map(|endpoints| {
+                endpoint_family_counts(endpoints)
+                    .into_iter()
+                    .map(|(_, count)| {
+                        self.required_writers_for_dc_with_floor_mode(count, false)
+                    })
+                    .sum::<usize>()
+            })
             .sum();
 
         let idle_since = self.registry.writer_idle_since_snapshot().await;
@@ -227,39 +241,58 @@ impl MePool {
             .max(1);
         for (dc, endpoints) in endpoints_by_dc {
             let endpoint_count = endpoints.len();
+            let family_counts = endpoint_family_counts(&endpoints);
             let dc_available_endpoints = endpoints
                 .iter()
                 .filter(|endpoint| live_writers_by_dc_endpoint.contains_key(&(dc, **endpoint)))
                 .count();
-            let base_required = self.required_writers_for_dc(endpoint_count);
-            let dc_required_writers =
-                self.required_writers_for_dc_with_floor_mode(endpoint_count, false);
-            let floor_min = if endpoint_count <= 1 {
-                (self
-                    .floor_runtime
-                    .me_adaptive_floor_min_writers_single_endpoint
-                    .load(Ordering::Relaxed) as usize)
-                    .max(1)
-                    .min(base_required.max(1))
-            } else {
-                (self
-                    .floor_runtime
-                    .me_adaptive_floor_min_writers_multi_endpoint
-                    .load(Ordering::Relaxed) as usize)
-                    .max(1)
-                    .min(base_required.max(1))
-            };
-            let extra_per_core = if endpoint_count <= 1 {
-                self.floor_runtime
-                    .me_adaptive_floor_max_extra_writers_single_per_core
-                    .load(Ordering::Relaxed) as usize
-            } else {
-                self.floor_runtime
-                    .me_adaptive_floor_max_extra_writers_multi_per_core
-                    .load(Ordering::Relaxed) as usize
-            };
-            let floor_max =
-                base_required.saturating_add(adaptive_cpu_cores.saturating_mul(extra_per_core));
+            let base_required = family_counts
+                .iter()
+                .filter(|(_, count)| *count > 0)
+                .map(|(_, count)| self.required_writers_for_dc(*count))
+                .sum::<usize>();
+            let dc_required_writers = family_counts
+                .iter()
+                .filter(|(_, count)| *count > 0)
+                .map(|(_, count)| {
+                    self.required_writers_for_dc_with_floor_mode(*count, false)
+                })
+                .sum::<usize>();
+            let floor_min = family_counts
+                .iter()
+                .filter(|(_, count)| *count > 0)
+                .map(|(_, count)| {
+                    let family_base = self.required_writers_for_dc(*count);
+                    let configured = if *count <= 1 {
+                        self.floor_runtime
+                            .me_adaptive_floor_min_writers_single_endpoint
+                            .load(Ordering::Relaxed) as usize
+                    } else {
+                        self.floor_runtime
+                            .me_adaptive_floor_min_writers_multi_endpoint
+                            .load(Ordering::Relaxed) as usize
+                    };
+                    configured.max(1).min(family_base.max(1))
+                })
+                .sum::<usize>();
+            let floor_max = family_counts
+                .iter()
+                .filter(|(_, count)| *count > 0)
+                .map(|(_, count)| {
+                    let family_base = self.required_writers_for_dc(*count);
+                    let extra_per_core = if *count <= 1 {
+                        self.floor_runtime
+                            .me_adaptive_floor_max_extra_writers_single_per_core
+                            .load(Ordering::Relaxed) as usize
+                    } else {
+                        self.floor_runtime
+                            .me_adaptive_floor_max_extra_writers_multi_per_core
+                            .load(Ordering::Relaxed) as usize
+                    };
+                    family_base
+                        .saturating_add(adaptive_cpu_cores.saturating_mul(extra_per_core))
+                })
+                .sum::<usize>();
             let floor_capped =
                 matches!(floor_mode, MeFloorMode::Adaptive) && dc_required_writers < base_required;
             let dc_alive_writers = live_writers_by_dc.get(&dc).copied().unwrap_or(0);
@@ -321,4 +354,9 @@ impl MePool {
             dcs,
         }
     }
+}
+
+fn endpoint_family_counts(endpoints: &BTreeSet<SocketAddr>) -> [(bool, usize); 2] {
+    let ipv4 = endpoints.iter().filter(|endpoint| endpoint.is_ipv4()).count();
+    [(true, ipv4), (false, endpoints.len().saturating_sub(ipv4))]
 }

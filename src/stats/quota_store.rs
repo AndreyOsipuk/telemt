@@ -213,12 +213,7 @@ impl QuotaStore {
     }
 
     pub(crate) fn reset(&self, user: &str, now_epoch_secs: u64) -> UserQuotaSnapshot {
-        let state = self.current_or_legacy_handle(user);
-        state.counters.replace(0, now_epoch_secs);
-        UserQuotaSnapshot {
-            used_bytes: 0,
-            last_reset_epoch_secs: now_epoch_secs,
-        }
+        self.current_or_legacy_handle(user).reset(now_epoch_secs)
     }
 
     pub(crate) fn remove(&self, user: &str) {
@@ -359,6 +354,15 @@ impl UserQuotaHandle {
     ) -> Result<QuotaReservation, QuotaReserveError> {
         self.counters.try_reserve(bytes, limit)
     }
+
+    /// Resets only the quota incarnation captured by this handle.
+    pub(crate) fn reset(&self, now_epoch_secs: u64) -> UserQuotaSnapshot {
+        self.counters.replace(0, now_epoch_secs);
+        UserQuotaSnapshot {
+            used_bytes: 0,
+            last_reset_epoch_secs: now_epoch_secs,
+        }
+    }
 }
 
 impl QuotaReservation {
@@ -495,6 +499,22 @@ mod tests {
 
         assert_eq!(old.used(), 60);
         assert_eq!(current.used(), 40);
+    }
+
+    #[test]
+    fn captured_reset_handle_cannot_reset_a_new_incarnation() {
+        let store = QuotaStore::default();
+        store.activate_fresh("alice", 1);
+        let reset_target = store.handle_exact("alice", 1).unwrap();
+        reset_target.charge(40);
+        store.advance_preserving_usage("alice", 2);
+        let current = store.handle_exact("alice", 2).unwrap();
+        current.charge(20);
+
+        reset_target.reset(7);
+
+        assert_eq!(reset_target.used(), 0);
+        assert_eq!(current.used(), 60);
     }
 
     #[test]

@@ -1,15 +1,19 @@
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crate::config::{GeneralConfig, MeRouteNoWriterMode, MeSocksKdfPolicy, MeWriterPickMode};
 use crate::crypto::SecureRandom;
+use crate::network::IpFamily;
 use crate::network::probe::NetworkDecision;
 use crate::stats::Stats;
 
-use super::pool::MePool;
+use super::pool::{
+    MePool, ReinitStatusSnapshot, WriterContour, WriterRole,
+};
+use super::pool_writer_security_tests::make_pool_with_decision;
 
 async fn make_pool() -> Arc<MePool> {
     let general = GeneralConfig::default();
@@ -175,6 +179,91 @@ async fn refill_does_not_queue_a_removed_dc_target() {
     assert!(pool.refill_states.lock().is_empty());
     assert_eq!(pool.refill_running.load(Ordering::Acquire), 0);
     assert_eq!(pool.refill_pending.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn refill_accepts_enabled_nonpreferred_family_without_multipath() {
+    let pool = make_pool_with_decision(NetworkDecision {
+        ipv4_me: true,
+        ipv6_me: true,
+        effective_prefer: 4,
+        effective_multipath: false,
+        ..NetworkDecision::default()
+    })
+    .await;
+    let v4_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+    let v6_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 443);
+    pool.update_proxy_maps(
+        HashMap::from([(2, vec![(v4_addr.ip(), v4_addr.port())])]),
+        Some(HashMap::from([(
+            2,
+            vec![(v6_addr.ip(), v6_addr.port())],
+        )])),
+    )
+    .await;
+
+    pool.trigger_immediate_refill_for_dc(v6_addr, 2);
+
+    assert_eq!(pool.refill_states.lock().len(), 1);
+    assert_eq!(pool.refill_running.load(Ordering::Acquire), 1);
+    pool.begin_shutdown();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while pool.refill_running.load(Ordering::Acquire) != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(pool.refill_states.lock().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stale_endpoint_revision_cancels_queued_warm_refill_before_connect() {
+    let pool = make_pool().await;
+    let old_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 31, 0, 30)), 443);
+    let new_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 31, 0, 31)), 443);
+    pool.update_proxy_maps(
+        HashMap::from([(2, vec![(old_addr.ip(), old_addr.port())])]),
+        None,
+    )
+    .await;
+    let old_revision = pool.endpoint_snapshot.load().revision;
+    let pending_generation = pool.current_generation().saturating_add(1);
+    pool.reinit.status.store(Arc::new(ReinitStatusSnapshot {
+        active_generation: pool.current_generation(),
+        warm_generations: vec![pending_generation],
+        pending_hardswap_generation: pending_generation,
+        pending_hardswap_started_at_epoch_secs: 1,
+        pending_hardswap_map_hash: 1,
+        pending_hardswap_endpoint_revision: old_revision,
+        inflight: 1,
+    }));
+    pool.trigger_immediate_refill_for_role(
+        old_addr,
+        WriterRole {
+            dc: 2,
+            family: IpFamily::V4,
+            generation: pending_generation,
+            contour: WriterContour::Warm,
+        },
+    );
+    assert_eq!(pool.refill_states.lock().len(), 1);
+
+    pool.update_proxy_maps(
+        HashMap::from([(2, vec![(new_addr.ip(), new_addr.port())])]),
+        None,
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while pool.refill_running.load(Ordering::Acquire) != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    assert!(pool.refill_states.lock().is_empty());
+    assert_eq!(pool.stats.get_me_reconnect_attempts(), 0);
 }
 
 #[tokio::test(flavor = "current_thread")]

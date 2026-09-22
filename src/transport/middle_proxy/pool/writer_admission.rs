@@ -65,7 +65,7 @@ impl MePool {
     pub(in crate::transport::middle_proxy) async fn active_coverage_required_total(&self) -> usize {
         let now_epoch_secs = Self::now_epoch_secs();
         let mut required_total = 0usize;
-        let endpoint_snapshot = self.endpoint_snapshot.load();
+        let endpoint_snapshot = self.endpoint_snapshot.load_full();
 
         if self.family_enabled_for_drain_coverage(IpFamily::V4, now_epoch_secs) {
             for addrs in endpoint_snapshot.map_v4.values() {
@@ -100,10 +100,20 @@ impl MePool {
         contour: WriterContour,
         intent: WriterOpenIntent,
         writer_dc: i32,
-        family: IpFamily,
+        target_addr: SocketAddr,
     ) -> bool {
         if intent == WriterOpenIntent::Replacement {
             return true;
+        }
+        let family = if target_addr.is_ipv4() {
+            IpFamily::V4
+        } else {
+            IpFamily::V6
+        };
+        let endpoint_snapshot = self.endpoint_snapshot.load_full();
+        let endpoints = endpoint_snapshot.endpoints_for_dc_family(writer_dc, family);
+        if !endpoint_snapshot.contains_dc_endpoint(writer_dc, target_addr) {
+            return false;
         }
         let (active_writers, warm_writers, _) = self.non_draining_writer_counts_by_contour().await;
         let live = match contour {
@@ -123,13 +133,7 @@ impl MePool {
             return false;
         }
 
-        let endpoint_snapshot = self.endpoint_snapshot.load();
-        let endpoint_count = match family {
-            IpFamily::V4 => endpoint_snapshot.map_v4.get(&writer_dc),
-            IpFamily::V6 => endpoint_snapshot.map_v6.get(&writer_dc),
-        }
-        .map(Vec::len)
-        .unwrap_or(0);
+        let endpoint_count = endpoints.len();
         if endpoint_count == 0 {
             return false;
         }
@@ -150,6 +154,7 @@ impl MePool {
                         && writer.generation == generation
                         && WriterContour::from_u8(writer.contour.load(Ordering::Relaxed)) == contour
                         && writer.addr.is_ipv4() == (family == IpFamily::V4)
+                        && endpoint_snapshot.contains_dc_endpoint(writer_dc, writer.addr)
                 })
                 .count()
         };
@@ -157,7 +162,7 @@ impl MePool {
             return true;
         }
 
-        live < self.active_coverage_required_total().await
+        false
     }
 
     /// Reserves bounded transient capacity for a writer open attempt.
@@ -166,7 +171,7 @@ impl MePool {
         contour: WriterContour,
         intent: WriterOpenIntent,
         writer_dc: i32,
-        family: IpFamily,
+        target_addr: SocketAddr,
     ) -> Option<WriterOpenReservation<'_>> {
         let counter = match contour {
             WriterContour::Active => &self.writer_connect_active_reserved,
@@ -221,7 +226,7 @@ impl MePool {
 
         loop {
             if !self
-                .can_open_writer_for_contour(contour, intent, writer_dc, family)
+                .can_open_writer_for_contour(contour, intent, writer_dc, target_addr)
                 .await
             {
                 return None;

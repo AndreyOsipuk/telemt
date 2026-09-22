@@ -25,6 +25,8 @@ mod coordination;
 mod reconcile;
 
 #[cfg(test)]
+mod dual_family_tests;
+#[cfg(test)]
 mod tests;
 const ME_HARDSWAP_PENDING_TTL_SECS: u64 = 1800;
 
@@ -115,6 +117,8 @@ fn publish_reinit_state(reinit: &ReinitCore, state: &ReinitCoordinatorState) {
         pending_hardswap_started_at_epoch_secs: pending
             .map_or(0, |value| value.started_at_epoch_secs),
         pending_hardswap_map_hash: pending.map_or(0, |value| value.map_hash),
+        pending_hardswap_endpoint_revision: pending
+            .map_or(0, |value| value.endpoint_revision),
         inflight: state.attempts.len(),
     };
     reinit

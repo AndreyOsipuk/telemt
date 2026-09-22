@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 
@@ -7,6 +8,7 @@ use super::{
     IDLE_WRITER_PENALTY_HIGH_SECS, IDLE_WRITER_PENALTY_MID_SECS, PICK_PENALTY_DEGRADED,
     PICK_PENALTY_DRAINING, PICK_PENALTY_STALE, PICK_PENALTY_WARM,
 };
+use crate::config::MeWriterPickMode;
 
 impl MePool {
     pub(super) async fn candidate_indices_for_dc(
@@ -181,6 +183,96 @@ impl MePool {
             if seen.insert(idx) {
                 ordered.push(idx);
             }
+        }
+        ordered
+    }
+
+    pub(super) async fn ordered_candidate_indices(
+        &self,
+        mut candidate_indices: Vec<usize>,
+        writers_snapshot: &[super::super::pool::MeWriter],
+        pick_mode: MeWriterPickMode,
+    ) -> Vec<usize> {
+        let pick_sample_size = self.writer_pick_sample_size();
+        let writer_ids: Vec<u64> = candidate_indices
+            .iter()
+            .map(|idx| writers_snapshot[*idx].id)
+            .collect();
+        let writer_idle_since = self
+            .registry
+            .writer_idle_since_for_writer_ids(&writer_ids)
+            .await;
+        let now_epoch_secs = Self::now_epoch_secs();
+        let start = self.rr.fetch_add(1, Ordering::Relaxed) as usize % candidate_indices.len();
+        if pick_mode == MeWriterPickMode::P2c {
+            return self.p2c_ordered_candidate_indices(
+                &candidate_indices,
+                writers_snapshot,
+                &writer_idle_since,
+                now_epoch_secs,
+                start,
+                pick_sample_size,
+            );
+        }
+
+        if self
+            .writer_selection_policy
+            .me_deterministic_writer_sort
+            .load(Ordering::Relaxed)
+        {
+            candidate_indices.sort_by(|lhs, rhs| {
+                let left = &writers_snapshot[*lhs];
+                let right = &writers_snapshot[*rhs];
+                let left_key = (
+                    self.writer_contour_rank_for_selection(left),
+                    (left.generation < self.current_generation()) as usize,
+                    left.degraded.load(Ordering::Relaxed) as usize,
+                    self.writer_idle_rank_for_selection(
+                        left,
+                        &writer_idle_since,
+                        now_epoch_secs,
+                    ),
+                    Reverse(left.tx.capacity()),
+                    left.addr,
+                    left.id,
+                );
+                let right_key = (
+                    self.writer_contour_rank_for_selection(right),
+                    (right.generation < self.current_generation()) as usize,
+                    right.degraded.load(Ordering::Relaxed) as usize,
+                    self.writer_idle_rank_for_selection(
+                        right,
+                        &writer_idle_since,
+                        now_epoch_secs,
+                    ),
+                    Reverse(right.tx.capacity()),
+                    right.addr,
+                    right.id,
+                );
+                left_key.cmp(&right_key)
+            });
+        } else {
+            candidate_indices.sort_by_key(|idx| {
+                let writer = &writers_snapshot[*idx];
+                let degraded = writer.degraded.load(Ordering::Relaxed);
+                let stale = (writer.generation < self.current_generation()) as usize;
+                (
+                    self.writer_contour_rank_for_selection(writer),
+                    stale,
+                    degraded as usize,
+                    self.writer_idle_rank_for_selection(
+                        writer,
+                        &writer_idle_since,
+                        now_epoch_secs,
+                    ),
+                    Reverse(writer.tx.capacity()),
+                )
+            });
+        }
+
+        let mut ordered = Vec::<usize>::with_capacity(candidate_indices.len());
+        for offset in 0..candidate_indices.len() {
+            ordered.push(candidate_indices[(start + offset) % candidate_indices.len()]);
         }
         ordered
     }

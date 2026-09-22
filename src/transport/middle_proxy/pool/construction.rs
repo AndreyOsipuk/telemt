@@ -143,6 +143,7 @@ impl MePool {
             pending_hardswap_generation: 0,
             pending_hardswap_started_at_epoch_secs: 0,
             pending_hardswap_map_hash: 0,
+            pending_hardswap_endpoint_revision: 0,
             inflight: 0,
         };
         stats.set_me_writer_byte_budget_limit_bytes(me_writer_byte_budget_bytes);

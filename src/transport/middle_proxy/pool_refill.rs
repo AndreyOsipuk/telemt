@@ -26,6 +26,13 @@ enum RefillOutcome {
     Obsolete,
 }
 
+fn refill_open_intent(contour: WriterContour) -> WriterOpenIntent {
+    match contour {
+        WriterContour::Active | WriterContour::Warm => WriterOpenIntent::Coverage,
+        WriterContour::Draining => WriterOpenIntent::Normal,
+    }
+}
+
 struct RefillRunGuard {
     pool: Arc<MePool>,
     key: RefillTargetKey,
@@ -293,18 +300,15 @@ impl MePool {
                 && target.generation == status.pending_hardswap_generation,
             WriterContour::Draining => false,
         };
+        let pending_revision_matches = target.contour != WriterContour::Warm
+            || target.endpoint_revision == status.pending_hardswap_endpoint_revision;
+        let endpoint_snapshot = self.endpoint_snapshot.load();
         role_is_authoritative
-            && self
-                .endpoint_snapshot
-                .load()
-                .preferred_endpoints_by_dc
-                .get(&target.dc)
-                .is_some_and(|endpoints| {
-                    endpoints.iter().any(|endpoint| match target.family {
-                        IpFamily::V4 => endpoint.is_ipv4(),
-                        IpFamily::V6 => endpoint.is_ipv6(),
-                    })
-                })
+            && pending_revision_matches
+            && target.endpoint_revision == endpoint_snapshot.revision
+            && !endpoint_snapshot
+                .endpoints_for_dc_family(target.dc, target.family)
+                .is_empty()
     }
 
     async fn refill_writer_after_loss(
@@ -315,11 +319,7 @@ impl MePool {
         if !self.refill_target_is_authoritative(target) {
             return RefillOutcome::Obsolete;
         }
-        let open_intent = if target.contour == WriterContour::Active {
-            WriterOpenIntent::Coverage
-        } else {
-            WriterOpenIntent::Normal
-        };
+        let open_intent = refill_open_intent(target.contour);
         let fast_retries = self.reconnect_runtime.me_reconnect_fast_retry_count.max(1);
         let mut total_attempts = 0u32;
         let same_endpoint_quarantined = self.is_endpoint_quarantined(addr).await;
@@ -455,6 +455,7 @@ impl MePool {
             dc: role.dc,
             family: role.family,
             generation: role.generation,
+            endpoint_revision: self.endpoint_snapshot.load().revision,
             contour: role.contour,
         };
         if !self.refill_target_is_authoritative(target) {
@@ -515,5 +516,18 @@ impl MePool {
                     current_addr = next_addr;
                 }
             });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn warm_refill_preserves_required_floor_coverage() {
+        assert_eq!(
+            refill_open_intent(WriterContour::Warm),
+            WriterOpenIntent::Coverage
+        );
     }
 }

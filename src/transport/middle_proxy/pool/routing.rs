@@ -1,5 +1,37 @@
 use super::*;
 
+impl EndpointSnapshot {
+    /// Returns authoritative configured endpoints for one exact DC and address family.
+    pub(in crate::transport::middle_proxy) fn endpoints_for_dc_family(
+        &self,
+        dc: i32,
+        family: IpFamily,
+    ) -> &[(IpAddr, u16)] {
+        match family {
+            IpFamily::V4 => self.map_v4.get(&dc),
+            IpFamily::V6 => self.map_v6.get(&dc),
+        }
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    }
+
+    /// Checks control-plane membership without applying data-plane family preference.
+    pub(in crate::transport::middle_proxy) fn contains_dc_endpoint(
+        &self,
+        dc: i32,
+        endpoint: SocketAddr,
+    ) -> bool {
+        let family = if endpoint.is_ipv4() {
+            IpFamily::V4
+        } else {
+            IpFamily::V6
+        };
+        self.endpoints_for_dc_family(dc, family)
+            .iter()
+            .any(|(ip, port)| *ip == endpoint.ip() && *port == endpoint.port())
+    }
+}
+
 impl MePool {
     pub(in crate::transport::middle_proxy) fn single_endpoint_outage_mode_enabled(&self) -> bool {
         self.single_endpoint_runtime

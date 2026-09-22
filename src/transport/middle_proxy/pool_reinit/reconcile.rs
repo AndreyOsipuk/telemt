@@ -1,10 +1,29 @@
 use super::*;
 
 impl MePool {
+    /// Checks the exact pending-generation tuple before starting more warmup work.
+    pub(super) fn hardswap_warmup_is_authoritative(
+        &self,
+        generation: u64,
+        map_hash: u64,
+        endpoint_revision: u64,
+    ) -> bool {
+        let state = self.reinit.coordinator.lock();
+        state.desired_map_hash == map_hash
+            && state.endpoint_revision == endpoint_revision
+            && state.pending.is_some_and(|pending| {
+                pending.generation == generation
+                    && pending.map_hash == map_hash
+                    && pending.endpoint_revision == endpoint_revision
+            })
+    }
+
     async fn warmup_generation_for_all_dcs(
         self: &Arc<Self>,
         rng: &SecureRandom,
         generation: u64,
+        map_hash: u64,
+        endpoint_revision: u64,
         desired_by_dc: &HashMap<i32, HashSet<SocketAddr>>,
     ) {
         let extra_passes = self
@@ -15,6 +34,13 @@ impl MePool {
         let total_passes = 1 + extra_passes;
 
         for (dc, endpoints) in desired_by_dc {
+            if !self.hardswap_warmup_is_authoritative(
+                generation,
+                map_hash,
+                endpoint_revision,
+            ) {
+                return;
+            }
             for family in [IpFamily::V4, IpFamily::V6] {
                 let family_endpoints = endpoints
                     .iter()
@@ -53,8 +79,22 @@ impl MePool {
                     );
 
                     for attempt_idx in 0..missing {
+                        if !self.hardswap_warmup_is_authoritative(
+                            generation,
+                            map_hash,
+                            endpoint_revision,
+                        ) {
+                            return;
+                        }
                         let delay_ms = self.hardswap_warmup_connect_delay_ms();
                         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        if !self.hardswap_warmup_is_authoritative(
+                            generation,
+                            map_hash,
+                            endpoint_revision,
+                        ) {
+                            return;
+                        }
 
                         let connected = self
                             .connect_endpoints_round_robin_with_generation_contour(
@@ -100,6 +140,13 @@ impl MePool {
                     }
 
                     if pass_idx + 1 < total_passes {
+                        if !self.hardswap_warmup_is_authoritative(
+                            generation,
+                            map_hash,
+                            endpoint_revision,
+                        ) {
+                            return;
+                        }
                         let backoff_ms = self.hardswap_warmup_backoff_ms(pass_idx);
                         debug!(
                             dc = *dc,
@@ -198,8 +245,14 @@ impl MePool {
         }
 
         if hardswap {
-            self.warmup_generation_for_all_dcs(rng, generation, &desired_by_dc)
-                .await;
+            self.warmup_generation_for_all_dcs(
+                rng,
+                generation,
+                desired_map_hash,
+                endpoint_snapshot.revision,
+                &desired_by_dc,
+            )
+            .await;
         } else {
             self.reconcile_connections(rng).await;
         }

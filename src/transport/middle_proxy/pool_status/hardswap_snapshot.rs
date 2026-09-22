@@ -35,11 +35,15 @@ impl MePool {
         &self,
         reinit: &ReinitStatusSnapshot,
     ) -> MeApiHardswapSnapshot {
-        let desired_by_dc = self.desired_dc_endpoints().await;
+        let endpoint_snapshot = self.endpoint_snapshot.load_full();
+        let desired_by_dc = self.desired_dc_endpoints_from_snapshot(&endpoint_snapshot);
         let desired_hash = Self::desired_map_hash(&desired_by_dc);
         let writers = self.writers.read().await;
         let pending_generation = reinit.pending_hardswap_generation;
         let pending = pending_generation != 0;
+        let pending_map_current = pending
+            && reinit.pending_hardswap_map_hash == desired_hash
+            && reinit.pending_hardswap_endpoint_revision == endpoint_snapshot.revision;
         let mut pending_writers_current = 0usize;
         let mut pending_writer_addrs = Vec::<(i32, SocketAddr)>::new();
         let mut orphan_warm_writers_current = 0usize;
@@ -49,10 +53,12 @@ impl MePool {
                 continue;
             }
             let contour = WriterContour::from_u8(writer.contour.load(Ordering::Acquire));
-            if contour == WriterContour::Warm && writer.generation != pending_generation {
+            if contour == WriterContour::Warm
+                && (!pending_map_current || writer.generation != pending_generation)
+            {
                 orphan_warm_writers_current = orphan_warm_writers_current.saturating_add(1);
             }
-            if pending
+            if pending_map_current
                 && writer.generation == pending_generation
                 && contour == WriterContour::Warm
                 && desired_by_dc
@@ -64,7 +70,7 @@ impl MePool {
             }
         }
 
-        let pending_coverage = pending
+        let pending_coverage = pending_map_current
             .then(|| self.hardswap_coverage(&desired_by_dc, &pending_writer_addrs));
         let pending_writer_deficit = pending_coverage
             .as_ref()
@@ -85,8 +91,7 @@ impl MePool {
             pending_writers_current,
             pending_writer_deficit,
             pending_missing_dc_groups,
-            pending_map_current: pending
-                .then_some(reinit.pending_hardswap_map_hash == desired_hash),
+            pending_map_current: pending.then_some(pending_map_current),
             orphan_warm_writers_current,
             replacement_preparing_current,
             replacement_retiring_current,

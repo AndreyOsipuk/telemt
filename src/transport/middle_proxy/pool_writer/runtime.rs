@@ -96,11 +96,7 @@ impl MePool {
                 contour,
                 intent,
                 writer_dc,
-                if addr.is_ipv4() {
-                    crate::network::IpFamily::V4
-                } else {
-                    crate::network::IpFamily::V6
-                },
+                addr,
             )
             .await
         else {

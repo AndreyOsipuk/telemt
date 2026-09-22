@@ -14,7 +14,6 @@ use crate::config::{WebCarrier, WebLimitsConfig};
 use crate::maestro::generation::RuntimeGeneration;
 use crate::web::telemetry::{WebRejectionReason, WebTelemetry};
 use crate::web::trace::WebTraceStore;
-
 // Credential maps, quotas, and token-bucket helpers remain private to the manager.
 mod state;
 // Carrier attempt metadata remains explicit and independent from HTTP parsing.

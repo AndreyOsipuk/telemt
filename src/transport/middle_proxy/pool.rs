@@ -37,6 +37,8 @@ pub(super) struct RefillTargetKey {
     pub family: IpFamily,
     /// Generation that retains publication authority.
     pub generation: u64,
+    /// Endpoint snapshot revision targeted by this refill producer.
+    pub endpoint_revision: u64,
     /// Lifecycle contour that the replacement must preserve.
     pub contour: WriterContour,
 }
@@ -310,6 +312,7 @@ pub(super) struct ReinitStatusSnapshot {
     pub(super) pending_hardswap_generation: u64,
     pub(super) pending_hardswap_started_at_epoch_secs: u64,
     pub(super) pending_hardswap_map_hash: u64,
+    pub(super) pending_hardswap_endpoint_revision: u64,
     pub(super) inflight: usize,
 }
 

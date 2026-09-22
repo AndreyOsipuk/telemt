@@ -15,6 +15,9 @@ mod runtime_snapshot;
 // Hardswap ownership, coverage, and writer-replacement lifecycle state.
 mod hardswap_snapshot;
 pub(crate) use hardswap_snapshot::MeApiHardswapSnapshot;
+#[cfg(test)]
+#[path = "pool_status/tests.rs"]
+mod status_invariant_tests;
 #[derive(Clone, Debug)]
 pub(crate) struct MeApiWriterStatusSnapshot {
     pub writer_id: u64,

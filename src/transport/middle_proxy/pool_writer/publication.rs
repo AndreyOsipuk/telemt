@@ -43,9 +43,7 @@ impl MePool {
         let endpoint_is_current = self
             .endpoint_snapshot
             .load()
-            .preferred_endpoints_by_dc
-            .get(&writer.writer_dc)
-            .is_some_and(|endpoints| endpoints.contains(&writer.addr));
+            .contains_dc_endpoint(writer.writer_dc, writer.addr);
         if !endpoint_is_current {
             return Err(ProxyError::Proxy(
                 "ME writer target changed before publication".into(),
@@ -95,21 +93,29 @@ impl MePool {
             return Ok(());
         }
         let endpoint_snapshot = self.endpoint_snapshot.load();
-        let preferred = &endpoint_snapshot.preferred_endpoints_by_dc;
-        let Some(endpoints) = preferred.get(&writer.writer_dc) else {
+        if !endpoint_snapshot.contains_dc_endpoint(writer.writer_dc, writer.addr) {
             return Err(ProxyError::Proxy(
                 "ME writer target changed before publication".into(),
             ));
-        };
-        let required = match contour {
-            WriterContour::Active | WriterContour::Warm => self.required_writers_for_dc(
-                endpoints
-                    .iter()
-                    .filter(|endpoint| endpoint.is_ipv4() == writer.addr.is_ipv4())
-                    .count(),
-            ),
-            WriterContour::Draining => 0,
-        };
+        }
+        if contour == WriterContour::Active && intent == WriterOpenIntent::Normal {
+            let current = writers
+                .iter()
+                .filter(|candidate| {
+                    !candidate.draining.load(Ordering::Acquire)
+                        && WriterContour::from_u8(candidate.contour.load(Ordering::Acquire))
+                            == WriterContour::Active
+                })
+                .count();
+            if current >= self.adaptive_floor_active_cap_configured_total() {
+                return Err(ProxyError::Proxy(
+                    "ME active writer cap was reached before publication".into(),
+                ));
+            }
+            return Ok(());
+        }
+        let endpoints = endpoint_snapshot.endpoints_for_dc_family(writer.writer_dc, family);
+        let required = self.required_writers_for_dc(endpoints.len());
         let current = writers
             .iter()
             .filter(|candidate| {
@@ -119,7 +125,8 @@ impl MePool {
                     && WriterContour::from_u8(candidate.contour.load(Ordering::Acquire))
                         == contour
                     && candidate.addr.is_ipv4() == writer.addr.is_ipv4()
-                    && endpoints.contains(&candidate.addr)
+                    && endpoint_snapshot
+                        .contains_dc_endpoint(candidate.writer_dc, candidate.addr)
             })
             .count();
         if current >= required {

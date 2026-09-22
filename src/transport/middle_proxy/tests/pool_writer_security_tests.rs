@@ -17,6 +17,15 @@ use crate::stats::Stats;
 
 /// Builds an isolated ME pool for writer-state tests.
 pub(super) async fn make_pool() -> Arc<MePool> {
+    make_pool_with_decision(NetworkDecision {
+        ipv4_me: true,
+        ..NetworkDecision::default()
+    })
+    .await
+}
+
+/// Builds an isolated ME pool with an explicit network-family policy.
+pub(super) async fn make_pool_with_decision(decision: NetworkDecision) -> Arc<MePool> {
     let general = GeneralConfig::default();
 
     MePool::new(
@@ -35,10 +44,7 @@ pub(super) async fn make_pool() -> Arc<MePool> {
         HashMap::new(),
         HashMap::new(),
         None,
-        NetworkDecision {
-            ipv4_me: true,
-            ..NetworkDecision::default()
-        },
+        decision,
         None,
         Arc::new(SecureRandom::new()),
         Arc::new(Stats::new()),

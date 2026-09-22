@@ -388,7 +388,7 @@ impl MePool {
     }
 
     /// Projects desired per-DC endpoint sets from one immutable endpoint revision.
-    pub(super) fn desired_dc_endpoints_from_snapshot(
+    pub(in crate::transport::middle_proxy) fn desired_dc_endpoints_from_snapshot(
         &self,
         endpoint_snapshot: &EndpointSnapshot,
     ) -> HashMap<i32, HashSet<SocketAddr>> {
@@ -424,7 +424,6 @@ impl MePool {
         let active_generation = state.active_generation;
         let pending_generation = state.pending.map(|pending| pending.generation);
         let endpoint_snapshot = self.endpoint_snapshot.load();
-        let preferred = &endpoint_snapshot.preferred_endpoints_by_dc;
         let now_epoch_secs = Self::now_epoch_secs();
         let mut changed = 0usize;
 
@@ -440,9 +439,7 @@ impl MePool {
             };
             let endpoint_is_current = self
                 .family_enabled_for_drain_coverage(family, now_epoch_secs)
-                && preferred
-                    .get(&writer.writer_dc)
-                    .is_some_and(|endpoints| endpoints.contains(&writer.addr));
+                && endpoint_snapshot.contains_dc_endpoint(writer.writer_dc, writer.addr);
             if contour == WriterContour::Warm
                 && writer.generation == active_generation
                 && endpoint_is_current

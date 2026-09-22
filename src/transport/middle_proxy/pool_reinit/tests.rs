@@ -26,7 +26,7 @@ fn addr_v6(segment: u16, port: u16) -> SocketAddr {
     )
 }
 
-async fn insert_writer(
+pub(super) async fn insert_writer(
     pool: &Arc<MePool>,
     writer_id: u64,
     writer_dc: i32,
@@ -63,7 +63,7 @@ async fn insert_writer(
     writer
 }
 
-async fn insert_writer_floor(
+pub(super) async fn insert_writer_floor(
     pool: &Arc<MePool>,
     first_writer_id: u64,
     writer_dc: i32,
@@ -489,7 +489,7 @@ async fn generation_role_reconciliation_promotes_active_warm_and_drains_orphans(
         None,
     )
     .await;
-    let desired_by_dc = HashMap::from([(1, HashSet::from([endpoint]))]);
+    let desired_by_dc = pool.desired_dc_endpoints().await;
     let map_hash = MePool::desired_map_hash(&desired_by_dc);
     let endpoint_revision = pool.endpoint_snapshot.load().revision;
     let reservation = pool

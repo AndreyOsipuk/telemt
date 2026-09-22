@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -8,8 +8,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::codec::WriterCommand;
 use super::pool::{MeWriter, WriterContour, WriterOpenIntent};
-use super::pool_writer_security_tests::make_pool;
+use super::pool_writer_security_tests::{make_pool, make_pool_with_decision};
 use super::registry::ConnMeta;
+use crate::network::probe::NetworkDecision;
 
 fn unregistered_writer(
     pool: &Arc<super::pool::MePool>,
@@ -125,6 +126,225 @@ async fn normal_active_publication_cannot_race_past_the_family_floor() {
             &writers,
         )
         .is_err()
+    );
+}
+
+#[tokio::test]
+async fn stale_same_family_writers_do_not_satisfy_current_endpoint_coverage() {
+    let pool = make_pool().await;
+    let current_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+    let stale_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), 443);
+    pool.update_proxy_maps(
+        std::collections::HashMap::from([(
+            2,
+            vec![(current_addr.ip(), current_addr.port())],
+        )]),
+        None,
+    )
+    .await;
+    pool.floor_runtime
+        .me_adaptive_floor_cpu_cores_override
+        .store(1, Ordering::Relaxed);
+    pool.floor_runtime
+        .me_adaptive_floor_max_active_writers_per_core
+        .store(1, Ordering::Relaxed);
+    pool.floor_runtime
+        .me_adaptive_floor_max_active_writers_global
+        .store(1, Ordering::Relaxed);
+    let generation = pool.current_generation();
+    let required = pool.required_writers_for_dc_with_floor_mode(1, false);
+    pool.writers
+        .write()
+        .await
+        .extend((1..=required.saturating_mul(2)).map(|writer_id| {
+            unregistered_writer(
+                &pool,
+                writer_id as u64,
+                stale_addr,
+                generation,
+                WriterContour::Active,
+            )
+        }));
+
+    assert!(
+        pool.can_open_writer_for_contour(
+            WriterContour::Active,
+            WriterOpenIntent::Coverage,
+            2,
+            current_addr,
+        )
+        .await
+    );
+    assert!(
+        !pool
+            .can_open_writer_for_contour(
+                WriterContour::Active,
+                WriterOpenIntent::Coverage,
+                2,
+                stale_addr,
+            )
+            .await
+    );
+}
+
+#[tokio::test]
+async fn covered_group_does_not_consume_another_group_coverage_slot() {
+    let pool = make_pool().await;
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+    pool.update_proxy_maps(
+        std::collections::HashMap::from([(2, vec![(addr.ip(), addr.port())])]),
+        None,
+    )
+    .await;
+    pool.floor_runtime
+        .me_adaptive_floor_cpu_cores_override
+        .store(1, Ordering::Relaxed);
+    pool.floor_runtime
+        .me_adaptive_floor_max_active_writers_per_core
+        .store(1, Ordering::Relaxed);
+    pool.floor_runtime
+        .me_adaptive_floor_max_active_writers_global
+        .store(1, Ordering::Relaxed);
+    let generation = pool.current_generation();
+    let required = pool.required_writers_for_dc_with_floor_mode(1, false);
+    pool.writers
+        .write()
+        .await
+        .extend((1..=required).map(|writer_id| {
+            unregistered_writer(
+                &pool,
+                writer_id as u64,
+                addr,
+                generation,
+                WriterContour::Active,
+            )
+        }));
+
+    assert!(
+        !pool
+            .can_open_writer_for_contour(
+                WriterContour::Active,
+                WriterOpenIntent::Coverage,
+                2,
+                addr,
+            )
+            .await
+    );
+}
+
+#[tokio::test]
+async fn normal_active_publication_allows_adaptive_growth_above_family_floor() {
+    let pool = make_pool().await;
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+    pool.update_proxy_maps(
+        std::collections::HashMap::from([(2, vec![(addr.ip(), addr.port())])]),
+        None,
+    )
+    .await;
+    let generation = pool.current_generation();
+    let writers = (1..=3)
+        .map(|writer_id| {
+            unregistered_writer(
+                &pool,
+                writer_id,
+                addr,
+                generation,
+                WriterContour::Active,
+            )
+        })
+        .collect::<Vec<_>>();
+    let candidate = unregistered_writer(&pool, 4, addr, generation, WriterContour::Active);
+
+    assert!(
+        pool.authorize_writer_publication_capacity(
+            &candidate,
+            WriterContour::Active,
+            WriterOpenIntent::Normal,
+            &writers,
+        )
+        .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn normal_active_publication_rejects_configured_contour_cap() {
+    let pool = make_pool().await;
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+    pool.update_proxy_maps(
+        std::collections::HashMap::from([(2, vec![(addr.ip(), addr.port())])]),
+        None,
+    )
+    .await;
+    pool.floor_runtime
+        .me_adaptive_floor_cpu_cores_override
+        .store(1, Ordering::Relaxed);
+    pool.floor_runtime
+        .me_adaptive_floor_max_active_writers_per_core
+        .store(3, Ordering::Relaxed);
+    pool.floor_runtime
+        .me_adaptive_floor_max_active_writers_global
+        .store(3, Ordering::Relaxed);
+    let generation = pool.current_generation();
+    let writers = (1..=3)
+        .map(|writer_id| {
+            unregistered_writer(
+                &pool,
+                writer_id,
+                addr,
+                generation,
+                WriterContour::Active,
+            )
+        })
+        .collect::<Vec<_>>();
+    let candidate = unregistered_writer(&pool, 4, addr, generation, WriterContour::Active);
+
+    assert!(
+        pool.authorize_writer_publication_capacity(
+            &candidate,
+            WriterContour::Active,
+            WriterOpenIntent::Normal,
+            &writers,
+        )
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn nonpreferred_enabled_family_retains_writer_publication_authority() {
+    let pool = make_pool_with_decision(NetworkDecision {
+        ipv4_me: true,
+        ipv6_me: true,
+        effective_prefer: 4,
+        effective_multipath: false,
+        ..NetworkDecision::default()
+    })
+    .await;
+    let v4_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+    let v6_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 443);
+    pool.update_proxy_maps(
+        std::collections::HashMap::from([(2, vec![(v4_addr.ip(), v4_addr.port())])]),
+        Some(std::collections::HashMap::from([(
+            2,
+            vec![(v6_addr.ip(), v6_addr.port())],
+        )])),
+    )
+    .await;
+    let candidate = unregistered_writer(
+        &pool,
+        1,
+        v6_addr,
+        pool.current_generation(),
+        WriterContour::Active,
+    );
+
+    assert!(
+        pool.authorize_writer_publication_capacity(
+            &candidate,
+            WriterContour::Active,
+            WriterOpenIntent::Coverage,
+            &[],
+        )
+        .is_ok()
     );
 }
 
