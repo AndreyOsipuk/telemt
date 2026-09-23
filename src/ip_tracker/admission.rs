@@ -2,47 +2,84 @@ use super::*;
 
 impl UserIpTracker {
     pub async fn set_limit_policy(&self, mode: UserMaxUniqueIpsMode, window_secs: u64) {
-        self.limit_policy.rcu(|current| {
-            Arc::new(UserIpLimitPolicy {
-                mode,
-                window_secs: window_secs.max(1),
-                ..(**current).clone()
-            })
+        let _policy_update = self.policy_update.lock().unwrap_or_else(|poisoned| {
+            self.policy_update.clear_poison();
+            poisoned.into_inner()
         });
+        let current = self.limit_policy.load_full();
+        self.limit_policy.store(Arc::new(UserIpLimitPolicy {
+            mode,
+            window_secs: window_secs.max(1),
+            ..(*current).clone()
+        }));
     }
 
     pub async fn set_user_limit(&self, username: &str, max_ips: usize) {
-        let username = username.to_string();
-        self.limit_policy.rcu(|current| {
-            let mut limits = current.max_ips.as_ref().clone();
-            limits.insert(username.clone(), max_ips);
-            Arc::new(UserIpLimitPolicy {
-                max_ips: Arc::new(limits),
-                ..(**current).clone()
-            })
+        let _policy_update = self.policy_update.lock().unwrap_or_else(|poisoned| {
+            self.policy_update.clear_poison();
+            poisoned.into_inner()
         });
+        let current = self.limit_policy.load_full();
+        let mut limits = current.max_ips.as_ref().clone();
+        limits.insert(username.to_string(), max_ips);
+        self.limit_policy.store(Arc::new(UserIpLimitPolicy {
+            max_ips: Arc::new(limits),
+            ..(*current).clone()
+        }));
     }
 
     pub async fn remove_user_limit(&self, username: &str) {
-        self.limit_policy.rcu(|current| {
-            let mut limits = current.max_ips.as_ref().clone();
-            limits.remove(username);
-            Arc::new(UserIpLimitPolicy {
-                max_ips: Arc::new(limits),
-                ..(**current).clone()
-            })
+        let _policy_update = self.policy_update.lock().unwrap_or_else(|poisoned| {
+            self.policy_update.clear_poison();
+            poisoned.into_inner()
         });
+        let current = self.limit_policy.load_full();
+        let mut limits = current.max_ips.as_ref().clone();
+        limits.remove(username);
+        self.limit_policy.store(Arc::new(UserIpLimitPolicy {
+            max_ips: Arc::new(limits),
+            ..(*current).clone()
+        }));
     }
 
     pub async fn load_limits(&self, default_limit: usize, limits: &HashMap<String, usize>) {
-        let limits = Arc::new(limits.clone());
-        self.limit_policy.rcu(|current| {
-            Arc::new(UserIpLimitPolicy {
-                max_ips: Arc::clone(&limits),
-                default_max_ips: default_limit,
-                ..(**current).clone()
-            })
+        let _policy_update = self.policy_update.lock().unwrap_or_else(|poisoned| {
+            self.policy_update.clear_poison();
+            poisoned.into_inner()
         });
+        let current = self.limit_policy.load_full();
+        self.limit_policy.store(Arc::new(UserIpLimitPolicy {
+            max_ips: Arc::new(limits.clone()),
+            default_max_ips: default_limit,
+            ..(*current).clone()
+        }));
+    }
+
+    /// Atomically publishes one coherent policy from the active runtime generation.
+    pub(crate) async fn apply_policy_from_source(
+        &self,
+        source_generation: u64,
+        default_limit: usize,
+        limits: &HashMap<String, usize>,
+        mode: UserMaxUniqueIpsMode,
+        window_secs: u64,
+    ) -> bool {
+        let _policy_update = self.policy_update.lock().unwrap_or_else(|poisoned| {
+            self.policy_update.clear_poison();
+            poisoned.into_inner()
+        });
+        let current = self.limit_policy.load_full();
+        if source_generation < current.source_generation {
+            return false;
+        }
+        self.limit_policy.store(Arc::new(UserIpLimitPolicy {
+            source_generation,
+            max_ips: Arc::new(limits.clone()),
+            default_max_ips: default_limit,
+            mode,
+            window_secs: window_secs.max(1),
+        }));
+        true
     }
 
     pub(super) fn prune_recent(
@@ -70,7 +107,6 @@ impl UserIpTracker {
         ip: IpAddr,
     ) -> Result<(), String> {
         self.drain_cleanup_for_user(username).await;
-        self.maybe_compact_empty_users().await;
         let policy = self.limit_policy.load();
         let limit = Self::user_limit(&policy, username);
         let mode = policy.mode;
@@ -218,7 +254,6 @@ impl UserIpTracker {
         incarnation: UserIncarnation,
         ip: IpAddr,
     ) {
-        self.maybe_compact_empty_users().await;
         let shard_idx = Self::shard_idx(username);
         let mut shard = self.shards[shard_idx].write().await;
         if shard.incarnations.get(username).copied() != Some(incarnation) {

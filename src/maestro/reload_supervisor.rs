@@ -175,9 +175,14 @@ impl ReloadSupervisor {
             resolved.effective,
             &self.config_path,
             self.quota_store.clone(),
+            old_runtime.stats.connection_authority(),
             self.runtime_log_filter.clone(),
             self.tls_full_cert_budget.clone(),
             old_runtime.proxy_shared.user_admission(),
+            old_runtime.ip_tracker.clone(),
+            old_runtime.proxy_shared.traffic_limiter.clone(),
+            old_runtime.proxy_shared.direct_buffer_budget.clone(),
+            old_runtime.max_connections.clone(),
         )
         .await
         {
@@ -300,15 +305,37 @@ impl ReloadSupervisor {
         } else {
             None
         };
+        let config = new_runtime.config();
+        let _ = new_runtime.proxy_shared.activate_user_config_source(
+            new_runtime.id,
+            Some(user_admission_epoch),
+            &config.access.users,
+            &config.access.user_enabled,
+        );
+        let _ = new_runtime
+            .ip_tracker
+            .apply_policy_from_source(
+                new_runtime.id,
+                config.access.user_max_unique_ips_global_each,
+                &config.access.user_max_unique_ips,
+                config.access.user_max_unique_ips_mode,
+                config.access.user_max_unique_ips_window_secs,
+            )
+            .await;
+        let _ = new_runtime
+            .proxy_shared
+            .traffic_limiter
+            .apply_policy_from_source(
+                new_runtime.id,
+                config.access.user_rate_limits.clone(),
+                config.access.cidr_rate_limits.clone(),
+            );
+        new_runtime
+            .proxy_shared
+            .direct_buffer_budget
+            .activate_controller(new_runtime.id);
         let replaced = {
             let listener_manager = self.listener_manager.lock().await;
-            let config = new_runtime.config();
-            let _ = new_runtime.proxy_shared.activate_user_config_source(
-                new_runtime.id,
-                Some(user_admission_epoch),
-                &config.access.users,
-                &config.access.user_enabled,
-            );
             old_runtime.stop_accepting_sessions();
             listener_manager.activate_runtime_generation(new_runtime.clone())
         };

@@ -6,7 +6,6 @@ impl TrafficLimiter {
         Arc::new(Self {
             policy: ArcSwap::from_pointee(PolicySnapshot::default()),
             policy_update: ParkingMutex::new(()),
-            published_revision: AtomicU64::new(0),
             user_buckets: ShardedRegistry::new(REGISTRY_SHARDS),
             cidr_buckets: ShardedRegistry::new(REGISTRY_SHARDS),
             user_scope: ScopeMetrics::default(),
@@ -15,16 +14,31 @@ impl TrafficLimiter {
         })
     }
 
+    #[cfg(test)]
     pub fn apply_policy(
         &self,
         user_limits: HashMap<String, RateLimitBps>,
         cidr_limits: HashMap<CidrRateLimitKey, RateLimitBps>,
     ) {
-        let policy_update = self.policy_update.lock();
-        // Revision wrap could otherwise let an old lease restore stale rates.
-        let Some(revision) = self.policy.load().revision.checked_add(1) else {
-            return;
-        };
+        let _ = self.apply_policy_inner(None, user_limits, cidr_limits);
+    }
+
+    /// Publishes policy only when the source runtime is not older than the active source.
+    pub(crate) fn apply_policy_from_source(
+        &self,
+        source_generation: u64,
+        user_limits: HashMap<String, RateLimitBps>,
+        cidr_limits: HashMap<CidrRateLimitKey, RateLimitBps>,
+    ) -> bool {
+        self.apply_policy_inner(Some(source_generation), user_limits, cidr_limits)
+    }
+
+    fn apply_policy_inner(
+        &self,
+        source_generation: Option<u64>,
+        user_limits: HashMap<String, RateLimitBps>,
+        cidr_limits: HashMap<CidrRateLimitKey, RateLimitBps>,
+    ) -> bool {
         let filtered_users = user_limits
             .into_iter()
             .filter(|(_, limit)| limit.up_bps > 0 || limit.down_bps > 0)
@@ -77,6 +91,17 @@ impl TrafficLimiter {
         let cidr_policy_entries =
             cidr_rule_keys.len() + cidr_auto_rules_v4.len() + cidr_auto_rules_v6.len();
 
+        let policy_update = self.policy_update.lock();
+        let current = self.policy.load_full();
+        if source_generation.is_some_and(|source| source < current.source_generation) {
+            return false;
+        }
+        // Revision wrap could otherwise let an old lease restore stale rates.
+        let Some(revision) = current.revision.checked_add(1) else {
+            return false;
+        };
+        let source_generation = source_generation.unwrap_or(current.source_generation);
+
         self.user_scope
             .policy_entries
             .store(filtered_users.len() as u64, Ordering::Relaxed);
@@ -86,6 +111,7 @@ impl TrafficLimiter {
 
         self.policy.store(Arc::new(PolicySnapshot {
             revision,
+            source_generation,
             user_limits: filtered_users,
             cidr_rules_v4,
             cidr_rules_v6,
@@ -93,10 +119,10 @@ impl TrafficLimiter {
             cidr_auto_rules_v6,
             cidr_rule_keys,
         }));
-        self.published_revision.store(revision, Ordering::Release);
 
         drop(policy_update);
         self.maybe_cleanup();
+        true
     }
 
     pub fn acquire_lease(
@@ -104,11 +130,8 @@ impl TrafficLimiter {
         user: &str,
         client_ip: IpAddr,
     ) -> Option<Arc<TrafficLease>> {
-        let policy_update = self.policy_update.lock();
         let policy = self.policy.load_full();
         let binding = self.build_binding(user, client_ip, &policy);
-        drop(policy_update);
-        self.maybe_cleanup();
         Some(Arc::new(TrafficLease {
             limiter: Arc::clone(self),
             user: user.to_string(),

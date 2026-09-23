@@ -22,6 +22,11 @@ use crate::tls_front::TlsFrontCache;
 use crate::transport::UpstreamManager;
 use crate::transport::middle_proxy::MePool;
 
+// Cancellation guards preserve runtime ownership across preparation and drain futures.
+mod lifecycle;
+pub(crate) use lifecycle::RuntimeTaskScopePreparationGuard;
+use lifecycle::SessionDrainCancellationGuard;
+
 const SESSION_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const BACKGROUND_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const SESSION_ADMISSION_CLOSED: usize = 1 << (usize::BITS - 1);
@@ -145,12 +150,17 @@ impl RuntimeTaskScope {
         self.cancel.clone()
     }
 
-    /// Cancels the scope and waits within the bounded background-task budget.
-    pub(crate) async fn stop(&self) {
+    /// Synchronously closes task admission and signals every tracked task.
+    pub(crate) fn begin_stop(&self) {
         self.admission.close();
-        self.admission.wait_for_registrations().await;
         self.cancel.cancel();
         self.tracker.close();
+    }
+
+    /// Cancels the scope and waits within the bounded background-task budget.
+    pub(crate) async fn stop(&self) {
+        self.begin_stop();
+        self.admission.wait_for_registrations().await;
         let _ = tokio::time::timeout(BACKGROUND_STOP_TIMEOUT, self.tracker.wait()).await;
     }
 }
@@ -298,24 +308,31 @@ impl RuntimeGeneration {
     /// Waits for registered sessions and cancels them when the deadline expires.
     pub(crate) async fn drain_sessions(&self, timeout: Duration) -> bool {
         self.stop_accepting_sessions();
+        let mut cancellation_guard = SessionDrainCancellationGuard::new(self);
         self.session_admission.wait_for_registrations().await;
         self.sessions.close();
         if tokio::time::timeout(timeout, self.sessions.wait())
             .await
             .is_ok()
         {
+            cancellation_guard.disarm();
             return true;
         }
+        cancellation_guard.disarm();
         self.stop_sessions().await;
         false
     }
 
-    /// Cancels all sessions and waits within the bounded session-stop budget.
-    pub(crate) async fn stop_sessions(&self) {
+    fn begin_stop_sessions(&self) {
         self.stop_accepting_sessions();
-        self.session_admission.wait_for_registrations().await;
         self.session_cancel.cancel();
         self.sessions.close();
+    }
+
+    /// Cancels all sessions and waits within the bounded session-stop budget.
+    pub(crate) async fn stop_sessions(&self) {
+        self.begin_stop_sessions();
+        self.session_admission.wait_for_registrations().await;
         let _ = tokio::time::timeout(SESSION_STOP_TIMEOUT, self.sessions.wait()).await;
     }
 
@@ -335,6 +352,8 @@ impl RuntimeGeneration {
 
 impl Drop for RuntimeGeneration {
     fn drop(&mut self) {
+        self.background_tasks.begin_stop();
+        self.begin_stop_sessions();
         if let Some(pool) = self.me_pool.as_ref() {
             pool.begin_shutdown();
         }

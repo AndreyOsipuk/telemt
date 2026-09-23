@@ -15,7 +15,8 @@ use crate::proxy::middle_relay::{handle_via_middle_proxy, handle_via_middle_prox
 use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
 use crate::proxy::shared_state::{ConntrackClosePolicy, ProxySharedState};
 use crate::proxy::user_admission::UserIncarnation;
-use crate::stats::{Stats, UserQuotaHandle};
+use crate::proxy::user_connection_authority::UserConnectionPermit;
+use crate::stats::{Stats, UserConnectionObservation, UserQuotaHandle};
 use crate::stream::{BufferPool, CryptoReader, CryptoWriter};
 use crate::transport::UpstreamManager;
 use crate::transport::middle_proxy::MePool;
@@ -238,13 +239,63 @@ where
 /// Owns one authenticated user's connection and source-IP admission slots.
 pub(crate) struct UserConnectionReservation {
     stats: Arc<Stats>,
-    ip_tracker: Arc<UserIpTracker>,
-    user: String,
-    ip: IpAddr,
-    incarnation: UserIncarnation,
     quota_handle: UserQuotaHandle,
-    tracks_ip: bool,
-    active: bool,
+    _connection_permit: UserConnectionPermit,
+    _stats_observation: Option<UserConnectionObservation>,
+    ip_permit: Option<UserIpPermit>,
+    released: bool,
+}
+
+struct UserIpPermit {
+    tracker: Arc<UserIpTracker>,
+    owner: Option<UserIpOwner>,
+}
+
+struct UserIpOwner {
+    user: String,
+    incarnation: UserIncarnation,
+    ip: IpAddr,
+}
+
+impl UserIpPermit {
+    fn new(
+        tracker: Arc<UserIpTracker>,
+        user: String,
+        incarnation: UserIncarnation,
+        ip: IpAddr,
+    ) -> Self {
+        Self {
+            tracker,
+            owner: Some(UserIpOwner {
+                user,
+                incarnation,
+                ip,
+            }),
+        }
+    }
+
+    async fn release(mut self) {
+        let Some(owner) = self.owner.as_ref() else {
+            return;
+        };
+        self.tracker
+            .remove_ip_for_incarnation(&owner.user, owner.incarnation, owner.ip)
+            .await;
+        self.owner = None;
+    }
+}
+
+impl Drop for UserIpPermit {
+    fn drop(&mut self) {
+        let Some(owner) = self.owner.take() else {
+            return;
+        };
+        self.tracker.enqueue_cleanup_for_incarnation(
+            owner.user,
+            owner.incarnation,
+            owner.ip,
+        );
+    }
 }
 
 impl UserConnectionReservation {
@@ -257,6 +308,11 @@ impl UserConnectionReservation {
         tracks_ip: bool,
     ) -> Self {
         let quota_handle = stats.current_user_quota_handle(&user);
+        let connection_permit = stats
+            .connection_authority()
+            .try_acquire(&user, None)
+            .expect("unlimited test connection permit must be available");
+        let stats_observation = stats.observe_user_current_connection(&user);
         Self::new_for_incarnation(
             stats,
             ip_tracker,
@@ -264,6 +320,8 @@ impl UserConnectionReservation {
             ip,
             0,
             quota_handle,
+            connection_permit,
+            stats_observation,
             tracks_ip,
         )
     }
@@ -276,17 +334,20 @@ impl UserConnectionReservation {
         ip: IpAddr,
         incarnation: UserIncarnation,
         quota_handle: UserQuotaHandle,
+        connection_permit: UserConnectionPermit,
+        stats_observation: Option<UserConnectionObservation>,
         tracks_ip: bool,
     ) -> Self {
+        let ip_permit = tracks_ip.then(|| {
+            UserIpPermit::new(ip_tracker, user, incarnation, ip)
+        });
         Self {
             stats,
-            ip_tracker,
-            user,
-            ip,
-            incarnation,
             quota_handle,
-            tracks_ip,
-            active: true,
+            _connection_permit: connection_permit,
+            _stats_observation: stats_observation,
+            ip_permit,
+            released: false,
         }
     }
 
@@ -297,50 +358,24 @@ impl UserConnectionReservation {
 
     /// Releases both admission counters through the asynchronous cleanup path.
     pub(crate) async fn release(mut self) {
-        if !self.active {
-            return;
+        if let Some(ip_permit) = self.ip_permit.take() {
+            ip_permit.release().await;
         }
-        self.active = false;
-        if self.tracks_ip {
-            self.ip_tracker
-                .remove_ip_for_incarnation(&self.user, self.incarnation, self.ip)
-                .await;
-        }
-        self.stats.decrement_user_curr_connects(&self.user);
+        self.released = true;
     }
 
     /// Defers IP cleanup when admission fails after the asynchronous reservation step.
     pub(crate) fn release_deferred(mut self) {
-        if !self.active {
-            return;
-        }
-        self.active = false;
-        self.stats.decrement_user_curr_connects(&self.user);
-        if self.tracks_ip {
-            self.ip_tracker.enqueue_cleanup_for_incarnation(
-                self.user.clone(),
-                self.incarnation,
-                self.ip,
-            );
-        }
+        self.released = true;
     }
 }
 
 impl Drop for UserConnectionReservation {
     fn drop(&mut self) {
-        if !self.active {
+        if self.released {
             return;
         }
-        self.active = false;
         self.stats.increment_session_drop_fallback_total();
-        self.stats.decrement_user_curr_connects(&self.user);
-        if self.tracks_ip {
-            self.ip_tracker.enqueue_cleanup_for_incarnation(
-                self.user.clone(),
-                self.incarnation,
-                self.ip,
-            );
-        }
     }
 }
 
@@ -400,17 +435,20 @@ async fn acquire_user_connection_reservation_for_incarnation(
         .or((config.access.user_max_tcp_conns_global_each > 0)
             .then_some(config.access.user_max_tcp_conns_global_each))
         .map(|value| value as u64);
-    if !stats.try_acquire_user_curr_connects(user, limit) {
+    let Some(connection_permit) = stats
+        .connection_authority()
+        .try_acquire(user, limit)
+    else {
         return Err(ProxyError::ConnectionLimitExceeded {
             user: user.to_string(),
         });
-    }
+    };
+    let stats_observation = stats.observe_user_current_connection(user);
 
     if let Err(reason) = ip_tracker
         .check_and_add_for_incarnation(user, incarnation, peer_addr.ip())
         .await
     {
-        stats.decrement_user_curr_connects(user);
         warn!(
             user = %user,
             ip = %peer_addr.ip(),
@@ -429,6 +467,8 @@ async fn acquire_user_connection_reservation_for_incarnation(
         peer_addr.ip(),
         incarnation,
         quota_handle,
+        connection_permit,
+        stats_observation,
         true,
     ))
 }

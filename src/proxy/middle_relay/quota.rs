@@ -22,7 +22,7 @@ pub(super) async fn reserve_user_quota_with_yield(
     let mut backoff_ms = QUOTA_RESERVE_BACKOFF_MIN_MS;
     let mut backoff_rounds = 0usize;
     loop {
-        for _ in 0..QUOTA_RESERVE_SPIN_RETRIES {
+        for _ in 0..QUOTA_RESERVE_ATTEMPTS_PER_ROUND {
             match quota_handle.try_reserve(bytes, limit) {
                 Ok(reservation) => return Ok(reservation.commit()),
                 Err(QuotaReserveError::LimitExceeded) => {
@@ -30,7 +30,6 @@ pub(super) async fn reserve_user_quota_with_yield(
                 }
                 Err(QuotaReserveError::Contended) => {
                     stats.increment_quota_contention_total();
-                    std::hint::spin_loop();
                 }
             }
         }

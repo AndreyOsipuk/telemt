@@ -14,6 +14,32 @@ fn test_stats_shared_counters() {
 }
 
 #[test]
+fn runtime_stats_share_process_connection_admission_authority() {
+    let quota_store = Arc::new(QuotaStore::default());
+    let authority = Arc::new(UserConnectionAuthority::default());
+    let first = Stats::with_process_authorities(
+        Arc::clone(&quota_store),
+        Arc::clone(&authority),
+    );
+    let second = Stats::with_process_authorities(quota_store, authority);
+
+    let permit = first
+        .connection_authority()
+        .try_acquire("alice", Some(1))
+        .unwrap();
+    assert!(second
+        .connection_authority()
+        .try_acquire("alice", Some(1))
+        .is_none());
+
+    drop(permit);
+    assert!(second
+        .connection_authority()
+        .try_acquire("alice", Some(1))
+        .is_some());
+}
+
+#[test]
 fn test_telemetry_policy_disables_core_and_user_counters() {
     let stats = Stats::new();
     stats.apply_telemetry_policy(TelemetryPolicy {

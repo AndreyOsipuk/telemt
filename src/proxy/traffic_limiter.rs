@@ -142,6 +142,7 @@ enum CidrPolicyMatch<'a> {
 #[derive(Default)]
 struct PolicySnapshot {
     revision: u64,
+    source_generation: u64,
     user_limits: HashMap<String, RateLimitBps>,
     cidr_rules_v4: Vec<CidrRule>,
     cidr_rules_v6: Vec<CidrRule>,
@@ -175,7 +176,6 @@ pub struct TrafficLease {
 pub struct TrafficLimiter {
     policy: ArcSwap<PolicySnapshot>,
     policy_update: ParkingMutex<()>,
-    published_revision: AtomicU64,
     user_buckets: ShardedRegistry<UserBucket>,
     cidr_buckets: ShardedRegistry<CidrBucket>,
     user_scope: ScopeMetrics,

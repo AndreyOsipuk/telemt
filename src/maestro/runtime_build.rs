@@ -12,11 +12,13 @@ use crate::crypto::SecureRandom;
 use crate::ip_tracker::UserIpTracker;
 use crate::network::probe::{decide_network_capabilities, run_probe};
 use crate::proxy::direct_buffer_budget::{
-    DirectBufferBudget, resolve_direct_buffer_hard_limit, run_direct_buffer_budget_controller,
+    DirectBufferBudget, run_direct_buffer_budget_controller,
 };
 use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
 use crate::proxy::shared_state::ProxySharedState;
+use crate::proxy::traffic_limiter::TrafficLimiter;
 use crate::proxy::user_admission::UserAdmissionAuthority;
+use crate::proxy::user_connection_authority::UserConnectionAuthority;
 use crate::startup::StartupTracker;
 use crate::stats::beobachten::BeobachtenStore;
 use crate::stats::telemetry::TelemetryPolicy;
@@ -27,7 +29,9 @@ use crate::transport::UpstreamManager;
 use crate::transport::middle_proxy::MePool;
 
 use super::admission;
-use super::generation::{RuntimeGeneration, RuntimeTaskScope};
+use super::generation::{
+    RuntimeGeneration, RuntimeTaskScope, RuntimeTaskScopePreparationGuard,
+};
 use super::listeners::listener_rebind_supported;
 use super::runtime_tasks::RuntimeLogFilter;
 use super::{me_startup, runtime_tasks, tls_bootstrap};
@@ -49,9 +53,14 @@ pub(crate) async fn prepare_runtime(
     config: ProxyConfig,
     config_path: &Path,
     quota_store: Arc<QuotaStore>,
+    connection_authority: Arc<UserConnectionAuthority>,
     runtime_log_filter: RuntimeLogFilter,
     tls_full_cert_budget: Arc<TlsFullCertBudget>,
     user_admission: Arc<UserAdmissionAuthority>,
+    ip_tracker: Arc<UserIpTracker>,
+    traffic_limiter: Arc<TrafficLimiter>,
+    direct_buffer_budget: Arc<DirectBufferBudget>,
+    max_connections: Arc<Semaphore>,
 ) -> Result<PreparedRuntime, String> {
     let user_admission_epoch = user_admission.epoch();
     config
@@ -63,7 +72,11 @@ pub(crate) async fn prepare_runtime(
         .as_secs();
     let startup_tracker = Arc::new(StartupTracker::new(started_at_epoch_secs));
     let task_scope = RuntimeTaskScope::new();
-    let stats = Arc::new(Stats::with_quota_store(quota_store));
+    let task_scope_guard = RuntimeTaskScopePreparationGuard::new(task_scope.clone());
+    let stats = Arc::new(Stats::with_process_authorities(
+        quota_store,
+        connection_authority,
+    ));
     stats.apply_telemetry_policy(TelemetryPolicy::from_config(&config.general.telemetry));
 
     let upstream_manager = Arc::new(
@@ -80,30 +93,10 @@ pub(crate) async fn prepare_runtime(
         .with_dns_overrides(&config.network.dns_overrides)
         .map_err(|error| format!("DNS override preparation failed: {}", error))?,
     );
-    let ip_tracker = Arc::new(UserIpTracker::new());
-    ip_tracker
-        .load_limits(
-            config.access.user_max_unique_ips_global_each,
-            &config.access.user_max_unique_ips,
-        )
-        .await;
-    ip_tracker
-        .set_limit_policy(
-            config.access.user_max_unique_ips_mode,
-            config.access.user_max_unique_ips_window_secs,
-        )
-        .await;
-
-    let hard_limit =
-        resolve_direct_buffer_hard_limit(config.general.direct_relay_buffer_budget_max_bytes).await;
-    let direct_buffer_budget = DirectBufferBudget::new(hard_limit);
-    let proxy_shared = ProxySharedState::new_with_direct_buffer_budget_and_user_admission(
+    let proxy_shared = ProxySharedState::new_with_process_authorities(
         direct_buffer_budget.clone(),
+        traffic_limiter,
         user_admission,
-    );
-    proxy_shared.traffic_limiter.apply_policy(
-        config.access.user_rate_limits.clone(),
-        config.access.cidr_rate_limits.clone(),
     );
 
     let probe = run_probe(
@@ -184,12 +177,6 @@ pub(crate) async fn prepare_runtime(
         Duration::from_secs(config.access.replay_window_secs),
     ));
     let buffer_pool = Arc::new(BufferPool::with_config(64 * 1024, 4096));
-    let max_connections_limit = if config.server.max_connections == 0 {
-        Semaphore::MAX_PERMITS
-    } else {
-        config.server.max_connections as usize
-    };
-    let max_connections = Arc::new(Semaphore::new(max_connections_limit));
     let (config_watcher_activation, config_watcher_activation_rx) = watch::channel(false);
     let watches = runtime_tasks::spawn_runtime_tasks(
         generation_id,
@@ -288,10 +275,12 @@ pub(crate) async fn prepare_runtime(
         conntrack_scope.cancellation_token(),
     ));
     task_scope.spawn(run_direct_buffer_budget_controller(
+        generation_id,
         direct_buffer_budget,
         buffer_pool.clone(),
         stats.clone(),
         proxy_shared.clone(),
+        max_connections.clone(),
         config.server.max_connections,
     ));
     let generation = RuntimeGeneration::new(
@@ -313,6 +302,7 @@ pub(crate) async fn prepare_runtime(
         max_connections,
         task_scope,
     );
+    task_scope_guard.disarm();
     drop(admission_tx);
 
     Ok(PreparedRuntime {
@@ -413,6 +403,17 @@ pub(crate) fn resolve_reload_config(
         fields.push("server.metrics_listen".to_string());
         effective.server.metrics_listen = old.server.metrics_listen.clone();
         effective.server.metrics_port = old.server.metrics_port;
+    }
+    if old.server.max_connections != desired.server.max_connections {
+        fields.push("server.max_connections".to_string());
+        effective.server.max_connections = old.server.max_connections;
+    }
+    if old.general.direct_relay_buffer_budget_max_bytes
+        != desired.general.direct_relay_buffer_budget_max_bytes
+    {
+        fields.push("general.direct_relay_buffer_budget_max_bytes".to_string());
+        effective.general.direct_relay_buffer_budget_max_bytes =
+            old.general.direct_relay_buffer_budget_max_bytes;
     }
     if old.general.quota_state_path != desired.general.quota_state_path {
         fields.push("general.quota_state_path".to_string());

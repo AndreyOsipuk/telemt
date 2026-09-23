@@ -3,7 +3,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use tokio::sync::{RwLock, watch};
+use tokio::sync::{RwLock, Semaphore, watch};
 use tracing::{error, info};
 
 use crate::api;
@@ -12,7 +12,9 @@ use crate::network::probe::{decide_network_capabilities, log_probe_result, run_p
 use crate::proxy::direct_buffer_budget::{DirectBufferBudget, resolve_direct_buffer_hard_limit};
 use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
 use crate::proxy::shared_state::ProxySharedState;
+use crate::proxy::traffic_limiter::TrafficLimiter;
 use crate::proxy::user_admission::UserAdmissionAuthority;
+use crate::proxy::user_connection_authority::UserConnectionAuthority;
 use crate::startup::{COMPONENT_API_BOOTSTRAP, COMPONENT_NETWORK_PROBE};
 use crate::stats::telemetry::TelemetryPolicy;
 use crate::stats::{QuotaStore, Stats};
@@ -47,10 +49,16 @@ pub(super) async fn run_telemt_core(
     } = bootstrap::bootstrap(privilege_drop_requested).await?;
 
     let quota_store = Arc::new(QuotaStore::default());
-    let stats = Arc::new(Stats::with_quota_store(quota_store.clone()));
+    let connection_authority = Arc::new(UserConnectionAuthority::default());
+    let stats = Arc::new(Stats::with_process_authorities(
+        quota_store.clone(),
+        connection_authority,
+    ));
     let tls_full_cert_budget = Arc::new(TlsFullCertBudget::new());
     let process_control_plane = control_plane::ProcessControlPlane::new();
     let runtime_task_scope = generation::RuntimeTaskScope::new();
+    let runtime_task_scope_guard =
+        generation::RuntimeTaskScopePreparationGuard::new(runtime_task_scope.clone());
     stats.apply_telemetry_policy(TelemetryPolicy::from_config(&config.general.telemetry));
     let quota_state_path = config.general.quota_state_path.clone();
     let quota_state =
@@ -72,14 +80,11 @@ pub(super) async fn run_telemt_core(
         .with_dns_overrides(&config.network.dns_overrides)?,
     );
     let ip_tracker = Arc::new(UserIpTracker::new());
-    ip_tracker
-        .load_limits(
+    let _ = ip_tracker
+        .apply_policy_from_source(
+            1,
             config.access.user_max_unique_ips_global_each,
             &config.access.user_max_unique_ips,
-        )
-        .await;
-    ip_tracker
-        .set_limit_policy(
             config.access.user_max_unique_ips_mode,
             config.access.user_max_unique_ips_window_secs,
         )
@@ -102,14 +107,22 @@ pub(super) async fn run_telemt_core(
     let direct_buffer_hard_limit =
         resolve_direct_buffer_hard_limit(config.general.direct_relay_buffer_budget_max_bytes).await;
     let direct_buffer_budget = DirectBufferBudget::new(direct_buffer_hard_limit);
+    direct_buffer_budget.activate_controller(1);
     info!(
         hard_limit_bytes = direct_buffer_hard_limit,
         configured_override_bytes = config.general.direct_relay_buffer_budget_max_bytes,
         "Direct relay buffer budget initialized"
     );
     let user_admission = UserAdmissionAuthority::new_with_quota_store(quota_store.clone());
-    let shared_state = ProxySharedState::new_with_direct_buffer_budget_and_user_admission(
+    let traffic_limiter = TrafficLimiter::new();
+    let _ = traffic_limiter.apply_policy_from_source(
+        1,
+        config.access.user_rate_limits.clone(),
+        config.access.cidr_rate_limits.clone(),
+    );
+    let shared_state = ProxySharedState::new_with_process_authorities(
         direct_buffer_budget.clone(),
+        traffic_limiter,
         user_admission,
     );
     let _ = shared_state.activate_user_config_source(
@@ -118,10 +131,12 @@ pub(super) async fn run_telemt_core(
         &config.access.users,
         &config.access.user_enabled,
     );
-    shared_state.traffic_limiter.apply_policy(
-        config.access.user_rate_limits.clone(),
-        config.access.cidr_rate_limits.clone(),
-    );
+    let max_connections_limit = if config.server.max_connections == 0 {
+        Semaphore::MAX_PERMITS
+    } else {
+        config.server.max_connections as usize
+    };
+    let max_connections = Arc::new(Semaphore::new(max_connections_limit));
     let web_trace = WebTraceStore::new(config.web.debug.clone(), &config.web.limits);
     let web_runtime_control = WebRuntimeControl::new();
 
@@ -303,6 +318,7 @@ pub(super) async fn run_telemt_core(
         ip_tracker.clone(),
         shared_state.clone(),
         direct_buffer_budget,
+        max_connections,
         route_runtime.clone(),
         api_me_pool.clone(),
         runtime_task_scope.clone(),
@@ -333,6 +349,7 @@ pub(super) async fn run_telemt_core(
         runtime.max_connections,
         runtime_task_scope,
     );
+    runtime_task_scope_guard.disarm();
     let active_runtime = Arc::new(ArcSwap::from(runtime_generation));
     let bound = listeners::bind_listeners(
         &runtime.config,

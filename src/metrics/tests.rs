@@ -69,6 +69,10 @@ async fn test_render_metrics_format() {
     stats.increment_me_endpoint_quarantine_draining_suppressed_total();
     stats.increment_user_connects("alice");
     stats.increment_user_curr_connects("alice");
+    let _connection_permit = stats
+        .connection_authority()
+        .try_acquire("alice", None)
+        .unwrap();
     stats.add_user_octets_from("alice", 1024);
     stats.add_user_octets_to("alice", 2048);
     stats.increment_user_msgs_from("alice");

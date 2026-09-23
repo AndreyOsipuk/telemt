@@ -1,10 +1,13 @@
 use super::*;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::task::{Wake, Waker};
 
 use crate::config::{
     WebCarrier, WebLimitsConfig, WebRuntimeProfile, WebSecretMode, WebTimeoutsConfig,
 };
 use crate::web::manager::WebProcessRuntime;
+use crate::web::session::SessionCloseOutcome;
 
 fn session() -> Arc<WebSession> {
     session_with_automatic(false)
@@ -51,6 +54,80 @@ fn session_with_automatic(automatic: bool) -> Arc<WebSession> {
         WebTimeoutsConfig::default(),
         None,
     )
+}
+
+struct SessionLockProbe {
+    session: std::sync::Weak<WebSession>,
+    lock_was_free: Arc<AtomicBool>,
+}
+
+impl Wake for SessionLockProbe {
+    fn wake(self: Arc<Self>) {
+        if let Some(session) = self.session.upgrade() {
+            self.lock_was_free
+                .store(session.state.try_lock().is_some(), AtomicOrdering::Release);
+        }
+    }
+}
+
+#[test]
+fn close_wakes_stream_only_after_releasing_session_lock() {
+    let session = session();
+    let lock_was_free = Arc::new(AtomicBool::new(false));
+    let waker = Waker::from(Arc::new(SessionLockProbe {
+        session: Arc::downgrade(&session),
+        lock_was_free: Arc::clone(&lock_was_free),
+    }));
+    {
+        let mut state = session.state.lock();
+        state.streams.insert(
+            1,
+            StreamState {
+                instance: 1,
+                inbound: VecDeque::new(),
+                receive_window: frame::INITIAL_STREAM_WINDOW,
+                send_credit: u64::from(frame::INITIAL_STREAM_WINDOW),
+                read_waker: Some(waker),
+                write_waker: None,
+            },
+        );
+    }
+
+    assert_eq!(
+        session.close(SessionCloseReason::ApiClose),
+        SessionCloseOutcome::Closed
+    );
+    assert!(lock_was_free.load(AtomicOrdering::Acquire));
+}
+
+#[test]
+fn supersede_completion_defers_stream_wake_until_finish() {
+    let session = session();
+    let lock_was_free = Arc::new(AtomicBool::new(false));
+    let waker = Waker::from(Arc::new(SessionLockProbe {
+        session: Arc::downgrade(&session),
+        lock_was_free: Arc::clone(&lock_was_free),
+    }));
+    {
+        let mut state = session.state.lock();
+        state.streams.insert(
+            1,
+            StreamState {
+                instance: 1,
+                inbound: VecDeque::new(),
+                receive_window: frame::INITIAL_STREAM_WINDOW,
+                send_credit: u64::from(frame::INITIAL_STREAM_WINDOW),
+                read_waker: Some(waker),
+                write_waker: None,
+            },
+        );
+    }
+
+    assert!(session.begin_carrier_supersede());
+    let completion = session.prepare_carrier_supersede().unwrap();
+    assert!(!lock_was_free.load(AtomicOrdering::Acquire));
+    completion.finish();
+    assert!(lock_was_free.load(AtomicOrdering::Acquire));
 }
 
 #[test]

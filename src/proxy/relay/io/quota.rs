@@ -27,8 +27,7 @@ const QUOTA_NEAR_LIMIT_BYTES: u64 = 64 * 1024;
 const QUOTA_LARGE_CHARGE_BYTES: u64 = 16 * 1024;
 const QUOTA_ADAPTIVE_INTERVAL_MIN_BYTES: u64 = 4 * 1024;
 const QUOTA_ADAPTIVE_INTERVAL_MAX_BYTES: u64 = 64 * 1024;
-pub(super) const QUOTA_RESERVE_SPIN_RETRIES: usize = 64;
-pub(super) const QUOTA_RESERVE_MAX_ROUNDS: usize = 8;
+pub(super) const QUOTA_RESERVE_MAX_ATTEMPTS_PER_POLL: usize = 4;
 
 #[inline]
 pub(in crate::proxy::relay) fn quota_adaptive_interval_bytes(remaining_before: u64) -> u64 {

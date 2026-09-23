@@ -1,5 +1,9 @@
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::task::Waker;
 use std::time::{Duration, Instant};
+
+use tokio::sync::Notify;
 
 use super::WebSession;
 
@@ -104,6 +108,8 @@ struct ReleasedQueues {
     recovery_closed_before_commit: bool,
     reason: SessionCloseReason,
     peer_gap: Duration,
+    stream_wakers: Vec<Waker>,
+    lane_notifies: Vec<Arc<Notify>>,
 }
 
 /// Deferred queue release after manager publication linearizes a supersede.
@@ -276,12 +282,13 @@ impl WebSession {
         if reason == SessionCloseReason::CarrierSuperseded {
             state.negotiation_phase = SessionNegotiationPhase::Superseded;
         }
+        let mut stream_wakers = Vec::with_capacity(state.streams.len().saturating_mul(2));
         for stream in state.streams.values_mut() {
             if let Some(waker) = stream.read_waker.take() {
-                waker.wake();
+                stream_wakers.push(waker);
             }
             if let Some(waker) = stream.write_waker.take() {
-                waker.wake();
+                stream_wakers.push(waker);
             }
         }
         state.streams.clear();
@@ -296,8 +303,9 @@ impl WebSession {
         let mut lane_data_items = 0usize;
         let mut lane_control_bytes = 0usize;
         let mut lane_control_items = 0usize;
+        let mut lane_notifies = Vec::with_capacity(state.carrier_lanes.len());
         for lane in state.carrier_lanes.values_mut() {
-            lane.notify.notify_waiters();
+            lane_notifies.push(Arc::clone(&lane.notify));
             if let Some(batch) = lane.unacked.take() {
                 batch.lease.detach();
                 lane_data_bytes = lane_data_bytes.saturating_add(batch.data_bytes);
@@ -326,10 +334,18 @@ impl WebSession {
             recovery_closed_before_commit,
             reason,
             peer_gap,
+            stream_wakers,
+            lane_notifies,
         }
     }
 
     fn finish_close(&self, released: ReleasedQueues) {
+        for waker in released.stream_wakers {
+            waker.wake();
+        }
+        for notify in released.lane_notifies {
+            notify.notify_waiters();
+        }
         self.cancel.cancel();
         if self.carrier().is_multiplexed() {
             self.down_notify.notify_waiters();

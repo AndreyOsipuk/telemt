@@ -22,9 +22,11 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 pub(crate) use self::quota_store::{QuotaReservation, QuotaStore, UserQuotaHandle};
+pub(crate) use self::users::UserConnectionObservation;
 #[allow(unused_imports)]
 pub use self::replay::{ReplayChecker, ReplayStats};
 use self::telemetry::TelemetryPolicy;
+use crate::proxy::user_connection_authority::UserConnectionAuthority;
 pub use self::tls_fingerprints::TlsFingerprintSnapshotRow;
 use crate::config::MeWriterPickMode;
 
@@ -351,6 +353,7 @@ pub struct Stats {
     tls_fingerprints: tls_fingerprints::TlsFingerprintCollector,
     user_stats: DashMap<String, Arc<UserStats>>,
     quota_store: Arc<QuotaStore>,
+    connection_authority: Arc<UserConnectionAuthority>,
     user_stats_last_cleanup_epoch_secs: AtomicU64,
     start_time: parking_lot::RwLock<Option<Instant>>,
 }
@@ -417,12 +420,28 @@ impl UserStats {
 
 impl Stats {
     pub fn new() -> Self {
-        Self::with_quota_store(Arc::new(QuotaStore::default()))
+        Self::with_process_authorities(
+            Arc::new(QuotaStore::default()),
+            Arc::new(UserConnectionAuthority::default()),
+        )
     }
 
+    #[cfg(test)]
     pub(crate) fn with_quota_store(quota_store: Arc<QuotaStore>) -> Self {
+        Self::with_process_authorities(
+            quota_store,
+            Arc::new(UserConnectionAuthority::default()),
+        )
+    }
+
+    /// Creates generation telemetry around process-owned enforcement authorities.
+    pub(crate) fn with_process_authorities(
+        quota_store: Arc<QuotaStore>,
+        connection_authority: Arc<UserConnectionAuthority>,
+    ) -> Self {
         let stats = Self {
             quota_store,
+            connection_authority,
             ..Self::default()
         };
         stats.apply_telemetry_policy(TelemetryPolicy::default());
@@ -431,9 +450,15 @@ impl Stats {
         stats
     }
 
+    /// Returns the process-scoped quota authority for test runtime construction.
     #[cfg(test)]
     pub(crate) fn quota_store(&self) -> Arc<QuotaStore> {
         Arc::clone(&self.quota_store)
+    }
+
+    /// Returns process-owned per-user connection admission.
+    pub(crate) fn connection_authority(&self) -> Arc<UserConnectionAuthority> {
+        Arc::clone(&self.connection_authority)
     }
 }
 

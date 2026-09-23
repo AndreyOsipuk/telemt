@@ -68,10 +68,13 @@ impl UserIpTracker {
         }
     }
 
-    pub async fn run_periodic_maintenance(self: Arc<Self>) {
+    pub async fn run_periodic_maintenance(self: Arc<Self>, source_generation: u64) {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         loop {
             interval.tick().await;
+            if self.limit_policy.load().source_generation != source_generation {
+                continue;
+            }
             self.drain_cleanup_queue().await;
             self.maybe_compact_empty_users().await;
         }
@@ -263,6 +266,10 @@ impl UserIpTracker {
     }
 
     pub async fn clear_all(&self) {
+        let mut cleanup_drain_guards = Vec::with_capacity(USER_IP_TRACKER_SHARDS);
+        for drain_lock in self.cleanup_drain_locks.iter() {
+            cleanup_drain_guards.push(drain_lock.lock().await);
+        }
         for shard_lock in self.shards.iter() {
             let mut shard = shard_lock.write().await;
             shard.active_ips.clear();
@@ -271,16 +278,24 @@ impl UserIpTracker {
         }
         self.active_entry_count.store(0, Ordering::Relaxed);
         self.recent_entry_count.store(0, Ordering::Relaxed);
+        let mut cleanup_queue_guards = Vec::with_capacity(USER_IP_TRACKER_SHARDS);
         for cleanup_shard in self.cleanup_shards.iter() {
-            match cleanup_shard.queue.lock() {
-                Ok(mut queue) => queue.clear(),
+            let queue = match cleanup_shard.queue.lock() {
+                Ok(queue) => queue,
                 Err(poisoned) => {
-                    poisoned.into_inner().clear();
+                    let queue = poisoned.into_inner();
                     cleanup_shard.queue.clear_poison();
+                    queue
                 }
-            }
+            };
+            cleanup_queue_guards.push(queue);
+        }
+        for queue in cleanup_queue_guards.iter_mut() {
+            queue.clear();
         }
         self.cleanup_queue_len.store(0, Ordering::Relaxed);
+        drop(cleanup_queue_guards);
+        drop(cleanup_drain_guards);
     }
 
     pub async fn is_ip_active(&self, username: &str, ip: IpAddr) -> bool {

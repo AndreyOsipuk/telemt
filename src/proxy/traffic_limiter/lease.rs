@@ -2,20 +2,16 @@ use super::*;
 
 impl TrafficLease {
     fn current_binding(&self) -> Arc<TrafficLeaseBinding> {
-        let published_revision = self.limiter.published_revision.load(Ordering::Acquire);
+        let policy = self.limiter.policy.load();
         let current = self.binding.load_full();
-        if current.revision == published_revision {
+        if current.revision == policy.revision {
             return current;
         }
+        drop(policy);
 
-        let refresh = self.refresh.lock();
-        let published_revision = self.limiter.published_revision.load(Ordering::Acquire);
-        let current = self.binding.load_full();
-        if current.revision == published_revision {
-            return current;
-        }
-        let policy_update = self.limiter.policy_update.lock();
+        let _refresh = self.refresh.lock();
         let policy = self.limiter.policy.load_full();
+        let current = self.binding.load_full();
         if current.revision == policy.revision {
             return current;
         }
@@ -23,9 +19,6 @@ impl TrafficLease {
             .limiter
             .build_binding(&self.user, self.client_ip, &policy);
         self.binding.store(Arc::clone(&next));
-        drop(policy_update);
-        drop(refresh);
-        self.limiter.maybe_cleanup();
         next
     }
 

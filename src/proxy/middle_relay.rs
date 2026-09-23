@@ -15,6 +15,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace, warn};
 
 use crate::config::{ConntrackPressureProfile, ProxyConfig};
@@ -155,7 +156,7 @@ const ME_D2C_FLUSH_BATCH_MAX_FRAMES_MIN: usize = 1;
 const ME_D2C_FLUSH_BATCH_MAX_BYTES_MIN: usize = 4096;
 const ME_D2C_FRAME_BUF_SHRINK_HYSTERESIS_FACTOR: usize = 2;
 const ME_D2C_SINGLE_WRITE_COALESCE_MAX_BYTES: usize = 128 * 1024;
-const QUOTA_RESERVE_SPIN_RETRIES: usize = 32;
+const QUOTA_RESERVE_ATTEMPTS_PER_ROUND: usize = 4;
 const QUOTA_RESERVE_BACKOFF_MIN_MS: u64 = 1;
 const QUOTA_RESERVE_BACKOFF_MAX_MS: u64 = 16;
 const QUOTA_RESERVE_MAX_BACKOFF_ROUNDS: usize = 16;

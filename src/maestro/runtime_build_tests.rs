@@ -95,6 +95,39 @@ fn global_mss_profiles_are_deferred_with_the_listener_socket_group() {
 }
 
 #[test]
+fn process_wide_connection_and_direct_buffer_envelopes_are_restart_only() {
+    let old = ProxyConfig::default();
+    let mut desired = old.clone();
+    desired.server.max_connections = old.server.max_connections.saturating_add(1);
+    desired.general.direct_relay_buffer_budget_max_bytes = old
+        .general
+        .direct_relay_buffer_budget_max_bytes
+        .saturating_add(4 * 1024);
+
+    let resolved = resolve_reload_config(&old, &desired).unwrap();
+
+    assert_eq!(
+        resolved.deferred_process_fields,
+        vec![
+            "server.max_connections".to_string(),
+            "general.direct_relay_buffer_budget_max_bytes".to_string(),
+        ]
+    );
+    assert_eq!(
+        resolved.effective.server.max_connections,
+        old.server.max_connections
+    );
+    assert_eq!(
+        resolved
+            .effective
+            .general
+            .direct_relay_buffer_budget_max_bytes,
+        old.general.direct_relay_buffer_budget_max_bytes
+    );
+    assert!(!resolved.runtime_changed);
+}
+
+#[test]
 fn mixed_reload_retains_process_state_and_applies_runtime_state() {
     let old = ProxyConfig::default();
     let mut desired = old.clone();

@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::net::IpAddr;
+use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -363,6 +364,7 @@ pub(super) async fn delete_conntrack_entry(event: ConntrackCloseEvent) -> Delete
 }
 
 async fn run_command(binary: &str, args: &[&str], stdin: Option<String>) -> Result<(), String> {
+    const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
     #[cfg(unix)]
     let Some(command_path) = resolve_trusted_helper(binary) else {
         return Err(format!("{binary} is not available"));
@@ -377,21 +379,26 @@ async fn run_command(binary: &str, args: &[&str], stdin: Option<String>) -> Resu
     }
     command.stdout(std::process::Stdio::null());
     command.stderr(std::process::Stdio::piped());
+    command.kill_on_drop(true);
     let mut child = command
         .spawn()
         .map_err(|error| format!("spawn {binary} failed: {error}"))?;
-    if let Some(blob) = stdin
-        && let Some(mut writer) = child.stdin.take()
-    {
-        writer
-            .write_all(blob.as_bytes())
+    let output = tokio::time::timeout(COMMAND_TIMEOUT, async move {
+        if let Some(blob) = stdin
+            && let Some(mut writer) = child.stdin.take()
+        {
+            writer
+                .write_all(blob.as_bytes())
+                .await
+                .map_err(|error| format!("stdin write {binary} failed: {error}"))?;
+        }
+        child
+            .wait_with_output()
             .await
-            .map_err(|error| format!("stdin write {binary} failed: {error}"))?;
-    }
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|error| format!("wait {binary} failed: {error}"))?;
+            .map_err(|error| format!("wait {binary} failed: {error}"))
+    })
+    .await
+        .map_err(|_| format!("{binary} timed out after {}s", COMMAND_TIMEOUT.as_secs()))??;
     if output.status.success() {
         return Ok(());
     }

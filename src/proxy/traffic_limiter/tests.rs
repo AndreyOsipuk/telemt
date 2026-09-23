@@ -6,6 +6,79 @@ fn rate(up_bps: u64, down_bps: u64) -> RateLimitBps {
 }
 
 #[test]
+fn stale_runtime_cannot_overwrite_newer_rate_policy() {
+    let limiter = TrafficLimiter::new();
+    let mut newer = HashMap::new();
+    newer.insert("alice".to_string(), rate(2_000, 3_000));
+    assert!(limiter.apply_policy_from_source(2, newer, HashMap::new()));
+
+    let mut stale = HashMap::new();
+    stale.insert("alice".to_string(), rate(1_000, 1_000));
+    assert!(!limiter.apply_policy_from_source(1, stale, HashMap::new()));
+
+    let policy = limiter.policy.load_full();
+    assert_eq!(policy.source_generation, 2);
+    assert_eq!(policy.user_limits["alice"].up_bps, 2_000);
+    assert_eq!(policy.user_limits["alice"].down_bps, 3_000);
+}
+
+#[test]
+fn active_runtime_can_publish_same_generation_rate_update() {
+    let limiter = TrafficLimiter::new();
+    assert!(limiter.apply_policy_from_source(4, HashMap::new(), HashMap::new()));
+    let mut updated = HashMap::new();
+    updated.insert("alice".to_string(), rate(4_000, 5_000));
+
+    assert!(limiter.apply_policy_from_source(4, updated, HashMap::new()));
+
+    let policy = limiter.policy.load_full();
+    assert_eq!(policy.source_generation, 4);
+    assert_eq!(policy.user_limits["alice"].up_bps, 4_000);
+}
+
+#[test]
+fn lease_acquisition_and_refresh_do_not_wait_for_policy_publication_lock() {
+    let limiter = TrafficLimiter::new();
+    let mut initial = HashMap::new();
+    initial.insert("alice".to_string(), rate(1_000, 1_000));
+    limiter.apply_policy(initial, HashMap::new());
+    let lease = limiter
+        .acquire_lease("alice", "203.0.113.7".parse().unwrap())
+        .unwrap();
+
+    let mut updated = HashMap::new();
+    updated.insert("alice".to_string(), rate(2_000, 2_000));
+    limiter.apply_policy(updated, HashMap::new());
+
+    let publication = limiter.policy_update.lock();
+    let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+    let acquire_limiter = Arc::clone(&limiter);
+    let acquire_tx = completed_tx.clone();
+    let acquire = std::thread::spawn(move || {
+        let _lease = acquire_limiter
+            .acquire_lease("bob", "203.0.113.8".parse().unwrap())
+            .unwrap();
+        acquire_tx.send(()).unwrap();
+    });
+    let refresh = std::thread::spawn(move || {
+        let _ = lease.try_consume(RateDirection::Up, 1);
+        completed_tx.send(()).unwrap();
+    });
+
+    let first_completed = completed_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .is_ok();
+    let second_completed = completed_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .is_ok();
+    drop(publication);
+    acquire.join().unwrap();
+    refresh.join().unwrap();
+
+    assert!(first_completed && second_completed);
+}
+
+#[test]
 fn explicit_cidr_rule_wins_over_auto_template() {
     let limiter = TrafficLimiter::new();
     let mut cidr_limits = HashMap::new();

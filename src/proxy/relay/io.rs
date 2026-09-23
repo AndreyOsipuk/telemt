@@ -16,7 +16,7 @@ mod quota;
 pub(super) use self::combined::CombinedStream;
 pub(super) use self::counters::SharedCounters;
 pub(super) use self::quota::is_quota_io_error;
-use self::quota::{QUOTA_RESERVE_MAX_ROUNDS, QUOTA_RESERVE_SPIN_RETRIES, quota_io_error};
+use self::quota::{QUOTA_RESERVE_MAX_ATTEMPTS_PER_POLL, quota_io_error};
 pub(super) use self::quota::{quota_adaptive_interval_bytes, should_immediate_quota_check};
 
 /// Transparent I/O wrapper that tracks per-user statistics and activity.
@@ -218,48 +218,33 @@ impl<S: AsyncRead + Unpin> AsyncRead for StatsIo<S> {
         let mut quota_reservation = None;
         let mut read_limit = buf.remaining();
         if let Some(limit) = this.quota_limit {
-            let used_before = this.quota_handle.used();
-            let remaining = limit.saturating_sub(used_before);
-            if remaining == 0 {
-                this.quota_exceeded.store(true, Ordering::Release);
-                return Poll::Ready(Err(quota_io_error()));
-            }
-            remaining_before = Some(remaining);
-            read_limit = read_limit.min(remaining as usize);
-            if read_limit == 0 {
-                this.quota_exceeded.store(true, Ordering::Release);
-                return Poll::Ready(Err(quota_io_error()));
-            }
-
-            let desired = read_limit as u64;
-            let mut reserve_rounds = 0usize;
-            while quota_reservation.is_none() {
-                for _ in 0..QUOTA_RESERVE_SPIN_RETRIES {
-                    match this.quota_handle.try_reserve(desired, limit) {
-                        Ok(reservation) => {
-                            quota_reservation = Some(reservation);
-                            break;
-                        }
-                        Err(crate::stats::QuotaReserveError::LimitExceeded) => {
-                            this.quota_exceeded.store(true, Ordering::Release);
-                            return Poll::Ready(Err(quota_io_error()));
-                        }
-                        Err(crate::stats::QuotaReserveError::Contended) => {
-                            this.stats.increment_quota_contention_total();
-                        }
+            for _ in 0..QUOTA_RESERVE_MAX_ATTEMPTS_PER_POLL {
+                let used_before = this.quota_handle.used();
+                let remaining = limit.saturating_sub(used_before);
+                if remaining == 0 {
+                    this.quota_exceeded.store(true, Ordering::Release);
+                    return Poll::Ready(Err(quota_io_error()));
+                }
+                let desired = remaining.min(read_limit as u64);
+                match this.quota_handle.try_reserve(desired, limit) {
+                    Ok(reservation) => {
+                        remaining_before = Some(remaining);
+                        read_limit = desired as usize;
+                        quota_reservation = Some(reservation);
+                        break;
+                    }
+                    Err(crate::stats::QuotaReserveError::LimitExceeded)
+                    | Err(crate::stats::QuotaReserveError::Contended) => {
+                        this.stats.increment_quota_contention_total();
                     }
                 }
-
-                if quota_reservation.is_none() {
-                    reserve_rounds = reserve_rounds.saturating_add(1);
-                    if reserve_rounds >= QUOTA_RESERVE_MAX_ROUNDS {
-                        this.stats.increment_quota_contention_timeout_total();
-                        if this.arm_quota_wait(cx).is_pending() {
-                            return Poll::Pending;
-                        }
-                        reserve_rounds = 0;
-                    }
+            }
+            if quota_reservation.is_none() {
+                this.stats.increment_quota_contention_timeout_total();
+                if this.arm_quota_wait(cx).is_ready() {
+                    cx.waker().wake_by_ref();
                 }
+                return Poll::Pending;
             }
         }
 
@@ -404,8 +389,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StatsIo<S> {
         let mut quota_reservation = None;
         if let Some(limit) = this.quota_limit {
             if !write_buf.is_empty() {
-                let mut reserve_rounds = 0usize;
-                while quota_reservation.is_none() {
+                for _ in 0..QUOTA_RESERVE_MAX_ATTEMPTS_PER_POLL {
                     let used_before = this.quota_handle.used();
                     let remaining = limit.saturating_sub(used_before);
                     if remaining == 0 {
@@ -415,36 +399,32 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StatsIo<S> {
                     remaining_before = Some(remaining);
 
                     let desired = remaining.min(write_buf.len() as u64);
-                    let mut saw_contention = false;
-                    for _ in 0..QUOTA_RESERVE_SPIN_RETRIES {
-                        match this.quota_handle.try_reserve(desired, limit) {
-                            Ok(reservation) => {
-                                quota_reservation = Some(reservation);
-                                write_buf = &write_buf[..desired as usize];
-                                break;
-                            }
-                            Err(crate::stats::QuotaReserveError::LimitExceeded) => {
-                                break;
-                            }
-                            Err(crate::stats::QuotaReserveError::Contended) => {
-                                this.stats.increment_quota_contention_total();
-                                saw_contention = true;
-                            }
+                    match this.quota_handle.try_reserve(desired, limit) {
+                        Ok(reservation) => {
+                            quota_reservation = Some(reservation);
+                            write_buf = &write_buf[..desired as usize];
+                            break;
+                        }
+                        Err(crate::stats::QuotaReserveError::LimitExceeded)
+                        | Err(crate::stats::QuotaReserveError::Contended) => {
+                            this.stats.increment_quota_contention_total();
                         }
                     }
-
-                    if quota_reservation.is_none() {
-                        reserve_rounds = reserve_rounds.saturating_add(1);
-                        if reserve_rounds >= QUOTA_RESERVE_MAX_ROUNDS {
-                            this.stats.increment_quota_contention_timeout_total();
-                            Self::arm_wait(&mut this.quota_wait, false, false);
-                            let _ =
-                                Self::poll_wait(&mut this.quota_wait, cx, None, RateDirection::Up);
-                            return Poll::Pending;
-                        } else if saw_contention {
-                            std::hint::spin_loop();
-                        }
+                }
+                if quota_reservation.is_none() {
+                    this.stats.increment_quota_contention_timeout_total();
+                    Self::arm_wait(&mut this.quota_wait, false, false);
+                    if Self::poll_wait(
+                        &mut this.quota_wait,
+                        cx,
+                        None,
+                        RateDirection::Up,
+                    )
+                    .is_ready()
+                    {
+                        cx.waker().wake_by_ref();
                     }
+                    return Poll::Pending;
                 }
             } else {
                 let used_before = this.quota_handle.used();

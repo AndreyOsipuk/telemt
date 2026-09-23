@@ -124,6 +124,19 @@ impl ProxySharedState {
         direct_buffer_budget: Arc<DirectBufferBudget>,
         user_admission: Arc<UserAdmissionAuthority>,
     ) -> Arc<Self> {
+        Self::new_with_process_authorities(
+            direct_buffer_budget,
+            TrafficLimiter::new(),
+            user_admission,
+        )
+    }
+
+    /// Creates generation-local caches around process-owned data-plane authorities.
+    pub(crate) fn new_with_process_authorities(
+        direct_buffer_budget: Arc<DirectBufferBudget>,
+        traffic_limiter: Arc<TrafficLimiter>,
+        user_admission: Arc<UserAdmissionAuthority>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             handshake: HandshakeSharedState {
                 auth_probe: DashMap::new(),
@@ -163,7 +176,7 @@ impl ProxySharedState {
                 relay_idle_registry: RelayIdleCandidateRegistry::default(),
                 relay_idle_mark_seq: AtomicU64::new(0),
             },
-            traffic_limiter: TrafficLimiter::new(),
+            traffic_limiter,
             direct_buffer_budget,
             user_admission,
             conntrack_pressure_active: AtomicBool::new(false),
