@@ -131,6 +131,192 @@ fn supersede_completion_defers_stream_wake_until_finish() {
 }
 
 #[test]
+fn data_wakes_reader_only_after_releasing_session_lock() {
+    let session = session();
+    let lock_was_free = Arc::new(AtomicBool::new(false));
+    let waker = Waker::from(Arc::new(SessionLockProbe {
+        session: Arc::downgrade(&session),
+        lock_was_free: Arc::clone(&lock_was_free),
+    }));
+    {
+        let mut state = session.state.lock();
+        state.streams.insert(
+            1,
+            StreamState {
+                instance: 1,
+                inbound: VecDeque::new(),
+                receive_window: frame::INITIAL_STREAM_WINDOW,
+                send_credit: u64::from(frame::INITIAL_STREAM_WINDOW),
+                read_waker: Some(waker),
+                write_waker: None,
+            },
+        );
+    }
+
+    let body = frame::encode(FrameType::Data, 1, &[1]);
+    let frames = frame::parse_all(&body, &session.limits).unwrap();
+    let mut opened = Vec::new();
+    let mut unused_bytes = body.len().saturating_add(QUEUE_ITEM_COST);
+    let mut unused_items = 1;
+    let mut progress = AppliedProgress::default();
+    session.with_state_effects(|state, effects| {
+        assert!(session.apply_batch_locked(
+            state,
+            &frames,
+            effects,
+            &mut opened,
+            &mut None,
+            &mut unused_bytes,
+            &mut unused_items,
+            &mut progress,
+        ));
+    });
+    assert!(lock_was_free.load(AtomicOrdering::Acquire));
+}
+
+#[test]
+fn rejected_batch_dispatches_prior_effects_after_releasing_session_lock() {
+    let session = session();
+    let lock_was_free = Arc::new(AtomicBool::new(false));
+    let waker = Waker::from(Arc::new(SessionLockProbe {
+        session: Arc::downgrade(&session),
+        lock_was_free: Arc::clone(&lock_was_free),
+    }));
+    {
+        let mut state = session.state.lock();
+        state.streams.insert(
+            1,
+            StreamState {
+                instance: 1,
+                inbound: VecDeque::new(),
+                receive_window: frame::INITIAL_STREAM_WINDOW,
+                send_credit: u64::from(frame::INITIAL_STREAM_WINDOW),
+                read_waker: Some(waker),
+                write_waker: None,
+            },
+        );
+    }
+
+    let mut body = frame::encode(FrameType::Data, 1, &[1]).to_vec();
+    body.extend_from_slice(&frame::encode(FrameType::Ping, 1, &[]));
+    let frames = frame::parse_all(&body, &session.limits).unwrap();
+    let mut opened = Vec::new();
+    let mut unused_bytes = body.len().saturating_add(QUEUE_ITEM_COST);
+    let mut unused_items = 1;
+    let mut progress = AppliedProgress::default();
+    let applied = session.with_state_effects(|state, effects| {
+        session.apply_batch_locked(
+            state,
+            &frames,
+            effects,
+            &mut opened,
+            &mut None,
+            &mut unused_bytes,
+            &mut unused_items,
+            &mut progress,
+        )
+    });
+
+    assert!(!applied);
+    assert!(lock_was_free.load(AtomicOrdering::Acquire));
+}
+
+#[test]
+fn window_wakes_writer_only_after_releasing_session_lock() {
+    let session = session();
+    let lock_was_free = Arc::new(AtomicBool::new(false));
+    let waker = Waker::from(Arc::new(SessionLockProbe {
+        session: Arc::downgrade(&session),
+        lock_was_free: Arc::clone(&lock_was_free),
+    }));
+    {
+        let mut state = session.state.lock();
+        state.streams.insert(
+            1,
+            StreamState {
+                instance: 1,
+                inbound: VecDeque::new(),
+                receive_window: frame::INITIAL_STREAM_WINDOW,
+                send_credit: 0,
+                read_waker: None,
+                write_waker: Some(waker),
+            },
+        );
+    }
+
+    let body = frame::encode(FrameType::Window, 1, &frame::window_payload(1));
+    let frames = frame::parse_all(&body, &session.limits).unwrap();
+    let mut opened = Vec::new();
+    let mut unused_bytes = 0;
+    let mut unused_items = 0;
+    let mut progress = AppliedProgress::default();
+    session.with_state_effects(|state, effects| {
+        assert!(session.apply_batch_locked(
+            state,
+            &frames,
+            effects,
+            &mut opened,
+            &mut None,
+            &mut unused_bytes,
+            &mut unused_items,
+            &mut progress,
+        ));
+    });
+    assert!(lock_was_free.load(AtomicOrdering::Acquire));
+}
+
+#[test]
+fn close_frame_wakes_both_stream_halves_after_releasing_session_lock() {
+    let session = session();
+    let read_lock_was_free = Arc::new(AtomicBool::new(false));
+    let write_lock_was_free = Arc::new(AtomicBool::new(false));
+    let read_waker = Waker::from(Arc::new(SessionLockProbe {
+        session: Arc::downgrade(&session),
+        lock_was_free: Arc::clone(&read_lock_was_free),
+    }));
+    let write_waker = Waker::from(Arc::new(SessionLockProbe {
+        session: Arc::downgrade(&session),
+        lock_was_free: Arc::clone(&write_lock_was_free),
+    }));
+    {
+        let mut state = session.state.lock();
+        state.streams.insert(
+            1,
+            StreamState {
+                instance: 1,
+                inbound: VecDeque::new(),
+                receive_window: frame::INITIAL_STREAM_WINDOW,
+                send_credit: u64::from(frame::INITIAL_STREAM_WINDOW),
+                read_waker: Some(read_waker),
+                write_waker: Some(write_waker),
+            },
+        );
+    }
+    let body = frame::encode(FrameType::Close, 1, &[]);
+    let frames = frame::parse_all(&body, &session.limits).unwrap();
+    let mut opened = Vec::new();
+    let mut unused_bytes = 0;
+    let mut unused_items = 0;
+    let mut progress = AppliedProgress::default();
+
+    session.with_state_effects(|state, effects| {
+        assert!(session.apply_batch_locked(
+            state,
+            &frames,
+            effects,
+            &mut opened,
+            &mut None,
+            &mut unused_bytes,
+            &mut unused_items,
+            &mut progress,
+        ));
+    });
+
+    assert!(read_lock_was_free.load(AtomicOrdering::Acquire));
+    assert!(write_lock_was_free.load(AtomicOrdering::Acquire));
+}
+
+#[test]
 fn uplink_retry_commits_only_one_exact_body() {
     let session = session();
     let first = frame::encode(FrameType::Pong, 0, &[1, 2, 3]);

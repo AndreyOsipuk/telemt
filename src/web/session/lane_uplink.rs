@@ -5,7 +5,9 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use super::uplink::{AppliedProgress, inbound_reservation, validate_batch};
-use super::{PendingClass, SessionCloseReason, WebSession, insert_carrier_lane};
+use super::{
+    DeferredSessionEffects, PendingClass, SessionCloseReason, WebSession, insert_carrier_lane,
+};
 use crate::config::WebCarrier;
 use crate::web::frame::{self, Frame, FrameType};
 use crate::web::manager::{ManagerError, TokenHash};
@@ -44,6 +46,7 @@ impl WebSession {
         let mut opened = Vec::new();
         let mut committed = false;
         let mut healthy = None;
+        let mut effects = DeferredSessionEffects::new();
         let result = {
             let mut state = self.state.lock();
             if state.closed {
@@ -140,13 +143,28 @@ impl WebSession {
                 return Err(ManagerError::Backpressure);
             }
             if new_lane && insert_carrier_lane(&mut state, lane_id).is_none() {
-                self.release_locked(&mut state, reserve_bytes, reserve_items, false);
+                self.release_locked(
+                    &mut state,
+                    &mut effects,
+                    reserve_bytes,
+                    reserve_items,
+                    false,
+                );
                 drop(state);
+                effects.finish();
                 self.close(SessionCloseReason::Protocol);
                 return Err(ManagerError::Protocol);
             }
             let Some(lane) = state.carrier_lanes.get_mut(&lane_id) else {
-                self.release_locked(&mut state, reserve_bytes, reserve_items, false);
+                self.release_locked(
+                    &mut state,
+                    &mut effects,
+                    reserve_bytes,
+                    reserve_items,
+                    false,
+                );
+                drop(state);
+                effects.finish();
                 return Err(ManagerError::Closed);
             };
             lane.up_active = true;
@@ -156,13 +174,20 @@ impl WebSession {
             let applied = self.apply_batch_locked(
                 &mut state,
                 &frames,
+                &mut effects,
                 &mut opened,
                 &mut None,
                 &mut unused_bytes,
                 &mut unused_items,
                 &mut progress,
             );
-            self.release_locked(&mut state, unused_bytes, unused_items, false);
+            self.release_locked(
+                &mut state,
+                &mut effects,
+                unused_bytes,
+                unused_items,
+                false,
+            );
             if let Some(lane) = state.carrier_lanes.get_mut(&lane_id) {
                 lane.up_active = false;
                 if applied {
@@ -175,6 +200,7 @@ impl WebSession {
             }
             applied.then_some(sequence).ok_or(ManagerError::Closed)
         };
+        effects.finish();
         if matches!(result, Err(ManagerError::Backpressure)) {
             return result;
         }

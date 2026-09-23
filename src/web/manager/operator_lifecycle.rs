@@ -43,7 +43,7 @@ pub(super) struct OperatorLifecycle {
     commands: AsyncMutex<()>,
     inner: Mutex<OperatorLifecycleInner>,
     published: ArcSwap<OperatorSnapshot>,
-    work_changed: Notify,
+    work_changed: Arc<Notify>,
     next_operation_id: AtomicU64,
 }
 
@@ -71,7 +71,7 @@ impl OperatorLifecycle {
                 drain: None,
             }),
             published: ArcSwap::from_pointee(snapshot),
-            work_changed: Notify::new(),
+            work_changed: Arc::new(Notify::new()),
             next_operation_id: AtomicU64::new(1),
         }
     }
@@ -85,9 +85,16 @@ impl OperatorLifecycle {
 
     /// Wakes an active drain after tracked work ownership changes.
     pub(super) fn notify_work_changed(&self) {
-        if self.admission.is_closed() {
-            self.work_changed.notify_waiters();
+        if let Some(notify) = self.work_changed_notification() {
+            notify.notify_waiters();
         }
+    }
+
+    /// Returns the drain notification capability without invoking callbacks.
+    pub(super) fn work_changed_notification(&self) -> Option<Arc<Notify>> {
+        self.admission
+            .is_closed()
+            .then(|| Arc::clone(&self.work_changed))
     }
 
     /// Returns the lock-free lifecycle snapshot with effective config admission.

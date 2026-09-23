@@ -1,5 +1,7 @@
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
 
 use arc_swap::ArcSwap;
 use tokio::sync::Barrier;
@@ -7,6 +9,14 @@ use tokio::sync::Barrier;
 use super::*;
 use crate::config::ProxyConfig;
 use crate::maestro::generation::test_runtime_generation;
+
+struct WakeCounter(AtomicUsize);
+
+impl Wake for WakeCounter {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::AcqRel);
+    }
+}
 
 fn test_runtime() -> (
     Arc<WebProcessRuntime>,
@@ -65,6 +75,39 @@ async fn pause_waits_for_pre_cutover_admission_and_rejects_late_registration() {
     let paused = pause.await.unwrap();
     assert_eq!(paused.state, OperatorLifecycleState::Paused);
 
+    stop_runtime(runtime, generation).await;
+}
+
+#[tokio::test]
+async fn quiet_stream_release_returns_exact_post_accounting_drain_notification() {
+    let (runtime, generation) = test_runtime();
+    let profile_key = [1; 32];
+    let client_ip = "192.0.2.10".parse().unwrap();
+    let public_addr = "203.0.113.10:443".parse().unwrap();
+    let peer_port = runtime
+        .try_acquire_stream(profile_key, 1, client_ip, public_addr)
+        .unwrap();
+    runtime.pause_operator().await.unwrap();
+    let counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&counter));
+    let mut context = Context::from_waker(&waker);
+    let mut notified = Box::pin(runtime.operator_lifecycle.work_changed.notified());
+    assert!(matches!(notified.as_mut().poll(&mut context), Poll::Pending));
+
+    let notify = runtime
+        .release_stream_quiet(profile_key, client_ip, public_addr, peer_port)
+        .unwrap();
+
+    assert_eq!(runtime.stream_admission.lock().streams_live, 0);
+    assert_eq!(counter.0.load(Ordering::Acquire), 0);
+    assert!(
+        runtime
+            .release_stream_quiet(profile_key, client_ip, public_addr, peer_port)
+            .is_none()
+    );
+    notify.notify_waiters();
+    assert_eq!(counter.0.load(Ordering::Acquire), 1);
+    drop(notified);
     stop_runtime(runtime, generation).await;
 }
 

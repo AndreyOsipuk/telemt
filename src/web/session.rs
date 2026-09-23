@@ -1,19 +1,17 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize};
-use std::task::{Context, Poll, Waker};
+use std::task::Waker;
 use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
 use parking_lot::Mutex;
-use tokio::io::ReadBuf;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{WebCarrier, WebLimitsConfig, WebRuntimeProfile, WebTimeoutsConfig};
-use crate::web::frame::{self, FrameType};
+use crate::web::frame::FrameType;
 use crate::web::manager::{
     CarrierClientClass, CarrierLearningContext, ProfileKey, TokenHash, WebProcessRuntime,
 };
@@ -21,6 +19,9 @@ use crate::proxy::user_admission::UserSessionRegistration;
 
 // Backend tasks own generation admission and authenticated MTProxy relay lifetimes.
 mod backend;
+// Deferred callbacks preserve the session-state lock as a callback-free boundary.
+mod effects;
+use effects::DeferredSessionEffects;
 // Activity clocks separate authenticated peer leases from diagnostic progress.
 mod activity;
 use activity::SessionActivity;
@@ -53,6 +54,8 @@ use lifecycle::SessionNegotiationPhase;
 pub(crate) use lifecycle::{SessionCloseOutcome, SessionCloseReason};
 // Uplink batches own exactly-once sequencing and client-frame validation.
 mod uplink;
+// Logical stream polling owns cancellation-safe waker registration.
+mod stream_io;
 
 /// Conservative allocator and container overhead charged to every queued item.
 pub(crate) const QUEUE_ITEM_COST: usize = 256;
@@ -414,119 +417,4 @@ impl WebSession {
         &self.timeouts
     }
 
-    /// Polls client-to-server bytes and returns consumed flow-control credit.
-    pub(super) fn poll_read(
-        &self,
-        stream: StreamIdentity,
-        cx: &mut Context<'_>,
-        output: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        let mut state = self.state.lock();
-        let (count, finished) = {
-            let Some(stream_state) = state
-                .streams
-                .get_mut(&stream.id)
-                .filter(|state| state.instance == stream.instance)
-            else {
-                return Poll::Ready(Ok(()));
-            };
-            let Some(chunk) = stream_state.inbound.front_mut() else {
-                stream_state.read_waker = Some(cx.waker().clone());
-                return Poll::Pending;
-            };
-            let available = &chunk.bytes[chunk.offset..];
-            let count = available.len().min(output.remaining());
-            output.put_slice(&available[..count]);
-            chunk.offset += count;
-            let finished = chunk.offset == chunk.bytes.len();
-            if finished {
-                stream_state.inbound.pop_front();
-            }
-            stream_state.receive_window = stream_state.receive_window.saturating_add(count as u32);
-            (count, finished)
-        };
-        let overhead = if finished { QUEUE_ITEM_COST } else { 0 };
-        self.release_locked(&mut state, count + overhead, usize::from(finished), false);
-        if !self.queue_window_locked(&mut state, stream.id, count as u32) {
-            drop(state);
-            self.close(SessionCloseReason::Backpressure);
-            return Poll::Ready(Err(io::Error::other(
-                "WEB session control budget exhausted",
-            )));
-        }
-        Poll::Ready(Ok(()))
-    }
-
-    /// Polls server-to-client writes against stream credit and bounded queues.
-    pub(super) fn poll_write(
-        &self,
-        stream: StreamIdentity,
-        cx: &mut Context<'_>,
-        input: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        if input.is_empty() {
-            return Poll::Ready(Ok(0));
-        }
-        let mut state = self.state.lock();
-        let Some(stream_state) = state
-            .streams
-            .get_mut(&stream.id)
-            .filter(|state| state.instance == stream.instance)
-        else {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "WEB logical stream is closed",
-            )));
-        };
-        let count = input
-            .len()
-            .min(frame::DATA_CHUNK_BYTES)
-            .min(self.limits.max_frame_payload_bytes)
-            .min(if self.carrier().uses_lanes() {
-                self.limits
-                    .pending_bytes_per_lane
-                    .saturating_sub(frame::HEADER_BYTES + QUEUE_ITEM_COST)
-            } else {
-                usize::MAX
-            })
-            .min(stream_state.send_credit as usize);
-        if count == 0 {
-            stream_state.write_waker = Some(cx.waker().clone());
-            return Poll::Pending;
-        }
-        if !self.queue_data_locked(&mut state, stream.id, &input[..count]) {
-            if let Some(stream_state) = state
-                .streams
-                .get_mut(&stream.id)
-                .filter(|state| state.instance == stream.instance)
-            {
-                stream_state.write_waker = Some(cx.waker().clone());
-            }
-            return Poll::Pending;
-        }
-        let Some(stream_state) = state
-            .streams
-            .get_mut(&stream.id)
-            .filter(|state| state.instance == stream.instance)
-        else {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "WEB logical stream is closed",
-            )));
-        };
-        stream_state.send_credit -= count as u64;
-        state.activity.touch_progress(Instant::now());
-        drop(state);
-        if self.carrier().is_multiplexed() {
-            self.down_notify.notify_waiters();
-        }
-        Poll::Ready(Ok(count))
-    }
-
-    /// Returns the process queue-capacity notification source while the manager lives.
-    pub(super) fn budget_notify(&self) -> Option<Arc<Notify>> {
-        self.manager
-            .upgrade()
-            .map(|manager| manager.budget_notify())
-    }
 }

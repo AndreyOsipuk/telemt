@@ -3,11 +3,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, OwnedSemaphorePermit};
 
-use super::ProfileKey;
+use super::{ProfileKey, WebProcessRuntime};
 use crate::config::WebLimitsConfig;
 use crate::web::session::QUEUE_ITEM_COST;
+use crate::web::telemetry::WebRejectionReason;
 
 /// WebSocket allocation class with a distinct pressure watermark.
 #[derive(Clone, Copy)]
@@ -177,6 +178,18 @@ impl WebDataBudget {
         items: usize,
         control: bool,
     ) {
+        let notify = self.release_queue_quiet(owner, bytes, items, control);
+        notify.notify_waiters();
+    }
+
+    /// Releases queue accounting and returns the notification capability uninvoked.
+    pub(super) fn release_queue_quiet(
+        &self,
+        owner: ProfileKey,
+        bytes: usize,
+        items: usize,
+        control: bool,
+    ) -> Arc<Notify> {
         let mut state = self.state.lock();
         state.queue_bytes = state.queue_bytes.saturating_sub(bytes);
         state.queue_items = state.queue_items.saturating_sub(items);
@@ -186,7 +199,7 @@ impl WebDataBudget {
         }
         remove_owner(&mut state.owner_bytes, owner, bytes);
         drop(state);
-        self.notify.notify_waiters();
+        Arc::clone(&self.notify)
     }
 
     pub(super) fn try_reserve_websocket(
@@ -323,6 +336,120 @@ impl Drop for WebSocketBudgetLease {
     }
 }
 
+impl WebProcessRuntime {
+    /// Reserves one body reader and its declared bounded body allocation.
+    pub(crate) fn try_body_budget(
+        &self,
+        bytes: usize,
+    ) -> Option<(OwnedSemaphorePermit, OwnedSemaphorePermit)> {
+        let Some(bytes) = u32::try_from(bytes).ok() else {
+            self.record_limit_hit();
+            self.telemetry
+                .record_rejection(WebRejectionReason::BodyBytesCapacity);
+            return None;
+        };
+        let Some(reader) = Arc::clone(&self.body_readers).try_acquire_owned().ok() else {
+            self.record_limit_hit();
+            self.telemetry
+                .record_rejection(WebRejectionReason::BodyReaderCapacity);
+            return None;
+        };
+        let Some(body) = Arc::clone(&self.body_bytes)
+            .try_acquire_many_owned(bytes)
+            .ok()
+        else {
+            self.record_limit_hit();
+            self.telemetry
+                .record_rejection(WebRejectionReason::BodyBytesCapacity);
+            return None;
+        };
+        Some((reader, body))
+    }
+
+    /// Reserves transient bytes while one downlink batch replaces queued frames.
+    pub(crate) fn try_downlink_staging_budget(&self, bytes: usize) -> Option<OwnedSemaphorePermit> {
+        let bytes = u32::try_from(bytes).ok()?;
+        let permit = Arc::clone(&self.body_bytes)
+            .try_acquire_many_owned(bytes)
+            .ok();
+        if permit.is_none() {
+            self.record_limit_hit();
+            self.telemetry
+                .record_rejection(WebRejectionReason::BodyBytesCapacity);
+        }
+        permit
+    }
+
+    /// Reserves bounded process-wide queue capacity for data or control traffic.
+    pub(crate) fn try_reserve_pending(
+        &self,
+        owner: ProfileKey,
+        bytes: usize,
+        items: usize,
+        control: bool,
+        downlink: bool,
+    ) -> bool {
+        if !self
+            .data_budget
+            .try_reserve_queue(owner, bytes, items, control, downlink)
+        {
+            self.record_limit_hit();
+            self.telemetry
+                .record_rejection(WebRejectionReason::QueueGlobalCapacity);
+            return false;
+        }
+        true
+    }
+
+    /// Releases process-wide queue capacity and wakes blocked relay writers.
+    pub(crate) fn release_pending(
+        &self,
+        owner: ProfileKey,
+        bytes: usize,
+        items: usize,
+        control: bool,
+    ) {
+        self.data_budget.release_queue(owner, bytes, items, control);
+    }
+
+    /// Releases queue accounting without invoking wake callbacks in the caller's lock scope.
+    pub(crate) fn release_pending_quiet(
+        &self,
+        owner: ProfileKey,
+        bytes: usize,
+        items: usize,
+        control: bool,
+    ) -> Arc<Notify> {
+        self.data_budget
+            .release_queue_quiet(owner, bytes, items, control)
+    }
+
+    /// Returns the shared notification source for global queue capacity changes.
+    pub(crate) fn budget_notify(&self) -> Arc<Notify> {
+        self.data_budget.notify()
+    }
+
+    /// Reserves fixed WebSocket driver memory below the admission watermark.
+    pub(crate) fn try_websocket_base_budget(
+        &self,
+        owner: ProfileKey,
+        bytes: usize,
+    ) -> Option<WebSocketBudgetLease> {
+        self.data_budget
+            .try_reserve_websocket(owner, bytes, WebSocketBudgetClass::Base)
+    }
+
+    /// Reserves one transient WebSocket message below the eviction watermark.
+    pub(crate) fn try_websocket_data_budget(
+        &self,
+        owner: ProfileKey,
+        bytes: usize,
+    ) -> Option<WebSocketBudgetLease> {
+        self.data_budget
+            .try_reserve_websocket(owner, bytes, WebSocketBudgetClass::Data)
+    }
+}
+
 fn watermark(limit: usize, percentage: u8) -> usize {
     limit.saturating_mul(usize::from(percentage)) / 100
 }
@@ -356,51 +483,5 @@ fn update_high_water(state: &mut BudgetState) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn downlink_reservation_preserves_one_uplink_and_websocket_batch() {
-        let limits = WebLimitsConfig::default();
-        let uplink_bytes = limits
-            .max_body_bytes
-            .saturating_add(limits.max_frames_per_body.saturating_mul(QUEUE_ITEM_COST));
-        let downlink_bytes = limits
-            .pending_bytes_global
-            .saturating_sub(limits.control_bytes_global)
-            .saturating_sub(uplink_bytes)
-            .saturating_sub(limits.carrier_batch_bytes);
-        let budget = WebDataBudget::new(limits);
-
-        assert!(budget.try_reserve_queue([1; 32], downlink_bytes, 1, false, true));
-        assert!(!budget.try_reserve_queue([1; 32], 1, 1, false, true));
-    }
-
-    #[test]
-    fn item_limit_rejection_does_not_request_websocket_eviction() {
-        let limits = WebLimitsConfig::default();
-        let rejected_items = limits.pending_items_global.saturating_add(1);
-        let budget = WebDataBudget::new(limits);
-        let _websocket = budget
-            .try_reserve_websocket([1; 32], 1, WebSocketBudgetClass::Data)
-            .unwrap();
-
-        assert!(!budget.try_reserve_queue([2; 32], 1, rejected_items, false, false));
-        assert!(!budget.take_pressure());
-    }
-
-    #[test]
-    fn websocket_byte_conflict_requests_pressure_eviction() {
-        let limits = WebLimitsConfig::default();
-        let data_bytes = limits
-            .pending_bytes_global
-            .saturating_sub(limits.control_bytes_global);
-        let budget = WebDataBudget::new(limits);
-        let _websocket = budget
-            .try_reserve_websocket([1; 32], 1, WebSocketBudgetClass::Data)
-            .unwrap();
-
-        assert!(!budget.try_reserve_queue([2; 32], data_bytes, 1, false, false));
-        assert!(budget.take_pressure());
-    }
-}
+#[path = "budget/tests.rs"]
+mod tests;

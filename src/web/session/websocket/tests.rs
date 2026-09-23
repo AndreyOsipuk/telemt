@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Wake, Waker};
 
 use arc_swap::ArcSwap;
 use tokio::sync::watch;
@@ -9,6 +12,21 @@ use crate::config::{ProxyConfig, WebRuntimeConfig, WebRuntimeProfile, WebSecretM
 use crate::maestro::generation::{RuntimeGeneration, test_runtime_generation_with_admission};
 use crate::web::frame::FrameType;
 use crate::web::manager::WebProcessRuntime;
+use crate::web::session::StreamState;
+
+struct SessionLockProbe {
+    session: std::sync::Weak<WebSession>,
+    lock_was_free: Arc<AtomicBool>,
+}
+
+impl Wake for SessionLockProbe {
+    fn wake(self: Arc<Self>) {
+        if let Some(session) = self.session.upgrade() {
+            self.lock_was_free
+                .store(session.state.try_lock().is_some(), Ordering::Release);
+        }
+    }
+}
 
 struct TestRuntime {
     session: Arc<WebSession>,
@@ -87,8 +105,7 @@ fn runtime(admission: bool) -> TestRuntime {
 
 fn detach_stale_lane(runtime: &TestRuntime, reservation: &WebSocketLaneReservation) {
     let claim = reservation.claim;
-    {
-        let mut state = runtime.session.state.lock();
+    runtime.session.with_state_effects(|state, effects| {
         assert_eq!(
             state
                 .websocket_lane_reservations
@@ -97,9 +114,9 @@ fn detach_stale_lane(runtime: &TestRuntime, reservation: &WebSocketLaneReservati
         );
         runtime
             .session
-            .release_lane_locked(&mut state, claim.lane.lane_id);
+            .release_lane_locked(state, effects, claim.lane.lane_id);
         assert!(state.active_peer_ports.remove(&claim.peer_port));
-    }
+    });
     runtime.manager.release_stream(
         runtime.session.profile_key,
         runtime.session.client_ip,
@@ -408,6 +425,59 @@ async fn stale_reservation_drop_preserves_replacement_claim() {
         );
     }
     runtime.session.close_websocket_lane(replacement);
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn exact_lane_teardown_wakes_stream_after_releasing_session_lock() {
+    let runtime = runtime(true);
+    let mut reservation = runtime.session.reserve_websocket_lane(7).unwrap();
+    reservation.bind(1).unwrap();
+    let claim = reservation.claim;
+    let stream = StreamIdentity { id: 7, instance: 1 };
+    let read_lock_was_free = Arc::new(AtomicBool::new(false));
+    let write_lock_was_free = Arc::new(AtomicBool::new(false));
+    let read_waker = Waker::from(Arc::new(SessionLockProbe {
+        session: Arc::downgrade(&runtime.session),
+        lock_was_free: Arc::clone(&read_lock_was_free),
+    }));
+    let write_waker = Waker::from(Arc::new(SessionLockProbe {
+        session: Arc::downgrade(&runtime.session),
+        lock_was_free: Arc::clone(&write_lock_was_free),
+    }));
+    runtime.session.state.lock().streams.insert(
+        stream.id,
+        StreamState {
+            instance: stream.instance,
+            inbound: VecDeque::new(),
+            receive_window: frame::INITIAL_STREAM_WINDOW,
+            send_credit: u64::from(frame::INITIAL_STREAM_WINDOW),
+            read_waker: Some(read_waker),
+            write_waker: Some(write_waker),
+        },
+    );
+
+    runtime
+        .session
+        .release_websocket_lane_claim(claim, Some(stream), false);
+
+    assert!(read_lock_was_free.load(Ordering::Acquire));
+    assert!(write_lock_was_free.load(Ordering::Acquire));
+    assert!(
+        runtime
+            .session
+            .state
+            .lock()
+            .active_peer_ports
+            .remove(&claim.peer_port)
+    );
+    runtime.manager.release_stream(
+        runtime.session.profile_key,
+        runtime.session.client_ip,
+        runtime.session.profile.public_addr,
+        claim.peer_port,
+    );
+    drop(reservation);
     runtime.shutdown().await;
 }
 

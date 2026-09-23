@@ -5,8 +5,8 @@ use bytes::{BufMut, Bytes, BytesMut};
 
 use super::lane_downlink::take_lane_down_batch;
 use super::{
-    CarrierLaneIdentity, PendingClass, PollResult, QUEUE_ITEM_COST, QueuedFrame,
-    SessionCloseReason, SessionState, WebSession, remember_closed,
+    CarrierLaneIdentity, DeferredSessionEffects, PendingClass, PollResult, QUEUE_ITEM_COST,
+    QueuedFrame, SessionCloseReason, SessionState, WebSession, remember_closed,
 };
 use crate::web::frame::{self, FrameType};
 use crate::web::manager::ManagerError;
@@ -68,6 +68,7 @@ impl WebSession {
                 lane_closed: expected_instance.is_some(),
             });
         }
+        let mut effects = DeferredSessionEffects::new();
         let (instance, epoch, notify, healthy) = {
             let mut state = self.state.lock();
             if state.closed || self.cancel.is_cancelled() {
@@ -146,15 +147,18 @@ impl WebSession {
                 if let Some(stream) = state.streams.get_mut(&lane_id)
                     && let Some(waker) = stream.write_waker.take()
                 {
-                    waker.wake();
+                    effects.wake(waker);
                 }
+                effects.retain_batch(batch);
             }
-            let lane = state
-                .carrier_lanes
-                .get_mut(&lane_id)
-                .ok_or(ManagerError::Protocol)?;
+            let Some(lane) = state.carrier_lanes.get_mut(&lane_id) else {
+                drop(state);
+                effects.finish();
+                return Err(ManagerError::Protocol);
+            };
             let Some(epoch) = lane.down_epoch.checked_add(1) else {
                 drop(state);
+                effects.finish();
                 self.close(SessionCloseReason::Protocol);
                 return Err(ManagerError::Protocol);
             };
@@ -171,6 +175,7 @@ impl WebSession {
             let healthy = self.carrier_health_ready_locked(&mut state, Instant::now());
             (instance, epoch, notify, healthy)
         };
+        effects.finish();
         if let Some(claim) = healthy {
             self.finish_carrier_health(claim);
         }
@@ -182,6 +187,7 @@ impl WebSession {
                 let notified = notify.notified();
                 tokio::pin!(notified);
                 notified.as_mut().enable();
+                let mut effects = DeferredSessionEffects::new();
                 {
                     let mut state = self.state.lock();
                     if state.closed || self.cancel.is_cancelled() {
@@ -217,6 +223,7 @@ impl WebSession {
                             self,
                             &self.limits,
                             lane,
+                            &mut effects,
                             cursor,
                             carrier_health_eligible,
                         ) {
@@ -235,8 +242,11 @@ impl WebSession {
                             next_cursor: batch.next_cursor,
                             lane_closed: false,
                         };
-                        lane.unacked = Some(batch);
+                        if let Some(previous) = lane.unacked.replace(batch) {
+                            effects.retain_batch(previous);
+                        }
                         drop(state);
+                        effects.finish();
                         if let Some(manager) = self.manager.upgrade() {
                             manager.record_down(result.body.len());
                         }
@@ -316,6 +326,7 @@ impl WebSession {
     pub(super) fn queue_lane_frame_locked(
         &self,
         state: &mut SessionState,
+        effects: &mut DeferredSessionEffects,
         frame_type: FrameType,
         stream_id: u32,
         payload: &[u8],
@@ -343,7 +354,7 @@ impl WebSession {
             {
                 queued.encoded[frame::HEADER_BYTES..frame::HEADER_BYTES + 4]
                     .copy_from_slice(&total.to_be_bytes());
-                lane.notify.notify_waiters();
+                effects.notify(Arc::clone(&lane.notify));
                 return true;
             }
         }
@@ -374,11 +385,11 @@ impl WebSession {
                 return false;
             }
             let Some(lane) = state.carrier_lanes.get_mut(&stream_id) else {
-                self.release_locked(state, payload.len(), 0, false);
+                self.release_locked(state, effects, payload.len(), 0, false);
                 return false;
             };
             let Some(last) = lane.pending_frames.back_mut() else {
-                self.release_locked(state, payload.len(), 0, false);
+                self.release_locked(state, effects, payload.len(), 0, false);
                 return false;
             };
             last.encoded.extend_from_slice(payload);
@@ -386,7 +397,7 @@ impl WebSession {
             let payload_len = (last.encoded.len() - frame::HEADER_BYTES) as u32;
             last.encoded[4..8].copy_from_slice(&payload_len.to_be_bytes());
             lane.pending_bytes += payload.len();
-            lane.notify.notify_waiters();
+            effects.notify(Arc::clone(&lane.notify));
             return true;
         }
         let cost = frame::HEADER_BYTES + payload.len() + QUEUE_ITEM_COST;
@@ -418,7 +429,7 @@ impl WebSession {
         encoded.put_u32(payload.len() as u32);
         encoded.extend_from_slice(payload);
         let Some(lane) = state.carrier_lanes.get_mut(&stream_id) else {
-            self.release_locked(state, cost, 1, control);
+            self.release_locked(state, effects, cost, 1, control);
             return false;
         };
         let index = lane.pending_frames.len();
@@ -436,28 +447,38 @@ impl WebSession {
         if frame_type == FrameType::Window {
             lane.pending_windows.insert(stream_id, index);
         }
-        lane.notify.notify_waiters();
+        effects.notify(Arc::clone(&lane.notify));
         true
     }
 
-    pub(super) fn remember_closed_locked(&self, state: &mut SessionState, stream_id: u32) {
+    pub(super) fn remember_closed_locked(
+        &self,
+        state: &mut SessionState,
+        effects: &mut DeferredSessionEffects,
+        stream_id: u32,
+    ) {
         let evicted = remember_closed(state, stream_id, self.limits.max_tombstones_per_session);
         if !self.carrier().uses_lanes() {
             return;
         }
         if let Some(evicted) = evicted {
-            self.release_lane_locked(state, evicted);
+            self.release_lane_locked(state, effects, evicted);
         }
         if let Some(lane) = state.carrier_lanes.get(&stream_id) {
-            lane.notify.notify_waiters();
+            effects.notify(Arc::clone(&lane.notify));
         }
     }
 
-    pub(super) fn release_lane_locked(&self, state: &mut SessionState, lane_id: u32) {
+    pub(super) fn release_lane_locked(
+        &self,
+        state: &mut SessionState,
+        effects: &mut DeferredSessionEffects,
+        lane_id: u32,
+    ) {
         let Some(mut lane) = state.carrier_lanes.remove(&lane_id) else {
             return;
         };
-        lane.notify.notify_waiters();
+        effects.notify(Arc::clone(&lane.notify));
         let mut data_bytes = 0usize;
         let mut data_items = 0usize;
         let mut control_bytes = 0usize;
@@ -475,10 +496,11 @@ impl WebSession {
             batch.lease.detach();
             self.release_local_locked(state, batch.data_bytes, batch.data_items, false);
             self.release_local_locked(state, batch.control_bytes, batch.control_items, true);
+            effects.retain_batch(batch);
         }
-        self.release_locked(state, data_bytes, data_items, false);
-        self.release_locked(state, control_bytes, control_items, true);
-        self.lane_open_notify.notify_waiters();
+        self.release_locked(state, effects, data_bytes, data_items, false);
+        self.release_locked(state, effects, control_bytes, control_items, true);
+        effects.notify(Arc::clone(&self.lane_open_notify));
     }
 }
 

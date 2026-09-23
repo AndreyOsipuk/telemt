@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::sync::Notify;
@@ -63,12 +64,13 @@ impl OperatorAdmissionRejection {
 /// Lock-free admission fence with bounded pre-cutover registration tracking.
 pub(super) struct OperatorAdmission {
     state: AtomicUsize,
-    registrations_drained: Notify,
+    registrations_drained: Arc<Notify>,
 }
 
 /// RAII ownership of one synchronous pre-cutover admission section.
 pub(in crate::web::manager) struct OperatorRegistration<'a> {
     admission: &'a OperatorAdmission,
+    released: bool,
 }
 
 impl OperatorAdmission {
@@ -76,7 +78,7 @@ impl OperatorAdmission {
     pub(super) fn new() -> Self {
         Self {
             state: AtomicUsize::new(0),
-            registrations_drained: Notify::new(),
+            registrations_drained: Arc::new(Notify::new()),
         }
     }
 
@@ -100,7 +102,12 @@ impl OperatorAdmission {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => return Ok(OperatorRegistration { admission: self }),
+                Ok(_) => {
+                    return Ok(OperatorRegistration {
+                        admission: self,
+                        released: false,
+                    });
+                }
                 Err(observed) => state = observed,
             }
         }
@@ -147,13 +154,69 @@ impl OperatorAdmission {
             notified.await;
         }
     }
+
+    fn release_registration(&self) -> Option<Arc<Notify>> {
+        let previous = self.state.fetch_sub(1, Ordering::AcqRel);
+        (previous & OPERATOR_REGISTRATION_COUNT == 1)
+            .then(|| Arc::clone(&self.registrations_drained))
+    }
+}
+
+impl OperatorRegistration<'_> {
+    /// Releases ownership and returns the final-registration notification uninvoked.
+    pub(in crate::web::manager) fn release_deferred(mut self) -> Option<Arc<Notify>> {
+        self.released = true;
+        self.admission.release_registration()
+    }
 }
 
 impl Drop for OperatorRegistration<'_> {
     fn drop(&mut self) {
-        let previous = self.admission.state.fetch_sub(1, Ordering::AcqRel);
-        if previous & OPERATOR_REGISTRATION_COUNT == 1 {
-            self.admission.registrations_drained.notify_waiters();
+        if self.released {
+            return;
         }
+        if let Some(notify) = self.admission.release_registration() {
+            notify.notify_waiters();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    use super::*;
+
+    struct WakeCounter(AtomicUsize);
+
+    impl Wake for WakeCounter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    #[test]
+    fn deferred_registration_release_does_not_invoke_waiter_before_dispatch() {
+        let admission = OperatorAdmission::new();
+        let registration = admission.try_register().unwrap();
+        admission.close(OperatorAdmissionRejection::Paused);
+        let counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&counter));
+        let mut context = Context::from_waker(&waker);
+        let mut notified = Box::pin(admission.registrations_drained.notified());
+        assert!(matches!(notified.as_mut().poll(&mut context), Poll::Pending));
+
+        let notify = registration.release_deferred().unwrap();
+
+        assert_eq!(
+            admission.state.load(Ordering::Acquire) & OPERATOR_REGISTRATION_COUNT,
+            0
+        );
+        assert_eq!(counter.0.load(Ordering::Acquire), 0);
+        notify.notify_waiters();
+        assert_eq!(counter.0.load(Ordering::Acquire), 1);
     }
 }

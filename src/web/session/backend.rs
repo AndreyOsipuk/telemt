@@ -106,11 +106,10 @@ impl WebSession {
             self.stream_finished(stream, peer_port);
             return;
         }
-        let queued = {
-            let mut state = self.state.lock();
+        let queued = self.with_state_effects(|state, effects| {
             if state.closing_streams.get(&stream.id) == Some(&stream.instance) {
                 state.closing_streams.remove(&stream.id);
-                self.remember_closed_locked(&mut state, stream.id);
+                self.remember_closed_locked(state, effects, stream.id);
             }
             state
                 .streams
@@ -119,21 +118,26 @@ impl WebSession {
                 .is_some()
                 .then(|| state.streams.remove(&stream.id))
                 .flatten()
-                .map(|stream_state| {
+                .map(|mut stream_state| {
+                    if let Some(waker) = stream_state.read_waker.take() {
+                        effects.drop_waker(waker);
+                    }
+                    if let Some(waker) = stream_state.write_waker.take() {
+                        effects.drop_waker(waker);
+                    }
                     let (bytes, items) = inbound_queue_cost(&stream_state.inbound);
-                    self.release_locked(&mut state, bytes, items, false);
-                    self.remember_closed_locked(&mut state, stream.id);
-                    self.queue_control_locked(&mut state, FrameType::Close, stream.id, &[])
+                    self.release_locked(state, effects, bytes, items, false);
+                    self.remember_closed_locked(state, effects, stream.id);
+                    self.queue_control_locked(state, effects, FrameType::Close, stream.id, &[])
                 })
-        };
+        });
         if queued.is_some_and(|queued| !queued) {
             self.close(SessionCloseReason::Backpressure);
         }
     }
 
     fn stream_finished(&self, stream: StreamIdentity, peer_port: u16) {
-        let (queued, reserved) = {
-            let mut state = self.state.lock();
+        let (queued, reserved) = self.with_state_effects(|state, effects| {
             let reserved = state.active_peer_ports.remove(&peer_port);
             let current = state
                 .streams
@@ -142,18 +146,24 @@ impl WebSession {
             let queued = current
                 .then(|| state.streams.remove(&stream.id))
                 .flatten()
-                .map(|stream_state| {
+                .map(|mut stream_state| {
+                    if let Some(waker) = stream_state.read_waker.take() {
+                        effects.drop_waker(waker);
+                    }
+                    if let Some(waker) = stream_state.write_waker.take() {
+                        effects.drop_waker(waker);
+                    }
                     let (bytes, items) = inbound_queue_cost(&stream_state.inbound);
-                    self.release_locked(&mut state, bytes, items, false);
-                    self.remember_closed_locked(&mut state, stream.id);
-                    self.queue_control_locked(&mut state, FrameType::Close, stream.id, &[])
+                    self.release_locked(state, effects, bytes, items, false);
+                    self.remember_closed_locked(state, effects, stream.id);
+                    self.queue_control_locked(state, effects, FrameType::Close, stream.id, &[])
                 });
             if state.closing_streams.get(&stream.id) == Some(&stream.instance) {
                 state.closing_streams.remove(&stream.id);
-                self.remember_closed_locked(&mut state, stream.id);
+                self.remember_closed_locked(state, effects, stream.id);
             }
             (queued, reserved)
-        };
+        });
         if reserved && let Some(manager) = self.manager.upgrade() {
             manager.release_stream(
                 self.profile_key,

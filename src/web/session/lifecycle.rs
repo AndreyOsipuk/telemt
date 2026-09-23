@@ -1,11 +1,7 @@
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::task::Waker;
 use std::time::{Duration, Instant};
 
-use tokio::sync::Notify;
-
-use super::WebSession;
+use super::{DeferredSessionEffects, WebSession};
 
 /// Stable terminal cause assigned by the first session-close winner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,8 +104,7 @@ struct ReleasedQueues {
     recovery_closed_before_commit: bool,
     reason: SessionCloseReason,
     peer_gap: Duration,
-    stream_wakers: Vec<Waker>,
-    lane_notifies: Vec<Arc<Notify>>,
+    effects: DeferredSessionEffects,
 }
 
 /// Deferred queue release after manager publication linearizes a supersede.
@@ -138,6 +133,7 @@ impl WebSession {
 
     /// Closes carrier state while relay tasks retain their admission until exit.
     pub(crate) fn close(&self, reason: SessionCloseReason) -> SessionCloseOutcome {
+        let effects = DeferredSessionEffects::new();
         let mut state = self.state.lock();
         if state.closed || state.close_requested.is_some() {
             return SessionCloseOutcome::AlreadyClosing;
@@ -146,7 +142,7 @@ impl WebSession {
             state.close_requested = Some(reason);
             return SessionCloseOutcome::Deferred;
         }
-        let released = self.release_on_close_locked(&mut state, reason);
+        let released = self.release_on_close_locked(&mut state, reason, effects);
         drop(state);
         self.finish_close(released);
         SessionCloseOutcome::Closed
@@ -171,23 +167,22 @@ impl WebSession {
 
     /// Restores an uncommitted attempt after successor admission failed.
     pub(crate) fn cancel_carrier_supersede(&self) {
-        let released = {
-            let mut state = self.state.lock();
-            if !state.closed && state.negotiation_phase == SessionNegotiationPhase::Replacing {
-                state.negotiation_phase = SessionNegotiationPhase::Uncommitted;
-            }
-            state
-                .close_requested
-                .filter(|_| !state.closed)
-                .map(|reason| self.release_on_close_locked(&mut state, reason))
-        };
-        if let Some(released) = released {
-            self.finish_close(released);
+        let effects = DeferredSessionEffects::new();
+        let mut state = self.state.lock();
+        if !state.closed && state.negotiation_phase == SessionNegotiationPhase::Replacing {
+            state.negotiation_phase = SessionNegotiationPhase::Uncommitted;
         }
+        let Some(reason) = state.close_requested.filter(|_| !state.closed) else {
+            return;
+        };
+        let released = self.release_on_close_locked(&mut state, reason, effects);
+        drop(state);
+        self.finish_close(released);
     }
 
     /// Linearizes manager publication against close requests on the old token.
     pub(crate) fn prepare_carrier_supersede(&self) -> Option<CarrierSupersedeCompletion<'_>> {
+        let effects = DeferredSessionEffects::new();
         let mut state = self.state.lock();
         if state.closed
             || state.negotiation_phase != SessionNegotiationPhase::Replacing
@@ -196,7 +191,11 @@ impl WebSession {
             return None;
         }
         let released =
-            self.release_on_close_locked(&mut state, SessionCloseReason::CarrierSuperseded);
+            self.release_on_close_locked(
+                &mut state,
+                SessionCloseReason::CarrierSuperseded,
+                effects,
+            );
         Some(CarrierSupersedeCompletion {
             session: self,
             released,
@@ -254,6 +253,7 @@ impl WebSession {
     }
 
     fn begin_idle_close(&self, now: Instant) -> Option<ReleasedQueues> {
+        let effects = DeferredSessionEffects::new();
         let mut state = self.state.lock();
         if state.closed || state.close_requested.is_some() {
             return None;
@@ -264,13 +264,18 @@ impl WebSession {
         {
             return None;
         }
-        Some(self.release_on_close_locked(&mut state, SessionCloseReason::PeerIdle))
+        Some(self.release_on_close_locked(
+            &mut state,
+            SessionCloseReason::PeerIdle,
+            effects,
+        ))
     }
 
     fn release_on_close_locked(
         &self,
         state: &mut super::SessionState,
         reason: SessionCloseReason,
+        mut effects: DeferredSessionEffects,
     ) -> ReleasedQueues {
         let peer_gap = state.activity.peer_idle(Instant::now());
         let closed_before_health = self.automatic_carrier
@@ -282,13 +287,12 @@ impl WebSession {
         if reason == SessionCloseReason::CarrierSuperseded {
             state.negotiation_phase = SessionNegotiationPhase::Superseded;
         }
-        let mut stream_wakers = Vec::with_capacity(state.streams.len().saturating_mul(2));
         for stream in state.streams.values_mut() {
             if let Some(waker) = stream.read_waker.take() {
-                stream_wakers.push(waker);
+                effects.wake(waker);
             }
             if let Some(waker) = stream.write_waker.take() {
-                stream_wakers.push(waker);
+                effects.wake(waker);
             }
         }
         state.streams.clear();
@@ -298,20 +302,21 @@ impl WebSession {
             batch.lease.detach();
             self.release_local_locked(state, batch.data_bytes, batch.data_items, false);
             self.release_local_locked(state, batch.control_bytes, batch.control_items, true);
+            effects.retain_batch(batch);
         }
         let mut lane_data_bytes = 0usize;
         let mut lane_data_items = 0usize;
         let mut lane_control_bytes = 0usize;
         let mut lane_control_items = 0usize;
-        let mut lane_notifies = Vec::with_capacity(state.carrier_lanes.len());
         for lane in state.carrier_lanes.values_mut() {
-            lane_notifies.push(Arc::clone(&lane.notify));
+            effects.notify(std::sync::Arc::clone(&lane.notify));
             if let Some(batch) = lane.unacked.take() {
                 batch.lease.detach();
                 lane_data_bytes = lane_data_bytes.saturating_add(batch.data_bytes);
                 lane_data_items = lane_data_items.saturating_add(batch.data_items);
                 lane_control_bytes = lane_control_bytes.saturating_add(batch.control_bytes);
                 lane_control_items = lane_control_items.saturating_add(batch.control_items);
+                effects.retain_batch(batch);
             }
         }
         self.release_local_locked(state, lane_data_bytes, lane_data_items, false);
@@ -334,25 +339,11 @@ impl WebSession {
             recovery_closed_before_commit,
             reason,
             peer_gap,
-            stream_wakers,
-            lane_notifies,
+            effects,
         }
     }
 
-    fn finish_close(&self, released: ReleasedQueues) {
-        for waker in released.stream_wakers {
-            waker.wake();
-        }
-        for notify in released.lane_notifies {
-            notify.notify_waiters();
-        }
-        self.cancel.cancel();
-        if self.carrier().is_multiplexed() {
-            self.down_notify.notify_waiters();
-        }
-        if self.carrier().uses_lanes() {
-            self.lane_open_notify.notify_waiters();
-        }
+    fn finish_close(&self, mut released: ReleasedQueues) {
         let manager = self.manager.upgrade();
         if let Some(manager) = &manager {
             if released.closed_before_health {
@@ -366,18 +357,26 @@ impl WebSession {
                     crate::web::telemetry::WebBridgeRecoveryEvent::ClosedBeforeCommit,
                 );
             }
-            manager.release_pending(
+            released.effects.notify(manager.release_pending_quiet(
                 self.profile_key,
                 released.data_bytes,
                 released.data_items,
                 false,
-            );
-            manager.release_pending(
+            ));
+            released.effects.notify(manager.release_pending_quiet(
                 self.profile_key,
                 released.control_bytes,
                 released.control_items,
                 true,
-            );
+            ));
+        }
+        released.effects.finish();
+        self.cancel.cancel();
+        if self.carrier().is_multiplexed() {
+            self.down_notify.notify_waiters();
+        }
+        if self.carrier().uses_lanes() {
+            self.lane_open_notify.notify_waiters();
         }
         if !self.finished.swap(true, Ordering::AcqRel) {
             if let Some(manager) = &manager {

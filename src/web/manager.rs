@@ -57,7 +57,7 @@ pub(crate) use observability::{WebCapacityResourceStatus, WebCapacitySnapshot};
 // Asynchronous bounded close operations isolate mutation lifecycle from HTTP requests.
 mod control;
 pub(crate) use budget::WebSocketBudgetLease;
-use budget::{WebDataBudget, WebSocketBudgetClass};
+use budget::WebDataBudget;
 pub(crate) use control::{CloseOperationSelector, ControlError};
 pub(crate) use negotiation::{
     CarrierCapabilities, CarrierClientClass, CarrierFailure, CarrierLearningContext, CarrierRequest,
@@ -403,106 +403,6 @@ impl WebProcessRuntime {
             return;
         }
         drop(tokio::spawn(tracked));
-    }
-
-    /// Reserves one body reader and its declared bounded body allocation.
-    pub(crate) fn try_body_budget(
-        &self,
-        bytes: usize,
-    ) -> Option<(OwnedSemaphorePermit, OwnedSemaphorePermit)> {
-        let Some(bytes) = u32::try_from(bytes).ok() else {
-            self.record_limit_hit();
-            self.telemetry
-                .record_rejection(WebRejectionReason::BodyBytesCapacity);
-            return None;
-        };
-        let Some(reader) = Arc::clone(&self.body_readers).try_acquire_owned().ok() else {
-            self.record_limit_hit();
-            self.telemetry
-                .record_rejection(WebRejectionReason::BodyReaderCapacity);
-            return None;
-        };
-        let Some(body) = Arc::clone(&self.body_bytes)
-            .try_acquire_many_owned(bytes)
-            .ok()
-        else {
-            self.record_limit_hit();
-            self.telemetry
-                .record_rejection(WebRejectionReason::BodyBytesCapacity);
-            return None;
-        };
-        Some((reader, body))
-    }
-
-    /// Reserves transient bytes while one downlink batch replaces queued frames.
-    pub(crate) fn try_downlink_staging_budget(&self, bytes: usize) -> Option<OwnedSemaphorePermit> {
-        let bytes = u32::try_from(bytes).ok()?;
-        let permit = Arc::clone(&self.body_bytes)
-            .try_acquire_many_owned(bytes)
-            .ok();
-        if permit.is_none() {
-            self.record_limit_hit();
-            self.telemetry
-                .record_rejection(WebRejectionReason::BodyBytesCapacity);
-        }
-        permit
-    }
-
-    /// Reserves bounded process-wide queue capacity for data or control traffic.
-    pub(crate) fn try_reserve_pending(
-        &self,
-        owner: ProfileKey,
-        bytes: usize,
-        items: usize,
-        control: bool,
-        downlink: bool,
-    ) -> bool {
-        if !self
-            .data_budget
-            .try_reserve_queue(owner, bytes, items, control, downlink)
-        {
-            self.record_limit_hit();
-            self.telemetry
-                .record_rejection(WebRejectionReason::QueueGlobalCapacity);
-            return false;
-        }
-        true
-    }
-
-    /// Releases process-wide queue capacity and wakes blocked relay writers.
-    pub(crate) fn release_pending(
-        &self,
-        owner: ProfileKey,
-        bytes: usize,
-        items: usize,
-        control: bool,
-    ) {
-        self.data_budget.release_queue(owner, bytes, items, control);
-    }
-
-    /// Returns the shared notification source for global queue capacity changes.
-    pub(crate) fn budget_notify(&self) -> Arc<Notify> {
-        self.data_budget.notify()
-    }
-
-    /// Reserves fixed WebSocket driver memory below the admission watermark.
-    pub(crate) fn try_websocket_base_budget(
-        &self,
-        owner: ProfileKey,
-        bytes: usize,
-    ) -> Option<WebSocketBudgetLease> {
-        self.data_budget
-            .try_reserve_websocket(owner, bytes, WebSocketBudgetClass::Base)
-    }
-
-    /// Reserves one transient WebSocket message below the eviction watermark.
-    pub(crate) fn try_websocket_data_budget(
-        &self,
-        owner: ProfileKey,
-        bytes: usize,
-    ) -> Option<WebSocketBudgetLease> {
-        self.data_budget
-            .try_reserve_websocket(owner, bytes, WebSocketBudgetClass::Data)
     }
 
     /// Admits one WebSocket with dead-first, then owner-local bounded replacement.

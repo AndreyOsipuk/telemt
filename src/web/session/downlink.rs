@@ -3,14 +3,16 @@ use std::time::{Duration, Instant};
 
 use bytes::{BufMut, Bytes, BytesMut};
 
-use super::resident::{OwnedBatchBody, PendingCounts, PendingResponseLease};
 use super::{
-    DownBatch, PendingClass, PollResult, QUEUE_ITEM_COST, QueuedFrame, SessionCloseReason,
-    SessionState, WebSession,
+    DeferredSessionEffects, PendingClass, PollResult, QUEUE_ITEM_COST, QueuedFrame,
+    SessionCloseReason, SessionState, WebSession,
 };
 use crate::web::frame::{self, FrameType};
 use crate::web::manager::ManagerError;
 use crate::web::telemetry::WebSessionLifecycleObservation;
+
+// Batch staging owns transient permits and detached response leases.
+mod batch;
 
 impl WebSession {
     /// Polls pending downlink frames with cursor replay and newest-poll-wins semantics.
@@ -29,6 +31,7 @@ impl WebSession {
         if self.close_if_cancelled() {
             return Err(ManagerError::Closed);
         }
+        let mut effects = DeferredSessionEffects::new();
         let (epoch, healthy) = {
             let mut state = self.state.lock();
             if state.closed || self.cancel.is_cancelled() {
@@ -58,7 +61,7 @@ impl WebSession {
                     return Err(ManagerError::Protocol);
                 }
                 let carrier_health_eligible = unacked.carrier_health_eligible;
-                self.release_unacked_locked(&mut state);
+                self.release_unacked_locked(&mut state, &mut effects);
                 state.carrier_health_downlink |= carrier_health_eligible;
                 if carrier_health_eligible {
                     state.carrier_health_activity_at = Some(Instant::now());
@@ -70,6 +73,7 @@ impl WebSession {
             }
             let Some(epoch) = state.down_epoch.checked_add(1) else {
                 drop(state);
+                effects.finish();
                 self.close(SessionCloseReason::Protocol);
                 return Err(ManagerError::Protocol);
             };
@@ -84,6 +88,7 @@ impl WebSession {
             let healthy = self.carrier_health_ready_locked(&mut state, Instant::now());
             (state.down_epoch, healthy)
         };
+        effects.finish();
         if let Some(claim) = healthy {
             self.finish_carrier_health(claim);
         }
@@ -95,6 +100,7 @@ impl WebSession {
                 let notified = self.down_notify.notified();
                 tokio::pin!(notified);
                 notified.as_mut().enable();
+                let mut effects = DeferredSessionEffects::new();
                 {
                     let mut state = self.state.lock();
                     if self.cancel.is_cancelled() {
@@ -110,7 +116,11 @@ impl WebSession {
                         });
                     }
                     if !state.pending_frames.is_empty() {
-                        let batch = match self.take_down_batch_locked(&mut state, cursor) {
+                        let batch = match self.take_down_batch_locked(
+                            &mut state,
+                            &mut effects,
+                            cursor,
+                        ) {
                             Ok(batch) => batch,
                             Err(ManagerError::Backpressure) => {
                                 return Err(ManagerError::Backpressure);
@@ -129,7 +139,11 @@ impl WebSession {
                         if let Some(manager) = self.manager.upgrade() {
                             manager.record_down(result.body.len());
                         }
-                        state.unacked = Some(batch);
+                        if let Some(previous) = state.unacked.replace(batch) {
+                            effects.retain_batch(previous);
+                        }
+                        drop(state);
+                        effects.finish();
                         return Ok(result);
                     }
                     if state.closed {
@@ -274,6 +288,7 @@ impl WebSession {
     pub(super) fn release_locked(
         &self,
         state: &mut SessionState,
+        effects: &mut DeferredSessionEffects,
         bytes: usize,
         items: usize,
         control: bool,
@@ -285,7 +300,12 @@ impl WebSession {
             state.pending_control_items = state.pending_control_items.saturating_sub(items);
         }
         if let Some(manager) = self.manager.upgrade() {
-            manager.release_pending(self.profile_key, bytes, items, control);
+            effects.notify(manager.release_pending_quiet(
+                self.profile_key,
+                bytes,
+                items,
+                control,
+            ));
         }
     }
 
@@ -308,6 +328,7 @@ impl WebSession {
     pub(super) fn queue_window_locked(
         &self,
         state: &mut SessionState,
+        effects: &mut DeferredSessionEffects,
         stream_id: u32,
         amount: u32,
     ) -> bool {
@@ -317,6 +338,7 @@ impl WebSession {
         if self.carrier().uses_lanes() {
             return self.queue_control_locked(
                 state,
+                effects,
                 FrameType::Window,
                 stream_id,
                 &frame::window_payload(amount),
@@ -333,12 +355,13 @@ impl WebSession {
             if let Some(total) = previous.checked_add(amount) {
                 queued.encoded[frame::HEADER_BYTES..frame::HEADER_BYTES + 4]
                     .copy_from_slice(&total.to_be_bytes());
-                self.down_notify.notify_waiters();
+                effects.notify(Arc::clone(&self.down_notify));
                 return true;
             }
         }
         self.queue_control_locked(
             state,
+            effects,
             FrameType::Window,
             stream_id,
             &frame::window_payload(amount),
@@ -349,22 +372,31 @@ impl WebSession {
     pub(super) fn queue_control_locked(
         &self,
         state: &mut SessionState,
+        effects: &mut DeferredSessionEffects,
         frame_type: FrameType,
         stream_id: u32,
         payload: &[u8],
     ) -> bool {
-        self.queue_frame_locked(state, frame_type, stream_id, payload, true)
+        self.queue_frame_locked(state, effects, frame_type, stream_id, payload, true)
     }
 
     /// Appends one server-to-client DATA frame under downlink data budgets.
     pub(super) fn queue_data_locked(
         &self,
         state: &mut SessionState,
+        effects: &mut DeferredSessionEffects,
         stream_id: u32,
         payload: &[u8],
     ) -> bool {
         if self.carrier().uses_lanes() {
-            return self.queue_frame_locked(state, FrameType::Data, stream_id, payload, false);
+            return self.queue_frame_locked(
+                state,
+                effects,
+                FrameType::Data,
+                stream_id,
+                payload,
+                false,
+            );
         }
         let can_coalesce = state.pending_frames.back().is_some_and(|last| {
             last.frame_type == FrameType::Data
@@ -385,19 +417,34 @@ impl WebSession {
             last.encoded[4..8].copy_from_slice(&payload_len.to_be_bytes());
             return true;
         }
-        self.queue_frame_locked(state, FrameType::Data, stream_id, payload, false)
+        self.queue_frame_locked(
+            state,
+            effects,
+            FrameType::Data,
+            stream_id,
+            payload,
+            false,
+        )
     }
 
     fn queue_frame_locked(
         &self,
         state: &mut SessionState,
+        effects: &mut DeferredSessionEffects,
         frame_type: FrameType,
         stream_id: u32,
         payload: &[u8],
         control: bool,
     ) -> bool {
         if self.carrier().uses_lanes() {
-            return self.queue_lane_frame_locked(state, frame_type, stream_id, payload, control);
+            return self.queue_lane_frame_locked(
+                state,
+                effects,
+                frame_type,
+                stream_id,
+                payload,
+                control,
+            );
         }
         let cost = frame::HEADER_BYTES + payload.len() + QUEUE_ITEM_COST;
         let class = if control {
@@ -426,105 +473,10 @@ impl WebSession {
         if frame_type == FrameType::Window {
             state.pending_windows.insert(stream_id, index);
         }
-        self.down_notify.notify_waiters();
+        effects.notify(Arc::clone(&self.down_notify));
         true
     }
 
-    fn take_down_batch_locked(
-        &self,
-        state: &mut SessionState,
-        cursor: u64,
-    ) -> Result<DownBatch, ManagerError> {
-        let next_cursor = state
-            .down_cursor
-            .checked_add(1)
-            .ok_or(ManagerError::Protocol)?;
-        let mut count = 0usize;
-        let mut body_len = 0usize;
-        for queued in &state.pending_frames {
-            if count >= self.limits.max_frames_per_body
-                || (count != 0
-                    && body_len.saturating_add(queued.encoded.len())
-                        > self.limits.carrier_batch_bytes)
-            {
-                break;
-            }
-            body_len += queued.encoded.len();
-            count += 1;
-        }
-        let Some(manager) = self.manager.upgrade() else {
-            return Err(ManagerError::Closed);
-        };
-        let Some(_staging) = manager.try_downlink_staging_budget(body_len) else {
-            return Err(ManagerError::Backpressure);
-        };
-        let mut body = BytesMut::with_capacity(body_len);
-        let mut data_bytes = 0usize;
-        let mut data_items = 0usize;
-        let mut control_bytes = 0usize;
-        let mut control_items = 0usize;
-        for index in 0..count {
-            let Some(queued) = state.pending_frames.get(index) else {
-                break;
-            };
-            if queued.frame_type == FrameType::Window
-                && state.pending_windows.get(&queued.stream_id) == Some(&index)
-            {
-                state.pending_windows.remove(&queued.stream_id);
-            }
-        }
-        for _ in 0..count {
-            let Some(queued) = state.pending_frames.pop_front() else {
-                break;
-            };
-            body.extend_from_slice(&queued.encoded);
-            if queued.control {
-                control_bytes += queued.cost;
-                control_items += 1;
-            } else {
-                data_bytes += queued.cost;
-                data_items += 1;
-            }
-        }
-        for index in state.pending_windows.values_mut() {
-            *index = index.saturating_sub(count);
-        }
-        state.down_cursor = next_cursor;
-        let counts = PendingCounts {
-            data_bytes,
-            data_items,
-            control_bytes,
-            control_items,
-        };
-        let lease = PendingResponseLease::new(self, counts, None);
-        let body = Bytes::from_owner(OwnedBatchBody::new(body.freeze(), Arc::clone(&lease)));
-        Ok(DownBatch {
-            body,
-            lease,
-            base_cursor: cursor,
-            next_cursor,
-            data_bytes,
-            data_items,
-            control_bytes,
-            control_items,
-            carrier_health_eligible: state.negotiation_phase
-                == super::SessionNegotiationPhase::Committed,
-        })
-    }
-
-    fn release_unacked_locked(&self, state: &mut SessionState) {
-        let Some(batch) = state.unacked.take() else {
-            return;
-        };
-        batch.lease.detach();
-        self.release_local_locked(state, batch.data_bytes, batch.data_items, false);
-        self.release_local_locked(state, batch.control_bytes, batch.control_items, true);
-        for stream in state.streams.values_mut() {
-            if let Some(waker) = stream.write_waker.take() {
-                waker.wake();
-            }
-        }
-    }
 }
 
 #[cfg(test)]
