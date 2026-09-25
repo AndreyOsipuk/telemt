@@ -2,6 +2,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::*;
+/// Returns the delay until the next traffic-limiter refill boundary.
 pub fn next_refill_delay() -> Duration {
     let start = limiter_epoch_start();
     let elapsed_ms = start.elapsed().as_millis() as u64;

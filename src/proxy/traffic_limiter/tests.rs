@@ -1,8 +1,76 @@
 use super::*;
 use crate::config::CidrRateLimitKey;
 
+mod bucket_contention;
+
+impl DirectionBucket {
+    pub(crate) fn should_force_reserve_failure(&self) -> bool {
+        self.reserve_cas_attempts.fetch_add(1, Ordering::Relaxed);
+        let remaining = self.forced_reserve_failures.load(Ordering::Relaxed);
+        remaining > 0
+            && self
+                .forced_reserve_failures
+                .compare_exchange(
+                    remaining,
+                    remaining - 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+    }
+
+    pub(crate) fn should_force_refund_failure(&self) -> bool {
+        self.refund_cas_attempts.fetch_add(1, Ordering::Relaxed);
+        let remaining = self.forced_refund_failures.load(Ordering::Relaxed);
+        remaining > 0
+            && self
+                .forced_refund_failures
+                .compare_exchange(
+                    remaining,
+                    remaining - 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+    }
+
+    pub(crate) fn force_reserve_failures(&self, failures: usize) {
+        self.reserve_cas_attempts.store(0, Ordering::Relaxed);
+        self.forced_reserve_failures
+            .store(failures as u64, Ordering::Relaxed);
+    }
+
+    pub(crate) fn force_refund_failures(&self, failures: usize) {
+        self.refund_cas_attempts.store(0, Ordering::Relaxed);
+        self.forced_refund_failures
+            .store(failures as u64, Ordering::Relaxed);
+    }
+
+    pub(crate) fn reserve_cas_attempts(&self) -> u64 {
+        self.reserve_cas_attempts.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn refund_cas_attempts(&self) -> u64 {
+        self.refund_cas_attempts.load(Ordering::Relaxed)
+    }
+}
+
 fn rate(up_bps: u64, down_bps: u64) -> RateLimitBps {
     RateLimitBps { up_bps, down_bps }
+}
+
+fn reserve_at(
+    bucket: &Arc<DirectionBucket>,
+    epoch: u64,
+    cap: u64,
+    requested: u64,
+) -> Result<Option<DirectionDebit>, BucketReserveError> {
+    bucket.try_reserve_at(
+        epoch,
+        cap,
+        requested,
+        &mut ReserveCasBudget::new(),
+    )
 }
 
 #[test]
@@ -151,12 +219,20 @@ fn auto_cidr_bucket_key_canonicalizes_network_address() {
 #[test]
 fn refund_from_an_old_epoch_does_not_reduce_the_current_epoch() {
     let bucket = Arc::new(DirectionBucket::default());
-    let old_debit = bucket.try_reserve_at(7, 100, 80).unwrap();
-    let current_debit = bucket.try_reserve_at(8, 100, 60).unwrap();
+    let old_debit = reserve_at(&bucket, 7, 100, 80).unwrap().unwrap();
+    let current_debit = reserve_at(&bucket, 8, 100, 60).unwrap().unwrap();
 
     drop(old_debit);
 
     assert_eq!(bucket.used_at(8), Some(60));
+    assert_eq!(bucket.refund_cas_attempts(), 0);
+    assert_eq!(
+        bucket
+            .contention
+            .refund_exhausted_total
+            .load(Ordering::Relaxed),
+        0
+    );
     drop(current_debit);
 }
 
@@ -172,8 +248,8 @@ fn concurrent_rollover_cannot_publish_multiple_epoch_budgets() {
         let barrier = Arc::clone(&barrier);
         threads.push(std::thread::spawn(move || {
             barrier.wait();
-            bucket
-                .try_reserve_at(9, 100, 100)
+            reserve_at(&bucket, 9, 100, 100)
+                .unwrap()
                 .map(|mut debit| debit.commit_all())
                 .unwrap_or(0)
         }));
@@ -202,8 +278,8 @@ fn scheduler_pressure_never_exceeds_a_packed_epoch_budget() {
             let mut grants = Vec::with_capacity(EPOCHS);
             for epoch in 1..=EPOCHS as u64 {
                 barrier.wait();
-                let granted = bucket
-                    .try_reserve_at(epoch, 100, 100)
+                let granted = reserve_at(&bucket, epoch, 100, 100)
+                    .unwrap()
                     .map(|mut debit| debit.commit_all())
                     .unwrap_or(0);
                 grants.push(granted);
@@ -228,7 +304,12 @@ fn scheduler_pressure_never_exceeds_a_packed_epoch_budget() {
 
 #[test]
 fn stale_policy_revision_cannot_restore_an_old_rate() {
-    let bucket = UserBucket::new(2, rate(2_000, 3_000));
+    let bucket = UserBucket::new(
+        2,
+        rate(2_000, 3_000),
+        Arc::new(CasContentionMetrics::default()),
+        Arc::new(CasContentionMetrics::default()),
+    );
 
     bucket.set_rates(3, rate(4_000, 5_000));
     bucket.set_rates(2, rate(6_000, 7_000));
@@ -240,16 +321,15 @@ fn stale_policy_revision_cannot_restore_an_old_rate() {
 #[test]
 fn dropped_debit_refunds_only_its_packed_epoch() {
     let bucket = Arc::new(DirectionBucket::default());
-    let debit = bucket.try_reserve_at(11, 100, 80).unwrap();
+    let debit = reserve_at(&bucket, 11, 100, 80).unwrap().unwrap();
 
     drop(debit);
 
     assert_eq!(bucket.used_at(11), Some(0));
-    assert!(
-        bucket
-            .try_reserve_at(PACKED_EPOCH_MAX + 1, 100, 1)
-            .is_none()
-    );
+    assert!(matches!(
+        reserve_at(&bucket, PACKED_EPOCH_MAX + 1, 100, 1),
+        Err(BucketReserveError::StaleEpoch)
+    ));
 }
 
 #[test]
@@ -266,14 +346,34 @@ fn concurrent_first_use_counts_one_active_cidr_user() {
         let barrier = Arc::clone(&barrier);
         threads.push(std::thread::spawn(move || {
             barrier.wait();
-            assert!(user.ensure_active(13, &bucket.active_users));
+            user.ensure_active(
+                13,
+                &bucket.active_users,
+                &mut ReserveCasBudget::new(),
+            )
         }));
     }
-    for thread in threads {
-        thread.join().unwrap();
-    }
+    let results: Vec<_> = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect();
 
-    assert_eq!(bucket.active_users.used_at(13), Some(1));
+    assert!(results.iter().any(|result| *result == Ok(true)));
+    assert!(results.iter().all(|result| matches!(
+        result,
+        Ok(true)
+            | Err(BucketReserveError::Contended)
+            | Err(BucketReserveError::RefundContended)
+            | Err(BucketReserveError::ReserveAndRefundContended)
+    )));
+    let leaked = bucket
+        .active_users
+        .contention
+        .refund_exhausted_total
+        .load(Ordering::Relaxed);
+    assert_eq!(bucket.active_users.used_at(13), Some(1 + leaked));
+    assert!(1 + leaked <= CONTENDERS as u64);
+    assert_eq!(user.used.used_at(13), Some(0));
 }
 
 #[test]
@@ -300,6 +400,8 @@ fn dropped_traffic_reservation_refunds_user_and_cidr_debits() {
     let reservation = lease.try_reserve(RateDirection::Down, 800);
     assert_eq!(reservation.result().granted, 800);
     let epoch = reservation.user.as_ref().unwrap().epoch;
+    assert_eq!(reservation.cidr.as_ref().unwrap().epoch, epoch);
+    assert_eq!(reservation.cidr_user.as_ref().unwrap().epoch, epoch);
     drop(reservation);
 
     let binding = lease.binding.load_full();
@@ -347,12 +449,12 @@ fn active_lease_observes_policy_removal() {
     let lease = limiter
         .acquire_lease("alice", "203.0.113.7".parse().unwrap())
         .unwrap();
-    assert_eq!(lease.try_consume(RateDirection::Up, 1).granted, 1);
-    assert_eq!(lease.try_consume(RateDirection::Up, 1).granted, 0);
+    assert!(lease.binding.load().user_bucket.is_some());
 
     limiter.apply_policy(HashMap::new(), HashMap::new());
 
-    assert_eq!(lease.try_consume(RateDirection::Up, 1).granted, 1);
+    assert_eq!(lease.try_consume(RateDirection::Up, 2).granted, 2);
+    assert!(lease.binding.load().user_bucket.is_none());
 }
 
 #[test]
@@ -361,14 +463,14 @@ fn active_lease_observes_policy_addition() {
     let lease = limiter
         .acquire_lease("alice", "203.0.113.7".parse().unwrap())
         .unwrap();
-    assert_eq!(lease.try_consume(RateDirection::Up, 2).granted, 2);
+    assert!(lease.binding.load().user_bucket.is_none());
 
     let mut user_limits = HashMap::new();
     user_limits.insert("alice".to_string(), rate(1, 0));
     limiter.apply_policy(user_limits, HashMap::new());
 
-    assert_eq!(lease.try_consume(RateDirection::Up, 1).granted, 1);
-    assert_eq!(lease.try_consume(RateDirection::Up, 1).granted, 0);
+    assert_eq!(lease.try_consume(RateDirection::Up, 2).granted, 1);
+    assert!(lease.binding.load().user_bucket.is_some());
 }
 
 #[test]

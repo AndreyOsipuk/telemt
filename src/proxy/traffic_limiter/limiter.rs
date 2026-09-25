@@ -1,7 +1,51 @@
 use crate::config::CidrRateLimitKey;
 
 use super::*;
+
+impl ScopeMetrics {
+    pub(super) fn throttle(&self, direction: RateDirection) {
+        match direction {
+            RateDirection::Up => {
+                self.throttle_up_total.fetch_add(1, Ordering::Relaxed);
+            }
+            RateDirection::Down => {
+                self.throttle_down_total.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub(super) fn wait_ms(&self, direction: RateDirection, wait_ms: u64) {
+        match direction {
+            RateDirection::Up => {
+                self.wait_up_ms_total.fetch_add(wait_ms, Ordering::Relaxed);
+            }
+            RateDirection::Down => {
+                self.wait_down_ms_total
+                    .fetch_add(wait_ms, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub(super) fn contention(&self, direction: RateDirection) -> Arc<CasContentionMetrics> {
+        match direction {
+            RateDirection::Up => Arc::clone(&self.contention_up),
+            RateDirection::Down => Arc::clone(&self.contention_down),
+        }
+    }
+
+    pub(super) fn reserve_cas_retry_exhausted(&self, direction: RateDirection) {
+        let metrics = match direction {
+            RateDirection::Up => self.contention_up.as_ref(),
+            RateDirection::Down => self.contention_down.as_ref(),
+        };
+        metrics
+            .reserve_exhausted_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 impl TrafficLimiter {
+    /// Creates an empty limiter with no active rate-limit policy.
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             policy: ArcSwap::from_pointee(PolicySnapshot::default()),
@@ -15,6 +59,7 @@ impl TrafficLimiter {
     }
 
     #[cfg(test)]
+    /// Replaces the in-memory policy for isolated limiter tests.
     pub fn apply_policy(
         &self,
         user_limits: HashMap<String, RateLimitBps>,
@@ -125,6 +170,7 @@ impl TrafficLimiter {
         true
     }
 
+    /// Creates a lease that follows policy revisions for one client identity.
     pub fn acquire_lease(
         self: &Arc<Self>,
         user: &str,
@@ -151,7 +197,14 @@ impl TrafficLimiter {
         if let Some(limit) = policy.user_limits.get(user).copied() {
             let bucket = self.user_buckets.get_or_insert_with(
                 user,
-                || UserBucket::new(policy.revision, limit),
+                || {
+                    UserBucket::new(
+                        policy.revision,
+                        limit,
+                        self.user_scope.contention(RateDirection::Up),
+                        self.user_scope.contention(RateDirection::Down),
+                    )
+                },
                 |bucket| {
                     bucket.active_leases.fetch_add(1, Ordering::Relaxed);
                 },
@@ -173,7 +226,14 @@ impl TrafficLimiter {
             };
             let bucket = self.cidr_buckets.get_or_insert_with(
                 key,
-                || CidrBucket::new(policy.revision, limits),
+                || {
+                    CidrBucket::new(
+                        policy.revision,
+                        limits,
+                        self.cidr_scope.contention(RateDirection::Up),
+                        self.cidr_scope.contention(RateDirection::Down),
+                    )
+                },
                 |bucket| {
                     bucket.active_leases.fetch_add(1, Ordering::Relaxed);
                 },
@@ -198,6 +258,7 @@ impl TrafficLimiter {
         })
     }
 
+    /// Captures limiter telemetry without locking bucket registries.
     pub fn metrics_snapshot(&self) -> TrafficLimiterMetricsSnapshot {
         TrafficLimiterMetricsSnapshot {
             user_throttle_up_total: self.user_scope.throttle_up_total.load(Ordering::Relaxed),
@@ -208,10 +269,77 @@ impl TrafficLimiter {
             user_wait_down_ms_total: self.user_scope.wait_down_ms_total.load(Ordering::Relaxed),
             cidr_wait_up_ms_total: self.cidr_scope.wait_up_ms_total.load(Ordering::Relaxed),
             cidr_wait_down_ms_total: self.cidr_scope.wait_down_ms_total.load(Ordering::Relaxed),
+            user_reserve_cas_retry_exhausted_up_total: self
+                .user_scope
+                .contention_up
+                .reserve_exhausted_total
+                .load(Ordering::Relaxed),
+            user_reserve_cas_retry_exhausted_down_total: self
+                .user_scope
+                .contention_down
+                .reserve_exhausted_total
+                .load(Ordering::Relaxed),
+            user_refund_cas_retry_exhausted_up_total: self
+                .user_scope
+                .contention_up
+                .refund_exhausted_total
+                .load(Ordering::Relaxed),
+            user_refund_cas_retry_exhausted_down_total: self
+                .user_scope
+                .contention_down
+                .refund_exhausted_total
+                .load(Ordering::Relaxed),
+            cidr_reserve_cas_retry_exhausted_up_total: self
+                .cidr_scope
+                .contention_up
+                .reserve_exhausted_total
+                .load(Ordering::Relaxed),
+            cidr_reserve_cas_retry_exhausted_down_total: self
+                .cidr_scope
+                .contention_down
+                .reserve_exhausted_total
+                .load(Ordering::Relaxed),
+            cidr_refund_cas_retry_exhausted_up_total: self
+                .cidr_scope
+                .contention_up
+                .refund_exhausted_total
+                .load(Ordering::Relaxed),
+            cidr_refund_cas_retry_exhausted_down_total: self
+                .cidr_scope
+                .contention_down
+                .refund_exhausted_total
+                .load(Ordering::Relaxed),
             user_active_leases: self.user_scope.active_leases.load(Ordering::Relaxed),
             cidr_active_leases: self.cidr_scope.active_leases.load(Ordering::Relaxed),
             user_policy_entries: self.user_scope.policy_entries.load(Ordering::Relaxed),
             cidr_policy_entries: self.cidr_scope.policy_entries.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Sets fixed contention counters for renderer mapping tests.
+    #[cfg(test)]
+    pub(crate) fn set_cas_contention_metrics_for_test(&self, values: [u64; 8]) {
+        let [
+            user_reserve_up,
+            user_reserve_down,
+            user_refund_up,
+            user_refund_down,
+            cidr_reserve_up,
+            cidr_reserve_down,
+            cidr_refund_up,
+            cidr_refund_down,
+        ] = values;
+        for (counter, value) in [
+            (&self.user_scope.contention_up.reserve_exhausted_total, user_reserve_up),
+            (&self.user_scope.contention_down.reserve_exhausted_total, user_reserve_down),
+            (&self.user_scope.contention_up.refund_exhausted_total, user_refund_up),
+            (&self.user_scope.contention_down.refund_exhausted_total, user_refund_down),
+            (&self.cidr_scope.contention_up.reserve_exhausted_total, cidr_reserve_up),
+            (&self.cidr_scope.contention_down.reserve_exhausted_total, cidr_reserve_down),
+            (&self.cidr_scope.contention_up.refund_exhausted_total, cidr_refund_up),
+            (&self.cidr_scope.contention_down.refund_exhausted_total, cidr_refund_down),
+        ] {
+            counter.store(value, Ordering::Relaxed);
         }
     }
 

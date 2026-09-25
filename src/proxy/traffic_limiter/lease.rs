@@ -42,13 +42,53 @@ impl TrafficLease {
                 cidr_user: None,
             };
         }
+        if binding.user_bucket.is_none() && binding.cidr_bucket.is_none() {
+            return TrafficReservation {
+                result: TrafficConsumeResult {
+                    granted: requested,
+                    blocked_user: false,
+                    blocked_cidr: false,
+                },
+                _binding: binding,
+                user: None,
+                cidr: None,
+                cidr_user: None,
+            };
+        }
 
+        let epoch = current_epoch();
+        let mut budget = ReserveCasBudget::new();
         let mut granted = requested;
         let mut user_debit = None;
         if let Some(user_bucket) = binding.user_bucket.as_ref() {
-            let (user_granted, debit) = user_bucket.try_reserve(direction, granted);
-            user_debit = debit;
-            if user_granted == 0 {
+            let user_reservation = match user_bucket.try_reserve(
+                direction,
+                epoch,
+                granted,
+                &mut budget,
+            ) {
+                Ok(reservation) => reservation,
+                Err(error) => {
+                    if error.exhausted_reserve_budget() {
+                        self.limiter
+                            .user_scope
+                            .reserve_cas_retry_exhausted(direction);
+                    }
+                    return TrafficReservation {
+                        result: TrafficConsumeResult {
+                            granted: 0,
+                            blocked_user: false,
+                            blocked_cidr: false,
+                        },
+                        _binding: binding,
+                        user: None,
+                        cidr: None,
+                        cidr_user: None,
+                    };
+                }
+            };
+            user_debit = user_reservation.debit;
+            if user_reservation.granted == 0 {
                 self.limiter.observe_throttle(direction, true, false);
                 return TrafficReservation {
                     result: TrafficConsumeResult {
@@ -62,7 +102,7 @@ impl TrafficLease {
                     cidr_user: None,
                 };
             }
-            granted = user_granted;
+            granted = user_reservation.granted;
         }
 
         let mut cidr_debit = None;
@@ -70,16 +110,41 @@ impl TrafficLease {
         if let (Some(cidr_bucket), Some(cidr_user_share)) =
             (binding.cidr_bucket.as_ref(), binding.cidr_user_share.as_ref())
         {
-            let (cidr_granted, aggregate_debit, share_debit) =
-                cidr_bucket.try_reserve_for_user(direction, cidr_user_share, granted);
-            cidr_debit = aggregate_debit;
-            cidr_user_debit = share_debit;
-            if cidr_granted < granted
+            let cidr_reservation = match cidr_bucket.try_reserve_for_user(
+                direction,
+                cidr_user_share,
+                epoch,
+                granted,
+                &mut budget,
+            ) {
+                Ok(reservation) => reservation,
+                Err(error) => {
+                    if error.exhausted_reserve_budget() {
+                        self.limiter
+                            .cidr_scope
+                            .reserve_cas_retry_exhausted(direction);
+                    }
+                    return TrafficReservation {
+                        result: TrafficConsumeResult {
+                            granted: 0,
+                            blocked_user: false,
+                            blocked_cidr: false,
+                        },
+                        _binding: binding,
+                        user: user_debit,
+                        cidr: None,
+                        cidr_user: None,
+                    };
+                }
+            };
+            cidr_debit = cidr_reservation.aggregate_debit;
+            cidr_user_debit = cidr_reservation.user_debit;
+            if cidr_reservation.granted < granted
                 && let Some(debit) = user_debit.as_mut()
             {
-                debit.shrink_to(cidr_granted);
+                let _ = debit.shrink_to(cidr_reservation.granted);
             }
-            if cidr_granted == 0 {
+            if cidr_reservation.granted == 0 {
                 self.limiter.observe_throttle(direction, false, true);
                 return TrafficReservation {
                     result: TrafficConsumeResult {
@@ -93,7 +158,7 @@ impl TrafficLease {
                     cidr_user: cidr_user_debit,
                 };
             }
-            granted = cidr_granted;
+            granted = cidr_reservation.granted;
         }
 
         TrafficReservation {
@@ -109,6 +174,7 @@ impl TrafficLease {
         }
     }
 
+    /// Immediately consumes the budget granted by all applicable limits.
     pub fn try_consume(&self, direction: RateDirection, requested: u64) -> TrafficConsumeResult {
         let reservation = self.try_reserve(direction, requested);
         let result = reservation.result();
@@ -116,6 +182,7 @@ impl TrafficLease {
         result
     }
 
+    /// Records caller-observed limiter wait time for the blocking scopes.
     pub fn observe_wait_ms(
         &self,
         direction: RateDirection,

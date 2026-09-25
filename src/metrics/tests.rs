@@ -3,9 +3,21 @@ use http_body_util::BodyExt;
 use std::net::IpAddr;
 use std::time::SystemTime;
 
+use crate::stats::telemetry::TelemetryPolicy;
 use crate::tls_front::types::{
     CachedTlsData, ParsedServerHello, TlsBehaviorProfile, TlsCertPayload, TlsProfileSource,
 };
+
+const CAS_CONTENTION_SERIES: [(&str, &str, &str, u64); 8] = [
+    ("user", "up", "reserve", 1),
+    ("user", "down", "reserve", 2),
+    ("user", "up", "refund", 3),
+    ("user", "down", "refund", 4),
+    ("cidr", "up", "reserve", 5),
+    ("cidr", "down", "reserve", 6),
+    ("cidr", "up", "refund", 7),
+    ("cidr", "down", "refund", 8),
+];
 
 fn test_web_publication() -> crate::web::control::WebRuntimePublication {
     let control = crate::web::control::WebRuntimeControl::new();
@@ -18,6 +30,9 @@ async fn test_render_metrics_format() {
     let shared_state = ProxySharedState::new();
     let tracker = UserIpTracker::new();
     let mut config = ProxyConfig::default();
+    shared_state
+        .traffic_limiter
+        .set_cas_contention_metrics_for_test([1, 2, 3, 4, 5, 6, 7, 8]);
     config
         .access
         .user_max_unique_ips
@@ -156,6 +171,17 @@ async fn test_render_metrics_format() {
     assert!(output.contains("telemt_ip_tracker_users{scope=\"active\"} 1"));
     assert!(output.contains("telemt_ip_tracker_entries{scope=\"active\"} 1"));
     assert!(output.contains("telemt_ip_tracker_cleanup_queue_len 0"));
+    for (scope, direction, operation, value) in CAS_CONTENTION_SERIES {
+        assert!(output.contains(&format!(
+            "telemt_rate_limiter_cas_retry_exhausted_total{{scope=\"{scope}\",direction=\"{direction}\",operation=\"{operation}\"}} {value}"
+        )));
+    }
+    assert_eq!(
+        output
+            .matches("telemt_rate_limiter_cas_retry_exhausted_total{")
+            .count(),
+        8
+    );
 }
 
 #[tokio::test]
@@ -310,6 +336,13 @@ async fn process_tls_budget_metrics_survive_a_generation_without_tls_cache() {
 async fn test_render_empty_stats() {
     let stats = Stats::new();
     let shared_state = ProxySharedState::new();
+    stats.apply_telemetry_policy(TelemetryPolicy {
+        core_enabled: false,
+        ..TelemetryPolicy::default()
+    });
+    shared_state
+        .traffic_limiter
+        .set_cas_contention_metrics_for_test([1, 2, 3, 4, 5, 6, 7, 8]);
     let tracker = UserIpTracker::new();
     let config = ProxyConfig::default();
     let output = render_metrics(
@@ -330,6 +363,11 @@ async fn test_render_empty_stats() {
     assert!(output.contains("telemt_auth_budget_exhausted_total 0"));
     assert!(output.contains("telemt_user_unique_ips_current{user="));
     assert!(output.contains("telemt_user_unique_ips_recent_window{user="));
+    for (scope, direction, operation, _) in CAS_CONTENTION_SERIES {
+        assert!(output.contains(&format!(
+            "telemt_rate_limiter_cas_retry_exhausted_total{{scope=\"{scope}\",direction=\"{direction}\",operation=\"{operation}\"}} 0"
+        )));
+    }
 }
 
 #[tokio::test]
