@@ -67,12 +67,8 @@ impl DirectionBucket {
         if self.should_force_reserve_failure() {
             return Err(current);
         }
-        self.state.compare_exchange(
-            current,
-            next,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        )
+        self.state
+            .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
     }
 
     #[inline(always)]
@@ -81,12 +77,8 @@ impl DirectionBucket {
         if self.should_force_refund_failure() {
             return Err(current);
         }
-        self.state.compare_exchange(
-            current,
-            next,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        )
+        self.state
+            .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
     }
 
     fn unpack(state: u64) -> (u64, u64) {
@@ -355,9 +347,9 @@ impl CidrDirectionBucket {
             });
         };
         let user_granted = user_debit.granted();
-        let Some(aggregate_debit) = self
-            .used
-            .try_reserve_at(epoch, cap_epoch, user_granted, budget)?
+        let Some(aggregate_debit) =
+            self.used
+                .try_reserve_at(epoch, cap_epoch, user_granted, budget)?
         else {
             return Ok(CidrReservation {
                 granted: 0,
@@ -410,12 +402,8 @@ impl CidrUserDirectionState {
             if observed_epoch > epoch {
                 return Err(BucketReserveError::StaleEpoch);
             }
-            let Some(mut active_debit) = active_users.try_reserve_at(
-                epoch,
-                PACKED_USAGE_MASK,
-                1,
-                budget,
-            )?
+            let Some(mut active_debit) =
+                active_users.try_reserve_at(epoch, PACKED_USAGE_MASK, 1, budget)?
             else {
                 return Ok(false);
             };
@@ -532,10 +520,9 @@ impl CidrBucket {
         }
         let cap_epoch = bytes_per_epoch(cap_bps);
         match direction {
-            RateDirection::Up => {
-                self.up
-                    .try_reserve(&share.up, epoch, cap_epoch, requested, budget)
-            }
+            RateDirection::Up => self
+                .up
+                .try_reserve(&share.up, epoch, cap_epoch, requested, budget),
             RateDirection::Down => {
                 self.down
                     .try_reserve(&share.down, epoch, cap_epoch, requested, budget)

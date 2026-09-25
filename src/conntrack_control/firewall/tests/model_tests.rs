@@ -73,14 +73,9 @@ fn hybrid_policy_is_a_sorted_deduplicated_address_port_product() {
 
 #[test]
 fn restore_renderers_keep_staging_detached_from_activation() {
-    let stage = iptables::render_stage_script(
-        ShadowSlot::B,
-        &[target(Some("192.0.2.20"), 443)],
-    );
+    let stage = iptables::render_stage_script(ShadowSlot::B, &[target(Some("192.0.2.20"), 443)]);
     assert!(stage.contains("-F TELEMT_NT_B\n"));
-    assert!(stage.contains(
-        "-A TELEMT_NT_B -p tcp --dport 443 -d 192.0.2.20 -j CT --notrack\n"
-    ));
+    assert!(stage.contains("-A TELEMT_NT_B -p tcp --dport 443 -d 192.0.2.20 -j CT --notrack\n"));
     assert!(!stage.contains("-A TELEMT_NOTRACK -j TELEMT_NT_B"));
     assert!(!stage.contains(":TELEMT_"));
 

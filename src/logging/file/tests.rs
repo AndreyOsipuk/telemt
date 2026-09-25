@@ -137,10 +137,7 @@ fn appender_rejects_group_writable_log_directory() {
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o770)).unwrap();
 
     assert!(
-        BoundedFileAppender::with_now(
-            options(dir.path().join("telemt.log")),
-            Box::new(fixed_now),
-        )
-        .is_err()
+        BoundedFileAppender::with_now(options(dir.path().join("telemt.log")), Box::new(fixed_now),)
+            .is_err()
     );
 }

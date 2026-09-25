@@ -234,7 +234,8 @@ pub(super) async fn maybe_refresh_idle_writer_for_dc(
         purpose,
         &mut reservation,
     );
-    let rotate_ok = match tokio::time::timeout(pool.reconnect_runtime.me_one_timeout, replace).await {
+    let rotate_ok = match tokio::time::timeout(pool.reconnect_runtime.me_one_timeout, replace).await
+    {
         Ok(Ok(())) => true,
         Ok(Err(error)) => {
             debug!(

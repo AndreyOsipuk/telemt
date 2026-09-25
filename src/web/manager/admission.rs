@@ -18,12 +18,8 @@ impl WebProcessRuntime {
         client_ip: IpAddr,
         public_addr: SocketAddr,
     ) -> Result<u16, super::ManagerError> {
-        let (result, notify) = self.try_acquire_stream_quiet(
-            profile_key,
-            max_streams,
-            client_ip,
-            public_addr,
-        );
+        let (result, notify) =
+            self.try_acquire_stream_quiet(profile_key, max_streams, client_ip, public_addr);
         if let Some(notify) = notify {
             notify.notify_waiters();
         }
@@ -94,12 +90,9 @@ impl WebProcessRuntime {
         public_addr: SocketAddr,
         peer_port: u16,
     ) {
-        if let Some(notify) = self.release_stream_quiet(
-            profile_key,
-            client_ip,
-            public_addr,
-            peer_port,
-        ) {
+        if let Some(notify) =
+            self.release_stream_quiet(profile_key, client_ip, public_addr, peer_port)
+        {
             notify.notify_waiters();
         }
     }

@@ -122,11 +122,9 @@ impl MePool {
                 !candidate.draining.load(Ordering::Acquire)
                     && candidate.writer_dc == writer.writer_dc
                     && candidate.generation == writer.generation
-                    && WriterContour::from_u8(candidate.contour.load(Ordering::Acquire))
-                        == contour
+                    && WriterContour::from_u8(candidate.contour.load(Ordering::Acquire)) == contour
                     && candidate.addr.is_ipv4() == writer.addr.is_ipv4()
-                    && endpoint_snapshot
-                        .contains_dc_endpoint(candidate.writer_dc, candidate.addr)
+                    && endpoint_snapshot.contains_dc_endpoint(candidate.writer_dc, candidate.addr)
             })
             .count();
         if current >= required {

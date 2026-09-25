@@ -22,13 +22,13 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 pub(crate) use self::quota_store::{QuotaReservation, QuotaStore, UserQuotaHandle};
-pub(crate) use self::users::UserConnectionObservation;
 #[allow(unused_imports)]
 pub use self::replay::{ReplayChecker, ReplayStats};
 use self::telemetry::TelemetryPolicy;
-use crate::proxy::user_connection_authority::UserConnectionAuthority;
 pub use self::tls_fingerprints::TlsFingerprintSnapshotRow;
+pub(crate) use self::users::UserConnectionObservation;
 use crate::config::MeWriterPickMode;
+use crate::proxy::user_connection_authority::UserConnectionAuthority;
 
 const ME_HANDSHAKE_ERROR_CODE_MAX: usize = 64;
 
@@ -432,10 +432,7 @@ impl Stats {
 
     #[cfg(test)]
     pub(crate) fn with_quota_store(quota_store: Arc<QuotaStore>) -> Self {
-        Self::with_process_authorities(
-            quota_store,
-            Arc::new(UserConnectionAuthority::default()),
-        )
+        Self::with_process_authorities(quota_store, Arc::new(UserConnectionAuthority::default()))
     }
 
     /// Creates generation telemetry around process-owned enforcement authorities.

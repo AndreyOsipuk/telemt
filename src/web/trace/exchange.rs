@@ -324,9 +324,7 @@ impl HttpTraceExchange {
             .clamp(1, limits.max_frames_per_body);
         let reservation = estimated_frames.saturating_mul(std::mem::size_of::<TraceFrame>());
         let mut state = self.state.lock();
-        if state.phase != ExchangePhase::Open
-            || !self.reserve_locked(&mut state, reservation)
-        {
+        if state.phase != ExchangePhase::Open || !self.reserve_locked(&mut state, reservation) {
             return;
         }
         let frames = match frame::parse_all(body, limits) {

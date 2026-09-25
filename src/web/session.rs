@@ -11,11 +11,11 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{WebCarrier, WebLimitsConfig, WebRuntimeProfile, WebTimeoutsConfig};
+use crate::proxy::user_admission::UserSessionRegistration;
 use crate::web::frame::FrameType;
 use crate::web::manager::{
     CarrierClientClass, CarrierLearningContext, ProfileKey, TokenHash, WebProcessRuntime,
 };
-use crate::proxy::user_admission::UserSessionRegistration;
 
 // Backend tasks own generation admission and authenticated MTProxy relay lifetimes.
 mod backend;
@@ -416,5 +416,4 @@ impl WebSession {
     pub(crate) fn timeouts(&self) -> &WebTimeoutsConfig {
         &self.timeouts
     }
-
 }

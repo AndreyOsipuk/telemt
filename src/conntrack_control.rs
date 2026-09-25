@@ -13,10 +13,10 @@ use crate::stats::Stats;
 // Privileged netfilter rule and conntrack helper execution.
 mod firewall;
 
+pub(crate) use firewall::FirewallAuthority;
 use firewall::{
     DeleteOutcome, delete_conntrack_entry, effective_conntrack_enabled, probe_runtime_support,
 };
-pub(crate) use firewall::FirewallAuthority;
 
 const CONNTRACK_EVENT_QUEUE_CAPACITY: usize = 32_768;
 const PRESSURE_RELEASE_TICKS: u8 = 3;

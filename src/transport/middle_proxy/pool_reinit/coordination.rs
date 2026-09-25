@@ -318,15 +318,13 @@ impl MePool {
                 if alive >= required {
                     covered = covered.saturating_add(1);
                 } else {
-                    writer_deficit =
-                        writer_deficit.saturating_add(required.saturating_sub(alive));
+                    writer_deficit = writer_deficit.saturating_add(required.saturating_sub(alive));
                     missing_groups.push(DcFamilyGroup { dc: *dc, family });
                 }
             }
         }
-        missing_groups.sort_unstable_by_key(|group| {
-            (group.dc, matches!(group.family, IpFamily::V6))
-        });
+        missing_groups
+            .sort_unstable_by_key(|group| (group.dc, matches!(group.family, IpFamily::V6)));
         HardswapCoverage {
             ratio: if total == 0 {
                 1.0
@@ -453,8 +451,8 @@ impl MePool {
             let authoritative_warm = contour == WriterContour::Warm
                 && pending_generation == Some(writer.generation)
                 && endpoint_is_current;
-            let stale_active = contour == WriterContour::Active
-                && writer.generation != active_generation;
+            let stale_active =
+                contour == WriterContour::Active && writer.generation != active_generation;
             if authoritative_warm || (contour == WriterContour::Active && !stale_active) {
                 continue;
             }
@@ -535,8 +533,7 @@ impl MePool {
             .filter(|w| !w.draining.load(Ordering::Relaxed))
             .filter(|w| w.generation == generation)
             .filter(|w| {
-                WriterContour::from_u8(w.contour.load(Ordering::Acquire))
-                    == WriterContour::Active
+                WriterContour::from_u8(w.contour.load(Ordering::Acquire)) == WriterContour::Active
             })
             .filter(|w| w.writer_dc == dc)
             .filter(|w| endpoints.contains(&w.addr))

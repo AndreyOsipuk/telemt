@@ -54,9 +54,7 @@ pub(super) async fn deactivate<R: FirewallCommandRunner>(
     delete_table_if_present(runner, table(slot)).await
 }
 
-pub(super) async fn cleanup_all<R: FirewallCommandRunner>(
-    runner: &R,
-) -> Result<(), CommandError> {
+pub(super) async fn cleanup_all<R: FirewallCommandRunner>(runner: &R) -> Result<(), CommandError> {
     if !runner.available("nft") {
         return Ok(());
     }
@@ -86,7 +84,10 @@ async fn delete_table_if_present<R: FirewallCommandRunner>(
     {
         Ok(()) => Ok(()),
         Err(error)
-            if matches!(error.kind, CommandErrorKind::NotFound | CommandErrorKind::Missing) =>
+            if matches!(
+                error.kind,
+                CommandErrorKind::NotFound | CommandErrorKind::Missing
+            ) =>
         {
             Ok(())
         }
@@ -111,9 +112,7 @@ pub(super) fn render_stage_script(
     v6: &[NotrackTarget],
 ) -> String {
     let table = table(slot);
-    let mut script = format!(
-        "add table inet {table}\nadd chain inet {table} rules\n"
-    );
+    let mut script = format!("add table inet {table}\nadd chain inet {table} rules\n");
     for target in v4 {
         script.push_str("add rule inet ");
         script.push_str(table);

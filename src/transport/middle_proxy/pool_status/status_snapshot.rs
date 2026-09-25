@@ -83,12 +83,8 @@ impl MePool {
                 if endpoint_count == 0 {
                     continue;
                 }
-                let required =
-                    self.required_writers_for_dc_with_floor_mode(endpoint_count, false);
-                let alive = live_writers_by_group
-                    .get(&(dc, ipv4))
-                    .copied()
-                    .unwrap_or(0);
+                let required = self.required_writers_for_dc_with_floor_mode(endpoint_count, false);
+                let alive = live_writers_by_group.get(&(dc, ipv4)).copied().unwrap_or(0);
                 if alive < required {
                     return false;
                 }
@@ -133,9 +129,7 @@ impl MePool {
             .map(|endpoints| {
                 endpoint_family_counts(endpoints)
                     .into_iter()
-                    .map(|(_, count)| {
-                        self.required_writers_for_dc_with_floor_mode(count, false)
-                    })
+                    .map(|(_, count)| self.required_writers_for_dc_with_floor_mode(count, false))
                     .sum::<usize>()
             })
             .sum();
@@ -254,9 +248,7 @@ impl MePool {
             let dc_required_writers = family_counts
                 .iter()
                 .filter(|(_, count)| *count > 0)
-                .map(|(_, count)| {
-                    self.required_writers_for_dc_with_floor_mode(*count, false)
-                })
+                .map(|(_, count)| self.required_writers_for_dc_with_floor_mode(*count, false))
                 .sum::<usize>();
             let floor_min = family_counts
                 .iter()
@@ -289,8 +281,7 @@ impl MePool {
                             .me_adaptive_floor_max_extra_writers_multi_per_core
                             .load(Ordering::Relaxed) as usize
                     };
-                    family_base
-                        .saturating_add(adaptive_cpu_cores.saturating_mul(extra_per_core))
+                    family_base.saturating_add(adaptive_cpu_cores.saturating_mul(extra_per_core))
                 })
                 .sum::<usize>();
             let floor_capped =
@@ -357,6 +348,9 @@ impl MePool {
 }
 
 fn endpoint_family_counts(endpoints: &BTreeSet<SocketAddr>) -> [(bool, usize); 2] {
-    let ipv4 = endpoints.iter().filter(|endpoint| endpoint.is_ipv4()).count();
+    let ipv4 = endpoints
+        .iter()
+        .filter(|endpoint| endpoint.is_ipv4())
+        .count();
     [(true, ipv4), (false, endpoints.len().saturating_sub(ipv4))]
 }

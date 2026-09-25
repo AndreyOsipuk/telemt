@@ -10,9 +10,7 @@ use crate::network::IpFamily;
 use crate::network::probe::NetworkDecision;
 use crate::stats::Stats;
 
-use super::pool::{
-    MePool, ReinitStatusSnapshot, WriterContour, WriterRole,
-};
+use super::pool::{MePool, ReinitStatusSnapshot, WriterContour, WriterRole};
 use super::pool_writer_security_tests::make_pool_with_decision;
 
 async fn make_pool() -> Arc<MePool> {
@@ -195,10 +193,7 @@ async fn refill_accepts_enabled_nonpreferred_family_without_multipath() {
     let v6_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 443);
     pool.update_proxy_maps(
         HashMap::from([(2, vec![(v4_addr.ip(), v4_addr.port())])]),
-        Some(HashMap::from([(
-            2,
-            vec![(v6_addr.ip(), v6_addr.port())],
-        )])),
+        Some(HashMap::from([(2, vec![(v6_addr.ip(), v6_addr.port())])])),
     )
     .await;
 

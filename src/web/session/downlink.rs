@@ -116,21 +116,18 @@ impl WebSession {
                         });
                     }
                     if !state.pending_frames.is_empty() {
-                        let batch = match self.take_down_batch_locked(
-                            &mut state,
-                            &mut effects,
-                            cursor,
-                        ) {
-                            Ok(batch) => batch,
-                            Err(ManagerError::Backpressure) => {
-                                return Err(ManagerError::Backpressure);
-                            }
-                            Err(error) => {
-                                drop(state);
-                                self.close(SessionCloseReason::Protocol);
-                                return Err(error);
-                            }
-                        };
+                        let batch =
+                            match self.take_down_batch_locked(&mut state, &mut effects, cursor) {
+                                Ok(batch) => batch,
+                                Err(ManagerError::Backpressure) => {
+                                    return Err(ManagerError::Backpressure);
+                                }
+                                Err(error) => {
+                                    drop(state);
+                                    self.close(SessionCloseReason::Protocol);
+                                    return Err(error);
+                                }
+                            };
                         let result = PollResult {
                             body: batch.body.clone(),
                             next_cursor: batch.next_cursor,
@@ -300,12 +297,7 @@ impl WebSession {
             state.pending_control_items = state.pending_control_items.saturating_sub(items);
         }
         if let Some(manager) = self.manager.upgrade() {
-            effects.notify(manager.release_pending_quiet(
-                self.profile_key,
-                bytes,
-                items,
-                control,
-            ));
+            effects.notify(manager.release_pending_quiet(self.profile_key, bytes, items, control));
         }
     }
 
@@ -417,14 +409,7 @@ impl WebSession {
             last.encoded[4..8].copy_from_slice(&payload_len.to_be_bytes());
             return true;
         }
-        self.queue_frame_locked(
-            state,
-            effects,
-            FrameType::Data,
-            stream_id,
-            payload,
-            false,
-        )
+        self.queue_frame_locked(state, effects, FrameType::Data, stream_id, payload, false)
     }
 
     fn queue_frame_locked(
@@ -437,14 +422,8 @@ impl WebSession {
         control: bool,
     ) -> bool {
         if self.carrier().uses_lanes() {
-            return self.queue_lane_frame_locked(
-                state,
-                effects,
-                frame_type,
-                stream_id,
-                payload,
-                control,
-            );
+            return self
+                .queue_lane_frame_locked(state, effects, frame_type, stream_id, payload, control);
         }
         let cost = frame::HEADER_BYTES + payload.len() + QUEUE_ITEM_COST;
         let class = if control {
@@ -476,7 +455,6 @@ impl WebSession {
         effects.notify(Arc::clone(&self.down_notify));
         true
     }
-
 }
 
 #[cfg(test)]

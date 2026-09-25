@@ -397,8 +397,7 @@ fn auth_probe_record_failure_with_state_and_budget_in(
             };
             if state
                 .remove_if(&evict_key, |_, current| {
-                    current.fail_streak == evict_fail_streak
-                        && current.last_seen == evict_last_seen
+                    current.fail_streak == evict_fail_streak && current.last_seen == evict_last_seen
                 })
                 .is_some()
                 && let Some(slots) = slots

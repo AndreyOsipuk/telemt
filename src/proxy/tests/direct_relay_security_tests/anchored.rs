@@ -81,10 +81,8 @@ fn adversarial_intermediate_parent_swap_is_blocked_by_component_walk() {
     let parent = directory.path().join("parent");
     let moved = directory.path().join("moved");
     let outside = directory.path().join("outside");
-    fs::create_dir_all(parent.join("nested"))
-        .expect("original nested directory must be creatable");
-    fs::create_dir_all(outside.join("nested"))
-        .expect("outside nested directory must be creatable");
+    fs::create_dir_all(parent.join("nested")).expect("original nested directory must be creatable");
+    fs::create_dir_all(outside.join("nested")).expect("outside nested directory must be creatable");
 
     let candidate = parent.join("nested/unknown-dc.log");
     let sanitized = sanitize_unknown_dc_log_path(

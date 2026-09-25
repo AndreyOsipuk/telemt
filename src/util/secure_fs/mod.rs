@@ -8,8 +8,7 @@ mod path;
 mod write;
 
 pub(crate) use path::{
-    AnchoredPath, chdir_nofollow_or_create, open_dir_nofollow,
-    open_trusted_dir_nofollow_or_create,
+    AnchoredPath, chdir_nofollow_or_create, open_dir_nofollow, open_trusted_dir_nofollow_or_create,
 };
 pub(crate) use write::{
     atomic_replace, atomic_replace_async, open_append_regular, open_append_regular_at,

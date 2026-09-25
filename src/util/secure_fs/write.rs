@@ -1,5 +1,5 @@
-use std::io::{self, Read, Write};
 use std::ffi::OsStr;
+use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::Path;
 
@@ -9,11 +9,7 @@ use nix::unistd::{UnlinkatFlags, fsync, unlinkat};
 
 use super::path::{AnchoredPath, errno_to_io};
 
-fn open_regular_at(
-    anchored: &AnchoredPath,
-    flags: OFlag,
-    mode: u32,
-) -> io::Result<std::fs::File> {
+fn open_regular_at(anchored: &AnchoredPath, flags: OFlag, mode: u32) -> io::Result<std::fs::File> {
     let descriptor = openat(
         anchored.parent(),
         anchored.name(),
@@ -55,8 +51,7 @@ pub(crate) fn read_regular_limited(path: &Path, max_bytes: usize) -> io::Result<
         ));
     }
     let mut bytes = Vec::with_capacity(before.len() as usize);
-    Read::take(&mut file, max_bytes.saturating_add(1) as u64)
-        .read_to_end(&mut bytes)?;
+    Read::take(&mut file, max_bytes.saturating_add(1) as u64).read_to_end(&mut bytes)?;
     if bytes.len() > max_bytes {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -120,11 +115,7 @@ pub(crate) fn open_append_regular_at<Fd: AsFd>(
     let descriptor = openat(
         parent,
         name,
-        OFlag::O_WRONLY
-            | OFlag::O_APPEND
-            | OFlag::O_CREAT
-            | OFlag::O_NOFOLLOW
-            | OFlag::O_CLOEXEC,
+        OFlag::O_WRONLY | OFlag::O_APPEND | OFlag::O_CREAT | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
         Mode::from_bits_truncate(mode),
     )
     .map_err(errno_to_io)?;
@@ -163,20 +154,12 @@ pub(crate) async fn atomic_replace_async(
         .map_err(|error| io::Error::other(format!("secure writer task failed: {error}")))?
 }
 
-fn atomic_replace_anchored(
-    anchored: &AnchoredPath,
-    contents: &[u8],
-    mode: u32,
-) -> io::Result<()> {
+fn atomic_replace_anchored(anchored: &AnchoredPath, contents: &[u8], mode: u32) -> io::Result<()> {
     let temp_name = format!(".telemt.tmp-{}", rand::random::<u64>());
     let descriptor = openat(
         anchored.parent(),
         temp_name.as_str(),
-        OFlag::O_WRONLY
-            | OFlag::O_CREAT
-            | OFlag::O_EXCL
-            | OFlag::O_NOFOLLOW
-            | OFlag::O_CLOEXEC,
+        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
         Mode::from_bits_truncate(mode),
     )
     .map_err(errno_to_io)?;

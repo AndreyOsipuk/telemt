@@ -76,10 +76,10 @@ impl WriterRegistrationGuard<'_> {
             || !Arc::ptr_eq(&route_state, reservation.state())
             || reservation.requires_idle()
                 && self
-                .binding
-                .conns_for_writer
-                .get(&reservation.writer_id())
-                .is_none_or(|conn_ids| !conn_ids.is_empty())
+                    .binding
+                    .conns_for_writer
+                    .get(&reservation.writer_id())
+                    .is_none_or(|conn_ids| !conn_ids.is_empty())
         {
             return false;
         }

@@ -146,11 +146,7 @@ impl QuotaStore {
     }
 
     /// Advances a credential incarnation while preserving usage captured at the transition.
-    pub(crate) fn advance_preserving_usage(
-        &self,
-        user: &str,
-        incarnation: UserIncarnation,
-    ) {
+    pub(crate) fn advance_preserving_usage(&self, user: &str, incarnation: UserIncarnation) {
         let slot = self.slot(user);
         let mut state = slot.state.lock();
         if incarnation <= state.high_water {

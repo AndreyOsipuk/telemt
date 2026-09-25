@@ -180,27 +180,27 @@ async fn read_state_file(path: &Path) -> std::io::Result<Option<QuotaStateFile>>
     };
     #[cfg(not(unix))]
     let payload = {
-    let file = match tokio::fs::File::open(path).await {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    if file.metadata().await?.len() > QUOTA_STATE_MAX_BYTES {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "quota state file exceeds the 16 MiB limit",
-        ));
-    }
-    let mut payload = Vec::new();
-    file.take(QUOTA_STATE_MAX_BYTES.saturating_add(1))
-        .read_to_end(&mut payload)
-        .await?;
-    if payload.len() as u64 > QUOTA_STATE_MAX_BYTES {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "quota state file grew beyond the 16 MiB limit while reading",
-        ));
-    }
+        let file = match tokio::fs::File::open(path).await {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if file.metadata().await?.len() > QUOTA_STATE_MAX_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "quota state file exceeds the 16 MiB limit",
+            ));
+        }
+        let mut payload = Vec::new();
+        file.take(QUOTA_STATE_MAX_BYTES.saturating_add(1))
+            .read_to_end(&mut payload)
+            .await?;
+        if payload.len() as u64 > QUOTA_STATE_MAX_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "quota state file grew beyond the 16 MiB limit while reading",
+            ));
+        }
         payload
     };
     let state = serde_json::from_slice(&payload).map_err(|error| {
@@ -241,53 +241,53 @@ fn write_state_file_blocking(path: &Path, state: &QuotaStateFile) -> std::io::Re
     }
     #[cfg(not(unix))]
     {
-    use std::io::Write;
+        use std::io::Write;
 
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
 
-    let mut last_collision = None;
-    for _ in 0..8 {
-        let tmp_path = path.with_extension(format!(
-            "tmp.{}.{}",
-            std::process::id(),
-            rand::random::<u64>()
-        ));
-        let mut file = match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                last_collision = Some(error);
-                continue;
+        let mut last_collision = None;
+        for _ in 0..8 {
+            let tmp_path = path.with_extension(format!(
+                "tmp.{}.{}",
+                std::process::id(),
+                rand::random::<u64>()
+            ));
+            let mut file = match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path)
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    last_collision = Some(error);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let result = (|| {
+                file.write_all(&payload)?;
+                file.sync_all()?;
+                drop(file);
+                std::fs::rename(&tmp_path, path)?;
+                #[cfg(unix)]
+                std::fs::File::open(parent)?.sync_all()?;
+                Ok(())
+            })();
+            if result.is_err() {
+                let _ = std::fs::remove_file(&tmp_path);
             }
-            Err(error) => return Err(error),
-        };
-        let result = (|| {
-            file.write_all(&payload)?;
-            file.sync_all()?;
-            drop(file);
-            std::fs::rename(&tmp_path, path)?;
-            #[cfg(unix)]
-            std::fs::File::open(parent)?.sync_all()?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&tmp_path);
+            return result;
         }
-        return result;
-    }
-    Err(last_collision.unwrap_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "failed to allocate a unique quota checkpoint temporary file",
-        )
-    }))
+        Err(last_collision.unwrap_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "failed to allocate a unique quota checkpoint temporary file",
+            )
+        }))
     }
 }
 

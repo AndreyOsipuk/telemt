@@ -39,7 +39,7 @@ pub(super) async fn run_command(
             .map_err(|e| format!("wait {binary} failed: {e}"))
     })
     .await
-        .map_err(|_| format!("{binary} timed out after {}s", COMMAND_TIMEOUT.as_secs()))??;
+    .map_err(|_| format!("{binary} timed out after {}s", COMMAND_TIMEOUT.as_secs()))??;
     if output.status.success() {
         return Ok(());
     }

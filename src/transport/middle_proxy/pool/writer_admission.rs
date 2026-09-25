@@ -203,7 +203,9 @@ impl MePool {
                 .max(1)
                 .min(WRITER_REPLACEMENT_OPEN_LIMIT_MAX);
             loop {
-                let reserved = self.writer_replacement_open_reserved.load(Ordering::Acquire);
+                let reserved = self
+                    .writer_replacement_open_reserved
+                    .load(Ordering::Acquire);
                 if reserved >= replacement_limit {
                     return None;
                 }

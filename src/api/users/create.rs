@@ -145,13 +145,11 @@ async fn create_user_to_completion(
         Some(&base_revision),
     )
     .await?;
-    shared
-        .proxy_shared
-        .stage_user_credential(
-            &body.username,
-            credential_id,
-            cfg.access.is_user_enabled(&body.username),
-        );
+    shared.proxy_shared.stage_user_credential(
+        &body.username,
+        credential_id,
+        cfg.access.is_user_enabled(&body.username),
+    );
 
     if let Some(limit) = updated_limit {
         shared

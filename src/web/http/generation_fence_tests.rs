@@ -33,11 +33,8 @@ async fn stale_generation_cannot_publish_bootstrap_after_disabled_cutover() {
     let disabled = test_runtime_generation(2, disabled_config);
 
     runtime.activate_generation(Arc::clone(&disabled));
-    let result = runtime.issue_bootstrap_for_generation(
-        &initial,
-        profile,
-        "192.0.2.10".parse().unwrap(),
-    );
+    let result =
+        runtime.issue_bootstrap_for_generation(&initial, profile, "192.0.2.10".parse().unwrap());
 
     assert!(matches!(result, Err(ManagerError::Closed)));
     let status = serde_json::to_value(runtime.try_status()).unwrap();

@@ -98,9 +98,9 @@ impl ConnRegistry {
             .map(|route| Arc::clone(&route.replacement_state))?;
         if require_idle
             && binding
-            .conns_for_writer
-            .get(&writer_id)
-            .is_none_or(|conn_ids| !conn_ids.is_empty())
+                .conns_for_writer
+                .get(&writer_id)
+                .is_none_or(|conn_ids| !conn_ids.is_empty())
         {
             return None;
         }

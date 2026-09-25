@@ -56,8 +56,8 @@ mod observability;
 pub(crate) use observability::{WebCapacityResourceStatus, WebCapacitySnapshot};
 // Asynchronous bounded close operations isolate mutation lifecycle from HTTP requests.
 mod control;
-pub(crate) use budget::WebSocketBudgetLease;
 use budget::WebDataBudget;
+pub(crate) use budget::WebSocketBudgetLease;
 pub(crate) use control::{CloseOperationSelector, ControlError};
 pub(crate) use negotiation::{
     CarrierCapabilities, CarrierClientClass, CarrierFailure, CarrierLearningContext, CarrierRequest,

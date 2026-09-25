@@ -169,8 +169,7 @@ impl MePool {
                                     0..self.route_runtime.me_route_inline_recovery_attempts.max(1)
                                 {
                                     let endpoint_snapshot = self.endpoint_snapshot.load_full();
-                                    for (dc, addrs) in
-                                        &endpoint_snapshot.preferred_endpoints_by_dc
+                                    for (dc, addrs) in &endpoint_snapshot.preferred_endpoints_by_dc
                                     {
                                         for addr in addrs {
                                             let _ = self
@@ -544,5 +543,4 @@ impl MePool {
             return Ok(());
         }
     }
-
 }

@@ -103,10 +103,9 @@ pub(super) async fn handle(
         };
         let runtime_cfg = config_rx.borrow().clone();
         data.in_runtime = runtime_cfg.access.users.contains_key(&data.username);
-        shared.runtime_events.record(
-            "api.user.disable.ok",
-            format!("username={}", base_user),
-        );
+        shared
+            .runtime_events
+            .record("api.user.disable.ok", format!("username={}", base_user));
         let status = if data.in_runtime {
             StatusCode::OK
         } else {
@@ -328,10 +327,9 @@ pub(super) async fn handle(
                     return Err(error);
                 }
             };
-            shared.runtime_events.record(
-                "api.user.delete.ok",
-                format!("username={}", deleted_user),
-            );
+            shared
+                .runtime_events
+                .record("api.user.delete.ok", format!("username={}", deleted_user));
             let runtime_cfg = config_rx.borrow().clone();
             let in_runtime = runtime_cfg.access.users.contains_key(&deleted_user);
             let response = DeleteUserResponse {

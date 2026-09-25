@@ -238,10 +238,7 @@ async fn send_proxy_req_uses_live_same_dc_writer_while_preferred_endpoint_refill
     .await;
 
     assert!(pool.admission_ready_conditional_cast().await);
-    assert_eq!(
-        pool.preferred_endpoints_for_dc(2).await,
-        vec![new_addr]
-    );
+    assert_eq!(pool.preferred_endpoints_for_dc(2).await, vec![new_addr]);
 
     let (conn_id, _rx) = pool.registry.register().await;
     let result = pool

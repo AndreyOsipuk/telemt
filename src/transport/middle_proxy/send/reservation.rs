@@ -34,9 +34,7 @@ pub(super) fn proxy_req_payload_from_command(
     }
 }
 
-pub(super) fn payload_permit_from_data_command(
-    cmd: WriterCommand,
-) -> Option<OwnedSemaphorePermit> {
+pub(super) fn payload_permit_from_data_command(cmd: WriterCommand) -> Option<OwnedSemaphorePermit> {
     match cmd {
         WriterCommand::Data { _permit, .. } => _permit,
         _ => None,

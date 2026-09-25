@@ -310,10 +310,7 @@ async fn cancelled_ip_admission_releases_process_connection_permit() {
     let user = "cancelled-admission-user";
     let peer_addr: SocketAddr = "198.51.100.210:50000".parse().unwrap();
     let mut config = ProxyConfig::default();
-    config
-        .access
-        .user_max_tcp_conns
-        .insert(user.to_string(), 1);
+    config.access.user_max_tcp_conns.insert(user.to_string(), 1);
 
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -370,10 +367,7 @@ async fn cancelled_async_release_preserves_ip_cleanup_ownership() {
     let user = "cancelled-release-user";
     let peer_addr: SocketAddr = "198.51.100.211:50001".parse().unwrap();
     let mut config = ProxyConfig::default();
-    config
-        .access
-        .user_max_tcp_conns
-        .insert(user.to_string(), 1);
+    config.access.user_max_tcp_conns.insert(user.to_string(), 1);
 
     let reservation = acquire_user_connection_reservation(
         user,

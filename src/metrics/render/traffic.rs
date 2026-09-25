@@ -122,22 +122,33 @@ pub(super) fn render(
         out,
         "# HELP telemt_rate_limiter_cas_retry_exhausted_total Traffic limiter operations that exhausted their bounded CAS attempt budget"
     );
-    let _ = writeln!(out, "# TYPE telemt_rate_limiter_cas_retry_exhausted_total counter");
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_rate_limiter_cas_retry_exhausted_total counter"
+    );
     for (scope, direction, reserve, refund) in [
         (
-            "user", "up", limiter_metrics.user_reserve_cas_retry_exhausted_up_total,
+            "user",
+            "up",
+            limiter_metrics.user_reserve_cas_retry_exhausted_up_total,
             limiter_metrics.user_refund_cas_retry_exhausted_up_total,
         ),
         (
-            "user", "down", limiter_metrics.user_reserve_cas_retry_exhausted_down_total,
+            "user",
+            "down",
+            limiter_metrics.user_reserve_cas_retry_exhausted_down_total,
             limiter_metrics.user_refund_cas_retry_exhausted_down_total,
         ),
         (
-            "cidr", "up", limiter_metrics.cidr_reserve_cas_retry_exhausted_up_total,
+            "cidr",
+            "up",
+            limiter_metrics.cidr_reserve_cas_retry_exhausted_up_total,
             limiter_metrics.cidr_refund_cas_retry_exhausted_up_total,
         ),
         (
-            "cidr", "down", limiter_metrics.cidr_reserve_cas_retry_exhausted_down_total,
+            "cidr",
+            "down",
+            limiter_metrics.cidr_reserve_cas_retry_exhausted_down_total,
             limiter_metrics.cidr_refund_cas_retry_exhausted_down_total,
         ),
     ] {

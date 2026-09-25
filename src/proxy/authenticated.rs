@@ -290,11 +290,8 @@ impl Drop for UserIpPermit {
         let Some(owner) = self.owner.take() else {
             return;
         };
-        self.tracker.enqueue_cleanup_for_incarnation(
-            owner.user,
-            owner.incarnation,
-            owner.ip,
-        );
+        self.tracker
+            .enqueue_cleanup_for_incarnation(owner.user, owner.incarnation, owner.ip);
     }
 }
 
@@ -338,9 +335,7 @@ impl UserConnectionReservation {
         stats_observation: Option<UserConnectionObservation>,
         tracks_ip: bool,
     ) -> Self {
-        let ip_permit = tracks_ip.then(|| {
-            UserIpPermit::new(ip_tracker, user, incarnation, ip)
-        });
+        let ip_permit = tracks_ip.then(|| UserIpPermit::new(ip_tracker, user, incarnation, ip));
         Self {
             stats,
             quota_handle,
@@ -388,12 +383,7 @@ pub(crate) async fn acquire_user_connection_reservation(
     ip_tracker: Arc<UserIpTracker>,
 ) -> Result<UserConnectionReservation> {
     acquire_user_connection_reservation_for_incarnation(
-        user,
-        0,
-        config,
-        stats,
-        peer_addr,
-        ip_tracker,
+        user, 0, config, stats, peer_addr, ip_tracker,
     )
     .await
 }
@@ -435,10 +425,7 @@ async fn acquire_user_connection_reservation_for_incarnation(
         .or((config.access.user_max_tcp_conns_global_each > 0)
             .then_some(config.access.user_max_tcp_conns_global_each))
         .map(|value| value as u64);
-    let Some(connection_permit) = stats
-        .connection_authority()
-        .try_acquire(user, limit)
-    else {
+    let Some(connection_permit) = stats.connection_authority().try_acquire(user, limit) else {
         return Err(ProxyError::ConnectionLimitExceeded {
             user: user.to_string(),
         });

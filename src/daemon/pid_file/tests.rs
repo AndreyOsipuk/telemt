@@ -238,7 +238,11 @@ fn release_does_not_remove_replacement_path() {
 
     let error = pid_file.release().unwrap_err();
 
-    assert!(error.to_string().contains("refusing to remove replaced PID file"));
+    assert!(
+        error
+            .to_string()
+            .contains("refusing to remove replaced PID file")
+    );
     assert_eq!(fs::read(&pid_path).unwrap(), b"replacement\n");
 }
 

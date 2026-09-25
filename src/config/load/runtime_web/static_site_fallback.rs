@@ -124,7 +124,15 @@ fn load_static_directory(
         let relative = path.strip_prefix(root).map_err(|_| {
             ProxyError::Config("WEB static path escaped its configured root".to_string())
         })?;
-        load_static_file(file, &metadata, relative, &path, assets, total_bytes, limits)?;
+        load_static_file(
+            file,
+            &metadata,
+            relative,
+            &path,
+            assets,
+            total_bytes,
+            limits,
+        )?;
     }
     Ok(())
 }

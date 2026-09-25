@@ -98,13 +98,7 @@ async fn normal_active_publication_cannot_race_past_the_family_floor() {
     let generation = pool.current_generation();
     let writers = (1..=3)
         .map(|writer_id| {
-            unregistered_writer(
-                &pool,
-                writer_id,
-                addr,
-                generation,
-                WriterContour::Active,
-            )
+            unregistered_writer(&pool, writer_id, addr, generation, WriterContour::Active)
         })
         .collect::<Vec<_>>();
     let candidate = unregistered_writer(&pool, 4, addr, generation, WriterContour::Active);
@@ -135,10 +129,7 @@ async fn stale_same_family_writers_do_not_satisfy_current_endpoint_coverage() {
     let current_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
     let stale_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), 443);
     pool.update_proxy_maps(
-        std::collections::HashMap::from([(
-            2,
-            vec![(current_addr.ip(), current_addr.port())],
-        )]),
+        std::collections::HashMap::from([(2, vec![(current_addr.ip(), current_addr.port())])]),
         None,
     )
     .await;
@@ -244,13 +235,7 @@ async fn normal_active_publication_allows_adaptive_growth_above_family_floor() {
     let generation = pool.current_generation();
     let writers = (1..=3)
         .map(|writer_id| {
-            unregistered_writer(
-                &pool,
-                writer_id,
-                addr,
-                generation,
-                WriterContour::Active,
-            )
+            unregistered_writer(&pool, writer_id, addr, generation, WriterContour::Active)
         })
         .collect::<Vec<_>>();
     let candidate = unregistered_writer(&pool, 4, addr, generation, WriterContour::Active);
@@ -287,13 +272,7 @@ async fn normal_active_publication_rejects_configured_contour_cap() {
     let generation = pool.current_generation();
     let writers = (1..=3)
         .map(|writer_id| {
-            unregistered_writer(
-                &pool,
-                writer_id,
-                addr,
-                generation,
-                WriterContour::Active,
-            )
+            unregistered_writer(&pool, writer_id, addr, generation, WriterContour::Active)
         })
         .collect::<Vec<_>>();
     let candidate = unregistered_writer(&pool, 4, addr, generation, WriterContour::Active);

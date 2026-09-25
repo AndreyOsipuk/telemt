@@ -151,10 +151,10 @@ where
     if let Some(snapshot) = config.runtime_user_auth() {
         let sticky_ip_hint = sticky_hint_get_by_ip(shared, peer.ip());
         let sticky_prefix_hint = sticky_hint_get_by_ip_prefix(shared, peer.ip());
-        let sticky_ip_candidates = sticky_ip_hint
-            .and_then(|hint_key| snapshot.candidate_ids_by_hint_key(hint_key));
-        let sticky_prefix_candidates = sticky_prefix_hint
-            .and_then(|hint_key| snapshot.candidate_ids_by_hint_key(hint_key));
+        let sticky_ip_candidates =
+            sticky_ip_hint.and_then(|hint_key| snapshot.candidate_ids_by_hint_key(hint_key));
+        let sticky_prefix_candidates =
+            sticky_prefix_hint.and_then(|hint_key| snapshot.candidate_ids_by_hint_key(hint_key));
         let preferred_user_id = preferred_user.and_then(|user| snapshot.user_id_by_name(user));
         let exact_user_id = exact_user.and_then(|user| snapshot.user_id_by_name(user));
         let has_hint = sticky_ip_candidates.is_some_and(|ids| !ids.is_empty())

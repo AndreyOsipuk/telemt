@@ -54,7 +54,10 @@ impl SlotBudget {
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 current.checked_sub(amount)
             });
-        debug_assert!(released.is_ok(), "slot budget release must match acquisitions");
+        debug_assert!(
+            released.is_ok(),
+            "slot budget release must match acquisitions"
+        );
     }
 
     /// Returns the exact number of currently committed or reserved slots.

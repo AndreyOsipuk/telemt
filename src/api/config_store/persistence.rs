@@ -7,14 +7,14 @@ use serde::Serialize;
 use crate::config::{ProxyConfig, RateLimitBps};
 
 #[cfg(test)]
+use super::atomic::write_atomic;
+use super::atomic::write_atomic_if_unchanged;
+#[cfg(test)]
 use super::compute_revision;
 use super::{
     AccessSection, compute_snapshot_revision, load_candidate_snapshot, load_config_snapshot,
     resolve_single_source_owner, toml_path_exists,
 };
-use super::atomic::write_atomic_if_unchanged;
-#[cfg(test)]
-use super::atomic::write_atomic;
 use crate::api::model::ApiFailure;
 
 /// Re-render the given top-level tables from `cfg` and upsert each into the

@@ -403,7 +403,10 @@ mod bounded_registry_tests {
                     for index in (worker..ATTEMPTS).step_by(16) {
                         let octets = (index as u32).to_be_bytes();
                         let peer_ip = IpAddr::V4(std::net::Ipv4Addr::new(
-                            octets[1], octets[2], octets[3], worker as u8,
+                            octets[1],
+                            octets[2],
+                            octets[3],
+                            worker as u8,
                         ));
                         sticky_hint_record_success_in(
                             shared.as_ref(),
@@ -416,7 +419,10 @@ mod bounded_registry_tests {
             }
         });
 
-        assert_eq!(shared.handshake.sticky_user_by_ip.len(), STICKY_HINT_MAX_ENTRIES);
+        assert_eq!(
+            shared.handshake.sticky_user_by_ip.len(),
+            STICKY_HINT_MAX_ENTRIES
+        );
         assert_eq!(
             shared.handshake.sticky_user_by_ip_prefix.len(),
             STICKY_HINT_MAX_ENTRIES

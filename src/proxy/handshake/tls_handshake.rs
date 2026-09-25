@@ -400,12 +400,7 @@ where
             .runtime_user_auth()
             .and_then(|snapshot| snapshot.entry_by_id(user_id))
         {
-            sticky_hint_record_success_in(
-                shared,
-                peer.ip(),
-                entry.hint_key,
-                client_sni.as_deref(),
-            );
+            sticky_hint_record_success_in(shared, peer.ip(), entry.hint_key, client_sni.as_deref());
             record_recent_user_success_in(shared, entry.hint_key);
         }
     }

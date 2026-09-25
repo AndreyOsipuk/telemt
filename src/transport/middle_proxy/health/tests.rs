@@ -270,10 +270,8 @@ async fn under_floor_idle_writer_still_enters_transactional_refresh() {
     let writer = insert_active_writer_at(&pool, writer_id, 2, endpoint).await;
     let key = (2, IpFamily::V4);
     let live_writer_ids_by_addr = HashMap::from([((2, endpoint), vec![writer_id])]);
-    let writer_idle_since = HashMap::from([(
-        writer_id,
-        MePool::now_epoch_secs().saturating_sub(60),
-    )]);
+    let writer_idle_since =
+        HashMap::from([(writer_id, MePool::now_epoch_secs().saturating_sub(60))]);
     let bound_clients_by_writer = HashMap::from([(writer_id, 0)]);
     let mut next_attempt = HashMap::new();
     let rng = Arc::new(SecureRandom::new());

@@ -7,11 +7,11 @@ use tokio::sync::watch;
 
 // Process controller and system-memory sampling remain outside data-plane accounting.
 mod controller;
+#[cfg(test)]
+use controller::connection_fill_pct;
 pub(crate) use controller::{
     resolve_direct_buffer_hard_limit, run_direct_buffer_budget_controller,
 };
-#[cfg(test)]
-use controller::connection_fill_pct;
 
 /// Accounting granularity for process-wide Direct copy-buffer reservations.
 pub(crate) const DIRECT_BUFFER_UNIT_BYTES: usize = 4 * 1024;
@@ -135,10 +135,7 @@ impl DirectBufferBudget {
             .fetch_max(generation, Ordering::AcqRel);
     }
 
-    fn begin_controller_update(
-        &self,
-        generation: u64,
-    ) -> Option<ParkingMutexGuard<'_, ()>> {
+    fn begin_controller_update(&self, generation: u64) -> Option<ParkingMutexGuard<'_, ()>> {
         let controller_update = self.controller_update.lock();
         (self.active_controller_generation.load(Ordering::Acquire) == generation)
             .then_some(controller_update)

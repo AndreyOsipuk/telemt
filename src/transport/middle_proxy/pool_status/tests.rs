@@ -12,12 +12,7 @@ use crate::transport::middle_proxy::codec::WriterCommand;
 use crate::transport::middle_proxy::pool::{MePool, MeWriter, WriterContour};
 use crate::transport::middle_proxy::pool_writer_security_tests::make_pool_with_decision;
 
-fn writer(
-    pool: &Arc<MePool>,
-    id: u64,
-    dc: i32,
-    addr: SocketAddr,
-) -> MeWriter {
+fn writer(pool: &Arc<MePool>, id: u64, dc: i32, addr: SocketAddr) -> MeWriter {
     let (tx, _rx) = mpsc::channel::<WriterCommand>(8);
     MeWriter {
         id,
@@ -60,12 +55,7 @@ async fn dual_family_status_reports_each_family_floor() {
     let mut writers = pool.writers.write().await;
     for (group, dc) in [2, -2].into_iter().enumerate() {
         for offset in 0..required_per_family {
-            writers.push(writer(
-                &pool,
-                (group as u64 * 100) + offset as u64,
-                dc,
-                v4,
-            ));
+            writers.push(writer(&pool, (group as u64 * 100) + offset as u64, dc, v4));
         }
     }
     drop(writers);

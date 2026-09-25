@@ -77,7 +77,10 @@ fn clear_all_serializes_queue_reset_with_concurrent_enqueue() {
             Err(std::sync::TryLockError::WouldBlock) => break,
             Err(std::sync::TryLockError::Poisoned(_)) => panic!("cleanup queue lock poisoned"),
         }
-        assert!(Instant::now() < wait_deadline, "clear_all did not reach queue reset");
+        assert!(
+            Instant::now() < wait_deadline,
+            "clear_all did not reach queue reset"
+        );
         std::thread::yield_now();
     }
 
@@ -86,16 +89,15 @@ fn clear_all_serializes_queue_reset_with_concurrent_enqueue() {
     let enqueue_tracker = Arc::clone(&tracker);
     let enqueue = std::thread::spawn(move || {
         started_tx.send(()).unwrap();
-        enqueue_tracker.enqueue_cleanup(
-            first_shard_user,
-            test_ipv4(10, 2, 2, 1),
-        );
+        enqueue_tracker.enqueue_cleanup(first_shard_user, test_ipv4(10, 2, 2, 1));
         completed_tx.send(()).unwrap();
     });
     started_rx.recv().unwrap();
-    assert!(completed_rx
-        .recv_timeout(Duration::from_millis(50))
-        .is_err());
+    assert!(
+        completed_rx
+            .recv_timeout(Duration::from_millis(50))
+            .is_err()
+    );
 
     drop(last_queue_guard);
     clear.join().unwrap();

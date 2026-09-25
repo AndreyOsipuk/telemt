@@ -92,7 +92,10 @@ async fn quiet_stream_release_returns_exact_post_accounting_drain_notification()
     let waker = Waker::from(Arc::clone(&counter));
     let mut context = Context::from_waker(&waker);
     let mut notified = Box::pin(runtime.operator_lifecycle.work_changed.notified());
-    assert!(matches!(notified.as_mut().poll(&mut context), Poll::Pending));
+    assert!(matches!(
+        notified.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
 
     let notify = runtime
         .release_stream_quiet(profile_key, client_ip, public_addr, peer_port)

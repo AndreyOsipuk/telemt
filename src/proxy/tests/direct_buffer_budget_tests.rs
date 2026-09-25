@@ -77,9 +77,11 @@ fn controller_handoff_waits_for_inflight_update_and_fences_old_generation() {
         activated_tx.send(()).unwrap();
     });
 
-    assert!(activated_rx
-        .recv_timeout(Duration::from_millis(50))
-        .is_err());
+    assert!(
+        activated_rx
+            .recv_timeout(Duration::from_millis(50))
+            .is_err()
+    );
     drop(update);
     activated_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     activation.join().unwrap();

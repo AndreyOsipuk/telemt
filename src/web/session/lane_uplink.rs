@@ -181,13 +181,7 @@ impl WebSession {
                 &mut unused_items,
                 &mut progress,
             );
-            self.release_locked(
-                &mut state,
-                &mut effects,
-                unused_bytes,
-                unused_items,
-                false,
-            );
+            self.release_locked(&mut state, &mut effects, unused_bytes, unused_items, false);
             if let Some(lane) = state.carrier_lanes.get_mut(&lane_id) {
                 lane.up_active = false;
                 if applied {

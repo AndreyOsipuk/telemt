@@ -120,12 +120,8 @@ impl MePool {
         me_route_inline_recovery_wait_ms: u64,
         me_connection_cleanup_capacity: usize,
     ) -> Arc<Self> {
-        let endpoint_snapshot = Self::build_endpoint_snapshot(
-            &decision,
-            proxy_map_v4,
-            proxy_map_v6,
-            1,
-        );
+        let endpoint_snapshot =
+            Self::build_endpoint_snapshot(&decision, proxy_map_v4, proxy_map_v6, 1);
         let registry = Arc::new(ConnRegistry::with_route_and_cleanup_capacity(
             me_route_channel_capacity,
             me_connection_cleanup_capacity,

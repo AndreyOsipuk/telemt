@@ -14,7 +14,7 @@ use std::os::unix::fs::MetadataExt;
 #[cfg(unix)]
 use nix::dir::Dir;
 #[cfg(unix)]
-use nix::fcntl::{openat, OFlag};
+use nix::fcntl::{OFlag, openat};
 #[cfg(unix)]
 use nix::sys::stat::Mode;
 

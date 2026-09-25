@@ -11,9 +11,7 @@ use crate::config::{
 use crate::crypto::SecureRandom;
 use crate::ip_tracker::UserIpTracker;
 use crate::network::probe::{decide_network_capabilities, run_probe};
-use crate::proxy::direct_buffer_budget::{
-    DirectBufferBudget, run_direct_buffer_budget_controller,
-};
+use crate::proxy::direct_buffer_budget::{DirectBufferBudget, run_direct_buffer_budget_controller};
 use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
 use crate::proxy::shared_state::ProxySharedState;
 use crate::proxy::traffic_limiter::TrafficLimiter;
@@ -29,9 +27,7 @@ use crate::transport::UpstreamManager;
 use crate::transport::middle_proxy::MePool;
 
 use super::admission;
-use super::generation::{
-    RuntimeGeneration, RuntimeTaskScope, RuntimeTaskScopePreparationGuard,
-};
+use super::generation::{RuntimeGeneration, RuntimeTaskScope, RuntimeTaskScopePreparationGuard};
 use super::listeners::listener_rebind_supported;
 use super::runtime_tasks::RuntimeLogFilter;
 use super::{me_startup, runtime_tasks, tls_bootstrap};

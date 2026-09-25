@@ -44,9 +44,9 @@ mod tests {
             c2me_sender: AbortOnDropHandle::new(tokio::spawn(pending_child(DropSignal(
                 Arc::clone(&dropped),
             )))),
-            me_writer: AbortOnDropHandle::new(tokio::spawn(pending_child(DropSignal(
-                Arc::clone(&dropped),
-            )))),
+            me_writer: AbortOnDropHandle::new(tokio::spawn(pending_child(DropSignal(Arc::clone(
+                &dropped,
+            ))))),
             flow_cancel: flow_cancel.clone(),
             stop_tx: Some(stop_tx),
         };

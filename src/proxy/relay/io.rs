@@ -414,13 +414,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StatsIo<S> {
                 if quota_reservation.is_none() {
                     this.stats.increment_quota_contention_timeout_total();
                     Self::arm_wait(&mut this.quota_wait, false, false);
-                    if Self::poll_wait(
-                        &mut this.quota_wait,
-                        cx,
-                        None,
-                        RateDirection::Up,
-                    )
-                    .is_ready()
+                    if Self::poll_wait(&mut this.quota_wait, cx, None, RateDirection::Up).is_ready()
                     {
                         cx.waker().wake_by_ref();
                     }

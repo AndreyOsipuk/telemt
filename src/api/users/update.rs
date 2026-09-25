@@ -154,19 +154,19 @@ async fn patch_user_to_completion(
 
     cfg.validate()
         .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {}", e)))?;
-    let staged_credential = if touches_users || touches_user_enabled {
-        let secret = cfg
-            .access
-            .users
-            .get(user)
-            .ok_or_else(|| ApiFailure::internal("updated user secret is missing"))?;
-        Some(
-            credential_id_from_hex(secret)
-                .ok_or_else(|| ApiFailure::internal("validated user secret could not be decoded"))?,
-        )
-    } else {
-        None
-    };
+    let staged_credential =
+        if touches_users || touches_user_enabled {
+            let secret = cfg
+                .access
+                .users
+                .get(user)
+                .ok_or_else(|| ApiFailure::internal("updated user secret is missing"))?;
+            Some(credential_id_from_hex(secret).ok_or_else(|| {
+                ApiFailure::internal("validated user secret could not be decoded")
+            })?)
+        } else {
+            None
+        };
 
     let mut touched_sections = Vec::new();
     if touches_users {
@@ -206,9 +206,11 @@ async fn patch_user_to_completion(
         .await?
     };
     if let Some(credential_id) = staged_credential {
-        shared
-            .proxy_shared
-            .stage_user_credential(user, credential_id, cfg.access.is_user_enabled(user));
+        shared.proxy_shared.stage_user_credential(
+            user,
+            credential_id,
+            cfg.access.is_user_enabled(user),
+        );
     }
     match max_unique_ips_change {
         Some(Some(limit)) => shared.ip_tracker.set_user_limit(user, limit).await,

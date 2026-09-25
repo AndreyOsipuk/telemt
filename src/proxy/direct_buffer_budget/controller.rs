@@ -145,11 +145,8 @@ pub(super) fn connection_fill_pct(
         return None;
     }
     let max_connections = max_connections as usize;
-    let active = max_connections.saturating_sub(
-        connection_slots
-            .available_permits()
-            .min(max_connections),
-    );
+    let active =
+        max_connections.saturating_sub(connection_slots.available_permits().min(max_connections));
     Some((active.saturating_mul(100) / max_connections).min(100) as u8)
 }
 

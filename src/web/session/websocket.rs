@@ -14,8 +14,8 @@ use crate::web::manager::ManagerError;
 
 // Reservation ownership keeps pre-OPEN quota and exact lane identity transactional.
 mod reservation;
-pub(crate) use reservation::{WebSocketLaneReservation, WebSocketProbeReservation};
 use reservation::WebSocketLaneReservationPhase;
+pub(crate) use reservation::{WebSocketLaneReservation, WebSocketProbeReservation};
 
 impl WebSession {
     /// Reserves the only automatic WebSocket probe before any HTTP 101 response.
@@ -268,13 +268,7 @@ impl WebSession {
                 &mut unused_items,
                 &mut progress,
             );
-            self.release_locked(
-                &mut state,
-                &mut effects,
-                unused_bytes,
-                unused_items,
-                false,
-            );
+            self.release_locked(&mut state, &mut effects, unused_bytes, unused_items, false);
             if let Some(lane) = state.carrier_lanes.get_mut(&lane_id) {
                 lane.up_active = false;
                 if applied {
@@ -385,21 +379,13 @@ impl WebSession {
                 state.active_peer_ports.remove(&claim.peer_port)
             };
             if lane_matches {
-                self.remember_closed_locked(
-                    &mut state,
-                    &mut effects,
-                    claim.lane.lane_id,
-                );
+                self.remember_closed_locked(&mut state, &mut effects, claim.lane.lane_id);
                 if state
                     .carrier_lanes
                     .get(&claim.lane.lane_id)
                     .is_some_and(|lane| lane.instance == claim.lane.instance)
                 {
-                    self.release_lane_locked(
-                        &mut state,
-                        &mut effects,
-                        claim.lane.lane_id,
-                    );
+                    self.release_lane_locked(&mut state, &mut effects, claim.lane.lane_id);
                 }
             }
             release_port

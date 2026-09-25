@@ -1,6 +1,4 @@
-use super::command::{
-    CommandError, CommandErrorKind, CommandSpec, FirewallCommandRunner,
-};
+use super::command::{CommandError, CommandErrorKind, CommandSpec, FirewallCommandRunner};
 use super::model::{NotrackTarget, ShadowSlot};
 
 const DISPATCH_CHAIN: &str = "TELEMT_NOTRACK";
@@ -30,10 +28,7 @@ impl IpFamily {
     }
 }
 
-pub(super) fn family_available<R: FirewallCommandRunner>(
-    runner: &R,
-    family: IpFamily,
-) -> bool {
+pub(super) fn family_available<R: FirewallCommandRunner>(runner: &R, family: IpFamily) -> bool {
     runner.available(family.command_binary()) && runner.available(family.restore_binary())
 }
 
@@ -83,9 +78,7 @@ pub(super) async fn activate_family<R: FirewallCommandRunner>(
         .await
 }
 
-pub(super) async fn cleanup_all<R: FirewallCommandRunner>(
-    runner: &R,
-) -> Result<(), CommandError> {
+pub(super) async fn cleanup_all<R: FirewallCommandRunner>(runner: &R) -> Result<(), CommandError> {
     let mut errors = Vec::new();
     for family in [IpFamily::V4, IpFamily::V6] {
         if !runner.available(family.command_binary()) {
@@ -118,7 +111,10 @@ async fn cleanup_family<R: FirewallCommandRunner>(
         match result {
             Ok(()) => {}
             Err(error)
-                if matches!(error.kind, CommandErrorKind::NotFound | CommandErrorKind::Missing) =>
+                if matches!(
+                    error.kind,
+                    CommandErrorKind::NotFound | CommandErrorKind::Missing
+                ) =>
             {
                 break;
             }
@@ -131,13 +127,13 @@ async fn cleanup_family<R: FirewallCommandRunner>(
     for chain in [DISPATCH_CHAIN, SHADOW_CHAIN_A, SHADOW_CHAIN_B] {
         for operation in ["-F", "-X"] {
             let result = runner
-                .run(CommandSpec::new(
-                    binary,
-                    ["-t", "raw", operation, chain],
-                ))
+                .run(CommandSpec::new(binary, ["-t", "raw", operation, chain]))
                 .await;
             if let Err(error) = result
-                && !matches!(error.kind, CommandErrorKind::NotFound | CommandErrorKind::Missing)
+                && !matches!(
+                    error.kind,
+                    CommandErrorKind::NotFound | CommandErrorKind::Missing
+                )
             {
                 errors.push(error.message);
             }
@@ -167,15 +163,7 @@ async fn ensure_prerouting_jump<R: FirewallCommandRunner>(
             runner
                 .run(CommandSpec::new(
                     binary,
-                    [
-                        "-t",
-                        "raw",
-                        "-I",
-                        "PREROUTING",
-                        "1",
-                        "-j",
-                        DISPATCH_CHAIN,
-                    ],
+                    ["-t", "raw", "-I", "PREROUTING", "1", "-j", DISPATCH_CHAIN],
                 ))
                 .await
         }
@@ -220,10 +208,7 @@ fn require_family<R: FirewallCommandRunner>(
     Ok(())
 }
 
-pub(super) fn render_stage_script(
-    slot: ShadowSlot,
-    targets: &[NotrackTarget],
-) -> String {
+pub(super) fn render_stage_script(slot: ShadowSlot, targets: &[NotrackTarget]) -> String {
     let chain = shadow_chain(slot);
     let mut script = format!("*raw\n-F {chain}\n");
     for target in targets {

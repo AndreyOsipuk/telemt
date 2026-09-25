@@ -330,14 +330,38 @@ impl TrafficLimiter {
             cidr_refund_down,
         ] = values;
         for (counter, value) in [
-            (&self.user_scope.contention_up.reserve_exhausted_total, user_reserve_up),
-            (&self.user_scope.contention_down.reserve_exhausted_total, user_reserve_down),
-            (&self.user_scope.contention_up.refund_exhausted_total, user_refund_up),
-            (&self.user_scope.contention_down.refund_exhausted_total, user_refund_down),
-            (&self.cidr_scope.contention_up.reserve_exhausted_total, cidr_reserve_up),
-            (&self.cidr_scope.contention_down.reserve_exhausted_total, cidr_reserve_down),
-            (&self.cidr_scope.contention_up.refund_exhausted_total, cidr_refund_up),
-            (&self.cidr_scope.contention_down.refund_exhausted_total, cidr_refund_down),
+            (
+                &self.user_scope.contention_up.reserve_exhausted_total,
+                user_reserve_up,
+            ),
+            (
+                &self.user_scope.contention_down.reserve_exhausted_total,
+                user_reserve_down,
+            ),
+            (
+                &self.user_scope.contention_up.refund_exhausted_total,
+                user_refund_up,
+            ),
+            (
+                &self.user_scope.contention_down.refund_exhausted_total,
+                user_refund_down,
+            ),
+            (
+                &self.cidr_scope.contention_up.reserve_exhausted_total,
+                cidr_reserve_up,
+            ),
+            (
+                &self.cidr_scope.contention_down.reserve_exhausted_total,
+                cidr_reserve_down,
+            ),
+            (
+                &self.cidr_scope.contention_up.refund_exhausted_total,
+                cidr_refund_up,
+            ),
+            (
+                &self.cidr_scope.contention_down.refund_exhausted_total,
+                cidr_refund_down,
+            ),
         ] {
             counter.store(value, Ordering::Relaxed);
         }

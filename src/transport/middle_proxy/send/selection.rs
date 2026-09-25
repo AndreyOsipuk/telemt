@@ -127,11 +127,7 @@ impl MePool {
             WriterContour::Draining => PICK_PENALTY_DRAINING,
         };
         let stale = (writer.generation < current_generation) as usize;
-        let stale_penalty = if stale != 0 {
-            PICK_PENALTY_STALE
-        } else {
-            0
-        };
+        let stale_penalty = if stale != 0 { PICK_PENALTY_STALE } else { 0 };
         let degraded = writer.degraded.load(Ordering::Relaxed) as usize;
         let degraded_penalty = if degraded != 0 {
             PICK_PENALTY_DEGRADED

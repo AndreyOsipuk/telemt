@@ -137,10 +137,11 @@ mod tests {
 
         let drain_generation = Arc::clone(&generation);
         let drain = tokio::spawn(async move {
-            drain_generation.drain_sessions(Duration::from_secs(60)).await
+            drain_generation
+                .drain_sessions(Duration::from_secs(60))
+                .await
         });
-        while generation.session_admission.state.load(Ordering::Acquire)
-            & SESSION_ADMISSION_CLOSED
+        while generation.session_admission.state.load(Ordering::Acquire) & SESSION_ADMISSION_CLOSED
             == 0
         {
             tokio::task::yield_now().await;

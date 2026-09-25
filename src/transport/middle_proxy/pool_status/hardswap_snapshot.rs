@@ -81,8 +81,7 @@ impl MePool {
         let (replacement_preparing_current, replacement_retiring_current) =
             self.registry.writer_replacement_counts();
         let pending_age_secs = pending.then(|| {
-            Self::now_epoch_secs()
-                .saturating_sub(reinit.pending_hardswap_started_at_epoch_secs)
+            Self::now_epoch_secs().saturating_sub(reinit.pending_hardswap_started_at_epoch_secs)
         });
 
         MeApiHardswapSnapshot {

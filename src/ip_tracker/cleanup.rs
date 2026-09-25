@@ -56,10 +56,7 @@ impl Drop for DetachedCleanupBatch<'_> {
                 );
             }
         }
-        UserIpTracker::decrement_counter(
-            &self.tracker.cleanup_queue_len,
-            duplicate_entries,
-        );
+        UserIpTracker::decrement_counter(&self.tracker.cleanup_queue_len, duplicate_entries);
     }
 }
 
@@ -187,12 +184,7 @@ impl UserIpTracker {
                 continue;
             }
             removed_active_entries = removed_active_entries.saturating_add(
-                Self::apply_active_cleanup(
-                    &mut shard.active_ips,
-                    queued_user,
-                    *ip,
-                    *pending_count,
-                ),
+                Self::apply_active_cleanup(&mut shard.active_ips, queued_user, *ip, *pending_count),
             );
         }
         Self::decrement_counter(&self.active_entry_count, removed_active_entries);

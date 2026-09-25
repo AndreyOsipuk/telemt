@@ -252,12 +252,7 @@ impl MePool {
             let addr = candidates[idx];
             match self
                 .connect_one_with_generation_contour_for_dc_with_intent(
-                    addr,
-                    rng,
-                    generation,
-                    contour,
-                    dc,
-                    intent,
+                    addr, rng, generation, contour, dc, intent,
                 )
                 .await
             {
@@ -296,8 +291,10 @@ impl MePool {
         let status = self.reinit.status.load();
         let role_is_authoritative = match target.contour {
             WriterContour::Active => target.generation == status.active_generation,
-            WriterContour::Warm => status.pending_hardswap_generation != 0
-                && target.generation == status.pending_hardswap_generation,
+            WriterContour::Warm => {
+                status.pending_hardswap_generation != 0
+                    && target.generation == status.pending_hardswap_generation
+            }
             WriterContour::Draining => false,
         };
         let pending_revision_matches = target.contour != WriterContour::Warm

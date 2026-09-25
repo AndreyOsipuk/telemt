@@ -89,7 +89,10 @@ async fn queued_frame_notifies_only_after_releasing_session_lock() {
     }));
     let mut context = Context::from_waker(&waker);
     let mut notified = Box::pin(session.down_notify.notified());
-    assert!(matches!(notified.as_mut().poll(&mut context), Poll::Pending));
+    assert!(matches!(
+        notified.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
 
     queue_close(&session);
 
@@ -109,7 +112,10 @@ async fn budget_release_notifies_only_after_session_accounting_and_unlock() {
     }));
     let mut context = Context::from_waker(&waker);
     let mut notified = Box::pin(manager.budget_notify().notified_owned());
-    assert!(matches!(notified.as_mut().poll(&mut context), Poll::Pending));
+    assert!(matches!(
+        notified.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
 
     session.with_state_effects(|state, effects| {
         let bytes = state.pending_control_bytes;

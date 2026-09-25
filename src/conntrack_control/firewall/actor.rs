@@ -236,21 +236,15 @@ where
             }
 
             let desired = current.as_ref().expect("desired state is present").clone();
-            let interruptible = InterruptibleRunner::new(
-                &self.runner,
-                &self.terminal,
-                &process_cancellation,
-            );
-            let result = reconcile_once(
-                &interruptible,
-                &interruptible,
-                &mut self.applied,
-                &desired,
-            )
-            .await;
+            let interruptible =
+                InterruptibleRunner::new(&self.runner, &self.terminal, &process_cancellation);
+            let result =
+                reconcile_once(&interruptible, &interruptible, &mut self.applied, &desired).await;
             match result {
                 Ok(()) => {
-                    desired.stats.increment_conntrack_rule_reconcile_success_total();
+                    desired
+                        .stats
+                        .increment_conntrack_rule_reconcile_success_total();
                     desired.stats.set_conntrack_rule_apply_ok(true);
                     self.status_tx.send_replace(Some(ReconcileStatus {
                         generation: desired.generation,
@@ -265,7 +259,9 @@ where
                 }
                 Err(failure) if failure.cancelled => break,
                 Err(failure) => {
-                    desired.stats.increment_conntrack_rule_reconcile_error_total();
+                    desired
+                        .stats
+                        .increment_conntrack_rule_reconcile_error_total();
                     desired.stats.set_conntrack_rule_apply_ok(false);
                     if let Some(rollback_succeeded) = failure.rollback_succeeded {
                         if rollback_succeeded {
@@ -326,12 +322,12 @@ where
         if let Some(stats) = &self.last_stats {
             stats.set_conntrack_rule_apply_ok(false);
         }
-        if let Err(error) = tokio::time::timeout(
-            SHUTDOWN_CLEANUP_TIMEOUT,
-            recover_to_empty(&self.runner),
-        )
-        .await
-        .unwrap_or_else(|_| Err(CommandError::failed("firewall shutdown cleanup timed out")))
+        if let Err(error) =
+            tokio::time::timeout(SHUTDOWN_CLEANUP_TIMEOUT, recover_to_empty(&self.runner))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(CommandError::failed("firewall shutdown cleanup timed out"))
+                })
         {
             warn!(error = %error, "Failed to clear conntrack firewall policy during shutdown");
         } else {

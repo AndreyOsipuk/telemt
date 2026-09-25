@@ -154,10 +154,7 @@ enum BucketReserveError {
 
 impl BucketReserveError {
     fn exhausted_reserve_budget(self) -> bool {
-        matches!(
-            self,
-            Self::Contended | Self::ReserveAndRefundContended
-        )
+        matches!(self, Self::Contended | Self::ReserveAndRefundContended)
     }
 }
 

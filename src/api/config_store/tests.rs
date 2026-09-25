@@ -266,8 +266,7 @@ async fn access_mutation_rejects_source_graph_change_after_snapshot() {
     let root = dir.path().join("config.toml");
     let included = dir.path().join("users.toml");
     let root_body = "include = \"users.toml\"\n[censorship]\ntls_domain = \"one.example\"\n";
-    let external_root =
-        "include = \"users.toml\"\n[censorship]\ntls_domain = \"two.example\"\n";
+    let external_root = "include = \"users.toml\"\n[censorship]\ntls_domain = \"two.example\"\n";
     let included_body = "[access.users]\nalice = \"00000000000000000000000000000000\"\n";
     tokio::fs::write(&root, root_body).await.unwrap();
     tokio::fs::write(&included, included_body).await.unwrap();
@@ -288,7 +287,10 @@ async fn access_mutation_rejects_source_graph_change_after_snapshot() {
     .unwrap_err();
 
     assert_eq!(error.code, "revision_conflict");
-    assert_eq!(tokio::fs::read_to_string(&root).await.unwrap(), external_root);
+    assert_eq!(
+        tokio::fs::read_to_string(&root).await.unwrap(),
+        external_root
+    );
     assert_eq!(
         tokio::fs::read_to_string(&included).await.unwrap(),
         included_body

@@ -335,8 +335,7 @@ impl UserAdmissionAuthority {
             record.incarnation = incarnation;
             if identity_changed {
                 if previous.is_some() {
-                    self.quota_store
-                        .advance_preserving_usage(user, incarnation);
+                    self.quota_store.advance_preserving_usage(user, incarnation);
                 } else {
                     self.quota_store.activate_fresh(user, incarnation);
                 }
@@ -420,7 +419,8 @@ impl UserAdmissionAuthority {
         }
         let record = state.users.get(user)?;
         let effective = record.effective()?;
-        (effective.enabled && effective.credential_id == credential_id).then_some(record.incarnation)
+        (effective.enabled && effective.credential_id == credential_id)
+            .then_some(record.incarnation)
     }
 
     /// Starts a short publication critical section for one authenticated owner.
@@ -456,10 +456,7 @@ impl UserAdmissionAuthority {
     }
 
     /// Registers a legacy owner when no credential snapshot is available.
-    pub(crate) fn register_legacy(
-        self: &Arc<Self>,
-        user: &str,
-    ) -> Option<UserSessionRegistration> {
+    pub(crate) fn register_legacy(self: &Arc<Self>, user: &str) -> Option<UserSessionRegistration> {
         let credential_id = {
             let state = self.state.lock();
             if !state.initialized {
@@ -520,9 +517,7 @@ pub(crate) fn credential_id_from_hex(secret: &str) -> Option<UserCredentialId> {
     Some(credential_id(&secret))
 }
 
-fn cancel_owners(
-    cancellations: Vec<(String, Vec<CancellationToken>)>,
-) -> Vec<(String, usize)> {
+fn cancel_owners(cancellations: Vec<(String, Vec<CancellationToken>)>) -> Vec<(String, usize)> {
     cancellations
         .into_iter()
         .map(|(user, tokens)| {

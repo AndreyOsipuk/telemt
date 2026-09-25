@@ -93,10 +93,7 @@ pub(crate) fn open_dir_nofollow_or_create(path: &Path, mode: u32) -> io::Result<
 }
 
 /// Opens or creates a directory chain protected from untrusted entry replacement.
-pub(crate) fn open_trusted_dir_nofollow_or_create(
-    path: &Path,
-    mode: u32,
-) -> io::Result<OwnedFd> {
+pub(crate) fn open_trusted_dir_nofollow_or_create(path: &Path, mode: u32) -> io::Result<OwnedFd> {
     open_dir_components(path, Some(mode), true)
 }
 
@@ -143,13 +140,8 @@ fn open_dir_components(
                     Ok(()) | Err(nix::errno::Errno::EEXIST) => {}
                     Err(error) => return Err(errno_to_io(error)),
                 }
-                openat(
-                    &current,
-                    name.as_os_str(),
-                    DIRECTORY_FLAGS,
-                    Mode::empty(),
-                )
-                .map_err(errno_to_io)?
+                openat(&current, name.as_os_str(), DIRECTORY_FLAGS, Mode::empty())
+                    .map_err(errno_to_io)?
             }
             Err(error) => return Err(errno_to_io(error)),
         };

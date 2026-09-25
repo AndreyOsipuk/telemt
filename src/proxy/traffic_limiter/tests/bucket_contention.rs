@@ -9,10 +9,7 @@ fn reserve_stops_after_the_attempt_limit() {
 
     let reservation = bucket.try_reserve_at(1, 100, 1, &mut budget);
 
-    assert!(matches!(
-        reservation,
-        Err(BucketReserveError::Contended)
-    ));
+    assert!(matches!(reservation, Err(BucketReserveError::Contended)));
     assert_eq!(
         bucket.reserve_cas_attempts(),
         RESERVE_CAS_ATTEMPT_LIMIT as u64
@@ -32,7 +29,10 @@ fn reserve_succeeds_on_the_last_allowed_attempt() {
         .unwrap();
 
     assert_eq!(debit.commit_all(), 80);
-    assert_eq!(bucket.reserve_cas_attempts(), RESERVE_CAS_ATTEMPT_LIMIT as u64);
+    assert_eq!(
+        bucket.reserve_cas_attempts(),
+        RESERVE_CAS_ATTEMPT_LIMIT as u64
+    );
     assert!(budget.is_exhausted());
     assert_eq!(bucket.used_at(1), Some(80));
 }
@@ -121,15 +121,7 @@ fn lease_contention_is_not_reported_as_throttling() {
     let lease = limiter
         .acquire_lease("alice", "203.0.113.7".parse().unwrap())
         .unwrap();
-    let bucket = Arc::clone(
-        &lease
-            .binding
-            .load_full()
-            .user_bucket
-            .as_ref()
-            .unwrap()
-            .down,
-    );
+    let bucket = Arc::clone(&lease.binding.load_full().user_bucket.as_ref().unwrap().down);
     bucket.force_reserve_failures(RESERVE_CAS_ATTEMPT_LIMIT);
 
     let result = lease.try_consume(RateDirection::Down, 1);
@@ -187,12 +179,7 @@ fn cidr_contention_rolls_back_provisional_user_debits() {
     assert!(!result.blocked_user);
     assert!(!result.blocked_cidr);
     assert_eq!(
-        binding
-            .user_bucket
-            .as_ref()
-            .unwrap()
-            .down
-            .used_at(epoch),
+        binding.user_bucket.as_ref().unwrap().down.used_at(epoch),
         Some(0)
     );
     assert_eq!(cidr_bucket.down.used.used_at(epoch), None);
@@ -275,8 +262,7 @@ fn contention_snapshot_preserves_scope_direction_and_operation() {
 fn cidr_activation_consumes_one_shared_attempt_budget() {
     let bucket = CidrDirectionBucket::default();
     let user = CidrUserDirectionState::default();
-    user.used
-        .force_reserve_failures(RESERVE_CAS_ATTEMPT_LIMIT);
+    user.used.force_reserve_failures(RESERVE_CAS_ATTEMPT_LIMIT);
     let mut budget = ReserveCasBudget::new();
 
     let activation = user.ensure_active(13, &bucket.active_users, &mut budget);
@@ -360,19 +346,11 @@ fn cidr_first_grants_preserve_the_current_soft_fair_share() {
     let first = CidrUserDirectionState::default();
     let second = CidrUserDirectionState::default();
     assert_eq!(
-        first.ensure_active(
-            17,
-            &bucket.active_users,
-            &mut ReserveCasBudget::new(),
-        ),
+        first.ensure_active(17, &bucket.active_users, &mut ReserveCasBudget::new(),),
         Ok(true)
     );
     assert_eq!(
-        second.ensure_active(
-            17,
-            &bucket.active_users,
-            &mut ReserveCasBudget::new(),
-        ),
+        second.ensure_active(17, &bucket.active_users, &mut ReserveCasBudget::new(),),
         Ok(true)
     );
 
@@ -391,21 +369,13 @@ fn cidr_first_grants_preserve_the_current_soft_fair_share() {
         .as_mut()
         .unwrap()
         .commit_all();
-    first_reservation
-        .user_debit
-        .as_mut()
-        .unwrap()
-        .commit_all();
+    first_reservation.user_debit.as_mut().unwrap().commit_all();
     second_reservation
         .aggregate_debit
         .as_mut()
         .unwrap()
         .commit_all();
-    second_reservation
-        .user_debit
-        .as_mut()
-        .unwrap()
-        .commit_all();
+    second_reservation.user_debit.as_mut().unwrap().commit_all();
     assert_eq!(bucket.used.used_at(17), Some(100));
     assert_eq!(first.used.used_at(17), Some(50));
     assert_eq!(second.used.used_at(17), Some(50));

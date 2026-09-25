@@ -234,7 +234,10 @@ fn remove_stale_unix_socket(path: &Path) -> std::io::Result<()> {
     {
         return Err(IoError::new(
             ErrorKind::AlreadyExists,
-            format!("Unix listener path {} changed during cleanup", path.display()),
+            format!(
+                "Unix listener path {} changed during cleanup",
+                path.display()
+            ),
         ));
     }
     std::fs::remove_file(path)
@@ -373,7 +376,12 @@ mod tests {
         assert!(remove_stale_unix_socket(&regular).is_err());
         assert!(remove_stale_unix_socket(&link).is_err());
         assert_eq!(std::fs::read(&regular).unwrap(), b"preserve");
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[test]

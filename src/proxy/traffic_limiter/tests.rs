@@ -65,12 +65,7 @@ fn reserve_at(
     cap: u64,
     requested: u64,
 ) -> Result<Option<DirectionDebit>, BucketReserveError> {
-    bucket.try_reserve_at(
-        epoch,
-        cap,
-        requested,
-        &mut ReserveCasBudget::new(),
-    )
+    bucket.try_reserve_at(epoch, cap, requested, &mut ReserveCasBudget::new())
 }
 
 #[test]
@@ -346,11 +341,7 @@ fn concurrent_first_use_counts_one_active_cidr_user() {
         let barrier = Arc::clone(&barrier);
         threads.push(std::thread::spawn(move || {
             barrier.wait();
-            user.ensure_active(
-                13,
-                &bucket.active_users,
-                &mut ReserveCasBudget::new(),
-            )
+            user.ensure_active(13, &bucket.active_users, &mut ReserveCasBudget::new())
         }));
     }
     let results: Vec<_> = threads

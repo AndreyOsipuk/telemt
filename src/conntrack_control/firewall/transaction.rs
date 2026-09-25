@@ -4,9 +4,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::ConntrackBackend;
 
-use super::command::{
-    CommandError, CommandErrorKind, CommandSpec, FirewallCommandRunner,
-};
+use super::command::{CommandError, CommandErrorKind, CommandSpec, FirewallCommandRunner};
 use super::iptables::{self, IpFamily};
 use super::model::{AppliedPlan, AppliedState, DesiredPolicy, DesiredState, ShadowSlot};
 use super::nftables;
@@ -251,9 +249,13 @@ pub(super) async fn transition_plan<R: FirewallCommandRunner>(
                 iptables::activate_family(runner, IpFamily::V6, None).await?;
             }
         }
-        (AppliedPlan::Nftables { slot: previous_slot, .. }, AppliedPlan::Nftables { slot, .. })
-            if previous_slot != slot =>
-        {
+        (
+            AppliedPlan::Nftables {
+                slot: previous_slot,
+                ..
+            },
+            AppliedPlan::Nftables { slot, .. },
+        ) if previous_slot != slot => {
             nftables::deactivate(runner, *previous_slot).await?;
         }
         (_, _) if previous != target => clear_plan(runner, previous).await?,

@@ -156,10 +156,7 @@ impl WebSocketLaneReservation {
         Ok(())
     }
 
-    pub(super) fn mark_stream_owned(
-        &mut self,
-        stream: StreamIdentity,
-    ) -> Result<(), ManagerError> {
+    pub(super) fn mark_stream_owned(&mut self, stream: StreamIdentity) -> Result<(), ManagerError> {
         if self.phase != WebSocketLaneReservationPhase::Transferred || self.stream != Some(stream) {
             return Err(ManagerError::Protocol);
         }

@@ -40,18 +40,15 @@ impl WebProcessRuntime {
             .sessions
             .get(&replacement.old_session.token_hash())
             .is_some_and(|session| Arc::ptr_eq(session, &replacement.old_session));
-        if !valid
-            || state.closed
-            || !state.issuance_enabled
-        {
+        if !valid || state.closed || !state.issuance_enabled {
             drop(state);
             self.cancel_replacement(bootstrap_hash, &replacement.old_session);
             return Err(ManagerError::Closed);
         }
-        let Some(mut user_publication) = generation.proxy_shared.claim_authenticated_user(
-            &replacement.profile.user,
-            replacement.profile.credential_id,
-        ) else {
+        let Some(mut user_publication) = generation
+            .proxy_shared
+            .claim_authenticated_user(&replacement.profile.user, replacement.profile.credential_id)
+        else {
             drop(state);
             self.cancel_replacement(bootstrap_hash, &replacement.old_session);
             return Err(ManagerError::Closed);

@@ -8,11 +8,11 @@ use tokio::sync::mpsc::error::TrySendError;
 
 use super::super::codec::WriterCommand;
 use super::super::{MeResponse, RouteBytePermit};
+use super::replacement::WriterBindOutcome;
 use super::{
     BoundConn, ConnMeta, ConnRegistry, ConnWriter, HotConnBinding, RouteResult,
     WriterActivitySnapshot,
 };
-use super::replacement::WriterBindOutcome;
 
 impl ConnRegistry {
     fn set_writer_bound_count(&self, writer_id: u64, count: usize) {

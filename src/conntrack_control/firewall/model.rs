@@ -18,7 +18,6 @@ impl ShadowSlot {
             Self::B => Self::A,
         }
     }
-
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]

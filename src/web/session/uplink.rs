@@ -149,13 +149,7 @@ impl WebSession {
                 &mut unused_items,
                 &mut progress,
             );
-            self.release_locked(
-                &mut state,
-                &mut effects,
-                unused_bytes,
-                unused_items,
-                false,
-            );
+            self.release_locked(&mut state, &mut effects, unused_bytes, unused_items, false);
             if !applied {
                 Err(ManagerError::Closed)
             } else {

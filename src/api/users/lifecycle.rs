@@ -54,9 +54,11 @@ async fn rotate_secret_to_completion(
         Some(&base_revision),
     )
     .await?;
-    shared
-        .proxy_shared
-        .stage_user_credential(user, credential_id, cfg.access.is_user_enabled(user));
+    shared.proxy_shared.stage_user_credential(
+        user,
+        credential_id,
+        cfg.access.is_user_enabled(user),
+    );
     drop(_guard);
 
     let (detected_ip_v4, detected_ip_v6) = shared.detected_link_ips();

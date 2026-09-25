@@ -142,8 +142,8 @@ pub fn init_logging(
         }
 
         LogDestination::File { options } => {
-            let file_appender = file::BoundedFileAppender::new(options.clone())
-                .expect("Failed to open log file");
+            let file_appender =
+                file::BoundedFileAppender::new(options.clone()).expect("Failed to open log file");
             let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
             let fmt_layer = fmt::Layer::default()

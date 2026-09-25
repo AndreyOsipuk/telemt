@@ -9,8 +9,8 @@ use super::super::MePool;
 use super::super::codec::{ProxyReqCommand, WriterCommand};
 use super::reservation::{
     WriterByteReserveError, WriterCommandReserveError, proxy_req_payload_from_command,
-    proxy_req_resident_permits, proxy_tag_array, reserve_writer_bytes,
-    reserve_writer_command_slot, writer_send_deadline,
+    proxy_req_resident_permits, proxy_tag_array, reserve_writer_bytes, reserve_writer_command_slot,
+    writer_send_deadline,
 };
 use crate::error::{ProxyError, Result};
 use crate::stream::PooledBuffer;

@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use serde::Serialize;
 
-use super::{now_epoch_secs, ApiShared, SOURCE_UNAVAILABLE_REASON};
+use super::{ApiShared, SOURCE_UNAVAILABLE_REASON, now_epoch_secs};
 
 #[derive(Serialize)]
 struct RuntimeMePoolStateGenerationData {
@@ -90,9 +90,7 @@ struct RuntimeMePoolStateData {
 }
 
 /// Builds the bounded runtime ME pool response projection.
-pub(in crate::api) async fn build_runtime_me_pool_state_data(
-    shared: &ApiShared,
-) -> impl Serialize {
+pub(in crate::api) async fn build_runtime_me_pool_state_data(shared: &ApiShared) -> impl Serialize {
     let now_epoch_secs = now_epoch_secs();
     let Some(pool) = shared.me_pool.read().await.clone() else {
         return RuntimeMePoolStateData {

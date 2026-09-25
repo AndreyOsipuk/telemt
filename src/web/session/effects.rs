@@ -78,8 +78,7 @@ impl DeferredSessionEffects {
 
     /// Defers one RawWaker drop without delivering a readiness signal.
     pub(super) fn drop_waker(&mut self, waker: Waker) {
-        self.callbacks
-            .push(DeferredSessionEffect::DropWaker(waker));
+        self.callbacks.push(DeferredSessionEffect::DropWaker(waker));
     }
 
     /// Defers one exact notification without coalescing sibling effects.
@@ -89,8 +88,7 @@ impl DeferredSessionEffects {
 
     /// Retains a detached response batch until its lease can drop safely.
     pub(super) fn retain_batch(&mut self, batch: DownBatch) {
-        self.retained
-            .push(RetainedSessionResource::Batch(batch));
+        self.retained.push(RetainedSessionResource::Batch(batch));
     }
 
     /// Retains transient semaphore capacity until state publication completes.
@@ -173,10 +171,8 @@ mod tests {
 
     impl Wake for PermitOrderWake {
         fn wake(self: Arc<Self>) {
-            self.observed_release.store(
-                self.semaphore.available_permits(),
-                Ordering::Release,
-            );
+            self.observed_release
+                .store(self.semaphore.available_permits(), Ordering::Release);
         }
     }
 

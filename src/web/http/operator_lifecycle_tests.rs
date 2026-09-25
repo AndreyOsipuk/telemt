@@ -113,9 +113,11 @@ async fn user_revocation_interrupts_live_session_before_periodic_cleanup() {
             .unwrap(),
         Err(ManagerError::Closed)
     ));
-    assert!(runtime
-        .get_session(session_hash, "proxy.example.com")
-        .is_err());
+    assert!(
+        runtime
+            .get_session(session_hash, "proxy.example.com")
+            .is_err()
+    );
     stop_runtime(runtime, generation).await;
 }
 

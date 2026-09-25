@@ -228,7 +228,10 @@ async fn partial_hardswap_is_rejected_when_stale_binding_is_disabled() {
         .commit_reinit_attempt(&reservation.attempt, &desired_by_dc, 0.5)
         .await;
 
-    assert!(matches!(result, Err(ReinitCommitFailure::Redundancy { .. })));
+    assert!(matches!(
+        result,
+        Err(ReinitCommitFailure::Redundancy { .. })
+    ));
     assert_eq!(pool.current_generation(), active_generation);
     assert!(!old_dc1.draining.load(Ordering::Acquire));
     assert!(!old_dc2.draining.load(Ordering::Acquire));
@@ -303,24 +306,8 @@ async fn partial_hardswap_preserves_fallback_only_for_underfloor_family() {
     let v6 = addr_v6(1, 2001);
     let desired_by_dc = HashMap::from([(1, HashSet::from([v4, v6]))]);
     let active_generation = pool.current_generation();
-    let old_v4 = insert_writer(
-        &pool,
-        451,
-        1,
-        v4,
-        active_generation,
-        WriterContour::Active,
-    )
-    .await;
-    let old_v6 = insert_writer(
-        &pool,
-        452,
-        1,
-        v6,
-        active_generation,
-        WriterContour::Active,
-    )
-    .await;
+    let old_v4 = insert_writer(&pool, 451, 1, v4, active_generation, WriterContour::Active).await;
+    let old_v6 = insert_writer(&pool, 452, 1, v6, active_generation, WriterContour::Active).await;
     let map_hash = MePool::desired_map_hash(&desired_by_dc);
     let endpoint_revision = pool.endpoint_snapshot.load().revision;
     let reservation = pool

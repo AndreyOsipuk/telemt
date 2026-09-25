@@ -3,11 +3,7 @@ use std::fmt::Write;
 use crate::transport::middle_proxy::MeApiHardswapSnapshot;
 
 /// Renders fixed-cardinality hardswap and writer-replacement gauges.
-pub(super) fn render(
-    out: &mut String,
-    snapshot: Option<&MeApiHardswapSnapshot>,
-    enabled: bool,
-) {
+pub(super) fn render(out: &mut String, snapshot: Option<&MeApiHardswapSnapshot>, enabled: bool) {
     let snapshot = enabled.then_some(snapshot).flatten();
     let pending = snapshot.is_some_and(|value| value.pending);
     let pending_age_secs = snapshot
@@ -147,11 +143,7 @@ mod tests {
         assert!(out.contains("telemt_me_hardswap_pending 1"));
         assert!(out.contains("telemt_me_hardswap_pending_age_seconds 42"));
         assert!(out.contains("telemt_me_hardswap_pending_writer_deficit 4"));
-        assert!(out.contains(
-            "telemt_me_writer_replacement_current{state=\"preparing\"} 5"
-        ));
-        assert!(out.contains(
-            "telemt_me_writer_replacement_current{state=\"retiring\"} 6"
-        ));
+        assert!(out.contains("telemt_me_writer_replacement_current{state=\"preparing\"} 5"));
+        assert!(out.contains("telemt_me_writer_replacement_current{state=\"retiring\"} 6"));
     }
 }

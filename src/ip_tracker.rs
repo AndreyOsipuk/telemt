@@ -41,8 +41,7 @@ struct CleanupShard {
     queue: Mutex<CleanupQueue>,
 }
 
-type CleanupQueue =
-    HashMap<String, HashMap<UserIncarnation, HashMap<IpAddr, usize>>>;
+type CleanupQueue = HashMap<String, HashMap<UserIncarnation, HashMap<IpAddr, usize>>>;
 type CleanupBatch = HashMap<(String, UserIncarnation, IpAddr), usize>;
 
 #[derive(Debug, Clone)]
@@ -208,7 +207,12 @@ impl UserIpTracker {
     ) -> Option<(String, UserIncarnation, IpAddr, usize)> {
         let user = queue.keys().next().cloned()?;
         let incarnation = queue.get(&user)?.keys().next().copied()?;
-        let ip = queue.get(&user)?.get(&incarnation)?.keys().next().copied()?;
+        let ip = queue
+            .get(&user)?
+            .get(&incarnation)?
+            .keys()
+            .next()
+            .copied()?;
         let incarnations = queue.get_mut(&user)?;
         let ips = incarnations.get_mut(&incarnation)?;
         let count = ips.remove(&ip)?;

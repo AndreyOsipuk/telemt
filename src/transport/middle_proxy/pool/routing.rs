@@ -198,11 +198,7 @@ impl MePool {
     }
 
     fn mirror_negative_dcs(map: &mut HashMap<i32, Vec<(IpAddr, u16)>>) {
-        let positive_dcs = map
-            .keys()
-            .copied()
-            .filter(|dc| *dc > 0)
-            .collect::<Vec<_>>();
+        let positive_dcs = map.keys().copied().filter(|dc| *dc > 0).collect::<Vec<_>>();
         for dc in positive_dcs {
             if !map.contains_key(&-dc)
                 && let Some(endpoints) = map.get(&dc).cloned()

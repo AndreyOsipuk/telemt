@@ -1,9 +1,9 @@
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, ErrorKind, Read, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
 #[cfg(target_os = "linux")]
 use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use nix::fcntl::{Flock, FlockArg, OFlag, openat};
@@ -66,15 +66,14 @@ impl PidFile {
     ///
     /// Fails if another owner holds the lock or the existing PID names a running process.
     pub fn acquire(&mut self) -> Result<(), DaemonError> {
-        let anchor = AnchoredPath::open_trusted_parent_or_create(&self.path, 0o755).map_err(
-            |error| {
+        let anchor =
+            AnchoredPath::open_trusted_parent_or_create(&self.path, 0o755).map_err(|error| {
                 DaemonError::PidFile(format!(
                     "cannot open trusted parent for {}: {}",
                     self.path.display(),
                     error
                 ))
-            },
-        )?;
+            })?;
         let lock_name = self.lock_path.file_name().ok_or_else(|| {
             DaemonError::PidFile(format!(
                 "lock path {} has no file name",
@@ -132,7 +131,11 @@ impl PidFile {
         // Validate the opened inode before modifying it so a hard-link substitution
         // cannot turn PID publication into truncation of an unrelated file.
         pid_file.set_len(0).map_err(|error| {
-            DaemonError::PidFile(format!("cannot truncate {}: {}", self.path.display(), error))
+            DaemonError::PidFile(format!(
+                "cannot truncate {}: {}",
+                self.path.display(),
+                error
+            ))
         })?;
         let pid = getpid();
         writeln!(pid_file, "{}", pid).map_err(|error| {
@@ -236,19 +239,9 @@ fn normalize_pid_path(path: &Path) -> PathBuf {
     }
 }
 
-fn open_file_at(
-    anchor: &AnchoredPath,
-    name: &OsStr,
-    flags: OFlag,
-    mode: u32,
-) -> io::Result<File> {
-    let descriptor = openat(
-        anchor.parent(),
-        name,
-        flags,
-        Mode::from_bits_truncate(mode),
-    )
-    .map_err(|error| io::Error::from_raw_os_error(error as i32))?;
+fn open_file_at(anchor: &AnchoredPath, name: &OsStr, flags: OFlag, mode: u32) -> io::Result<File> {
+    let descriptor = openat(anchor.parent(), name, flags, Mode::from_bits_truncate(mode))
+        .map_err(|error| io::Error::from_raw_os_error(error as i32))?;
     Ok(File::from(descriptor))
 }
 
@@ -337,12 +330,7 @@ fn remove_owned_pid_file(
         )));
     }
     drop(file);
-    unlinkat(
-        anchor.parent(),
-        anchor.name(),
-        UnlinkatFlags::NoRemoveDir,
-    )
-    .map_err(|error| {
+    unlinkat(anchor.parent(), anchor.name(), UnlinkatFlags::NoRemoveDir).map_err(|error| {
         DaemonError::PidFile(format!(
             "cannot remove {}: {}",
             path.display(),
@@ -351,10 +339,7 @@ fn remove_owned_pid_file(
     })
 }
 
-fn validate_regular_single_link(
-    file: &File,
-    path: &Path,
-) -> Result<fs::Metadata, DaemonError> {
+fn validate_regular_single_link(file: &File, path: &Path) -> Result<fs::Metadata, DaemonError> {
     let metadata = file.metadata().map_err(|error| {
         DaemonError::PidFile(format!("cannot inspect {}: {}", path.display(), error))
     })?;
@@ -419,9 +404,7 @@ pub enum DaemonStatus {
 pub fn check_status<P: AsRef<Path>>(path: P) -> DaemonStatus {
     let path = normalize_pid_path(path.as_ref());
     match read_pid_file_if_exists(&path) {
-        Ok(Some(pid))
-            if daemon_lock_is_held(&path).unwrap_or(false) && is_process_running(pid) =>
-        {
+        Ok(Some(pid)) if daemon_lock_is_held(&path).unwrap_or(false) && is_process_running(pid) => {
             DaemonStatus::Running(pid)
         }
         Ok(Some(pid)) => DaemonStatus::Stale(pid),
@@ -443,7 +426,10 @@ fn daemon_lock_is_held(path: &Path) -> Result<bool, DaemonError> {
         }
     };
     let lock_name = lock_path.file_name().ok_or_else(|| {
-        DaemonError::PidFile(format!("lock path {} has no file name", lock_path.display()))
+        DaemonError::PidFile(format!(
+            "lock path {} has no file name",
+            lock_path.display()
+        ))
     })?;
     let file = match open_file_at(
         &anchor,

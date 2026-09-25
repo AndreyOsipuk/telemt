@@ -138,11 +138,7 @@ impl MePool {
         writers.push(writer);
         self.conn_count.fetch_add(1, Ordering::Relaxed);
         writers.publish_current();
-        self.apply_writer_draining_state(
-            &writers[victim_pos],
-            self.force_close_timeout(),
-            false,
-        );
+        self.apply_writer_draining_state(&writers[victim_pos], self.force_close_timeout(), false);
         self.lifecycle
             .spawn_registered_writer(task_registration, writer_task);
         reservation.mark_committed();
@@ -264,11 +260,8 @@ mod tests {
     async fn replacement_commit_publishes_successor_before_draining_victim() {
         let pool = make_pool().await;
         let addr = endpoint(1);
-        pool.update_proxy_maps(
-            HashMap::from([(2, vec![(addr.ip(), addr.port())])]),
-            None,
-        )
-        .await;
+        pool.update_proxy_maps(HashMap::from([(2, vec![(addr.ip(), addr.port())])]), None)
+            .await;
         let victim = install_writer(&pool, 1001, 2, addr).await;
         let expected_role = WriterRole::from_writer(&victim);
         let mut reservation = pool
@@ -307,11 +300,8 @@ mod tests {
     async fn cancelled_replacement_waiting_for_publication_restores_all_reservations() {
         let pool = make_pool().await;
         let addr = endpoint(2);
-        pool.update_proxy_maps(
-            HashMap::from([(2, vec![(addr.ip(), addr.port())])]),
-            None,
-        )
-        .await;
+        pool.update_proxy_maps(HashMap::from([(2, vec![(addr.ip(), addr.port())])]), None)
+            .await;
         let victim = install_writer(&pool, 2001, 2, addr).await;
         let expected_role = WriterRole::from_writer(&victim);
         let mut reservation = pool
@@ -336,10 +326,21 @@ mod tests {
         assert!(result.is_err());
         drop(writers_guard);
         drop(reservation);
-        assert_eq!(pool.writer_replacement_open_reserved.load(Ordering::Acquire), 0);
+        assert_eq!(
+            pool.writer_replacement_open_reserved
+                .load(Ordering::Acquire),
+            0
+        );
         assert_eq!(pool.registry.writer_replacement_counts(), (0, 0));
         assert!(!victim.draining.load(Ordering::Acquire));
-        assert!(!pool.writers.read().await.iter().any(|writer| writer.id == 2002));
+        assert!(
+            !pool
+                .writers
+                .read()
+                .await
+                .iter()
+                .any(|writer| writer.id == 2002)
+        );
     }
 
     #[tokio::test]
@@ -379,7 +380,14 @@ mod tests {
         assert!(result.is_err());
         drop(reservation);
         assert!(!victim.draining.load(Ordering::Acquire));
-        assert!(!pool.writers.read().await.iter().any(|writer| writer.id == 3002));
+        assert!(
+            !pool
+                .writers
+                .read()
+                .await
+                .iter()
+                .any(|writer| writer.id == 3002)
+        );
         assert_eq!(pool.registry.writer_replacement_counts(), (0, 0));
     }
 }

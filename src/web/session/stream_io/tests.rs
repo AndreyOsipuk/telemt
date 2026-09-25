@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 use std::mem::ManuallyDrop;
 use std::net::SocketAddr;
-use std::sync::{Arc, Barrier, Weak};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier, Weak};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use bytes::Bytes;
@@ -63,8 +63,7 @@ impl CallbackProbe {
             self.clone_while_locked.store(true, Ordering::Release);
             return;
         };
-        if self.clone_action.swap(CLONE_ACTION_NONE, Ordering::AcqRel)
-            == CLONE_ACTION_INSERT_DATA
+        if self.clone_action.swap(CLONE_ACTION_NONE, Ordering::AcqRel) == CLONE_ACTION_INSERT_DATA
             && let Some(stream) = state
                 .streams
                 .get_mut(&self.stream.id)

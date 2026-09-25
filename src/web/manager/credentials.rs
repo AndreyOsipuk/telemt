@@ -117,9 +117,7 @@ impl WebProcessRuntime {
             return Err(ManagerError::Limit);
         }
         let global_capacity_full = state.bootstraps.len() >= self.limits.max_bootstraps_global;
-        if global_capacity_full
-            && !state.bootstraps.values().any(|bootstrap| !bootstrap.used)
-        {
+        if global_capacity_full && !state.bootstraps.values().any(|bootstrap| !bootstrap.used) {
             self.record_limit_hit();
             self.telemetry
                 .record_rejection(WebRejectionReason::BootstrapCapacity);

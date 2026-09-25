@@ -34,11 +34,7 @@ impl MePool {
         let total_passes = 1 + extra_passes;
 
         for (dc, endpoints) in desired_by_dc {
-            if !self.hardswap_warmup_is_authoritative(
-                generation,
-                map_hash,
-                endpoint_revision,
-            ) {
+            if !self.hardswap_warmup_is_authoritative(generation, map_hash, endpoint_revision) {
                 return;
             }
             for family in [IpFamily::V4, IpFamily::V6] {
@@ -119,11 +115,7 @@ impl MePool {
                     }
 
                     last_fresh_count = self
-                        .fresh_writer_count_for_dc_endpoints(
-                            generation,
-                            *dc,
-                            &family_endpoints,
-                        )
+                        .fresh_writer_count_for_dc_endpoints(generation, *dc, &family_endpoints)
                         .await;
                     if last_fresh_count >= required {
                         completed = true;
@@ -324,8 +316,7 @@ impl MePool {
             Err(ReinitCommitFailure::Superseded) => {
                 debug!(
                     previous_generation,
-                    generation,
-                    "ME reinit result discarded after a newer desired-map attempt"
+                    generation, "ME reinit result discarded after a newer desired-map attempt"
                 );
                 return false;
             }

@@ -5,8 +5,8 @@ use bytes::Bytes;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_util::sync::CancellationToken;
 
-use super::{CarrierSocket, DataPlaneEvent, DriverEvent, FairDataSelector};
 use super::io::{flush, process_lane, read_message, record_message, reserve_data, send};
+use super::{CarrierSocket, DataPlaneEvent, DriverEvent, FairDataSelector};
 use crate::web::manager::{WebProcessRuntime, WebSocketConnection};
 use crate::web::session::{SessionCloseReason, WebSession, WebSocketLaneReservation};
 use crate::web::trace::{TraceDirection, TraceWebSocketContext};

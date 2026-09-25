@@ -160,7 +160,10 @@ fn parallel_distinct_failures_respect_exact_auth_probe_capacity() {
                 for index in (worker..ATTEMPTS).step_by(16) {
                     let octets = (index as u32).to_be_bytes();
                     let peer_ip = IpAddr::V4(std::net::Ipv4Addr::new(
-                        octets[1], octets[2], octets[3], worker as u8,
+                        octets[1],
+                        octets[2],
+                        octets[3],
+                        worker as u8,
                     ));
                     auth_probe_record_failure_in(shared.as_ref(), peer_ip, Instant::now());
                 }
@@ -168,7 +171,10 @@ fn parallel_distinct_failures_respect_exact_auth_probe_capacity() {
         }
     });
 
-    assert_eq!(shared.handshake.auth_probe.len(), AUTH_PROBE_TRACK_MAX_ENTRIES);
+    assert_eq!(
+        shared.handshake.auth_probe.len(),
+        AUTH_PROBE_TRACK_MAX_ENTRIES
+    );
     assert_eq!(
         auth_probe_slots_for_testing_in_shared(shared.as_ref()),
         AUTH_PROBE_TRACK_MAX_ENTRIES

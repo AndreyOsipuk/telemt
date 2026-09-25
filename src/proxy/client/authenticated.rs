@@ -155,10 +155,7 @@ impl RunningClientHandler {
             .or((config.access.user_max_tcp_conns_global_each > 0)
                 .then_some(config.access.user_max_tcp_conns_global_each))
             .map(|v| v as u64);
-        let Some(_connection_permit) = stats
-            .connection_authority()
-            .try_acquire(user, limit)
-        else {
+        let Some(_connection_permit) = stats.connection_authority().try_acquire(user, limit) else {
             return Err(ProxyError::ConnectionLimitExceeded {
                 user: user.to_string(),
             });

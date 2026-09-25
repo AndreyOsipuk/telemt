@@ -207,7 +207,10 @@ mod tests {
         let waker = Waker::from(Arc::clone(&counter));
         let mut context = Context::from_waker(&waker);
         let mut notified = Box::pin(admission.registrations_drained.notified());
-        assert!(matches!(notified.as_mut().poll(&mut context), Poll::Pending));
+        assert!(matches!(
+            notified.as_mut().poll(&mut context),
+            Poll::Pending
+        ));
 
         let notify = registration.release_deferred().unwrap();
 

@@ -76,11 +76,9 @@ pub fn parse_proxy_config_text(text: &str, http_status: u16) -> ProxyConfigData 
 
 pub async fn load_proxy_config_cache(path: &str) -> Result<ProxyConfigData> {
     #[cfg(unix)]
-    let bytes = read_regular_limited_async(
-        Path::new(path).to_path_buf(),
-        HTTPS_RESPONSE_BODY_MAX_BYTES,
-    )
-    .await;
+    let bytes =
+        read_regular_limited_async(Path::new(path).to_path_buf(), HTTPS_RESPONSE_BODY_MAX_BYTES)
+            .await;
     #[cfg(not(unix))]
     let bytes = tokio::fs::read(path).await;
     let bytes = bytes.map_err(|e| {

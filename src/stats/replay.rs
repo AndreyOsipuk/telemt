@@ -1,6 +1,6 @@
 use std::borrow::Borrow;
-use std::collections::{HashMap, VecDeque};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::Arc;

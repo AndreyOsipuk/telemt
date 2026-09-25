@@ -61,32 +61,28 @@ impl TrafficLease {
         let mut granted = requested;
         let mut user_debit = None;
         if let Some(user_bucket) = binding.user_bucket.as_ref() {
-            let user_reservation = match user_bucket.try_reserve(
-                direction,
-                epoch,
-                granted,
-                &mut budget,
-            ) {
-                Ok(reservation) => reservation,
-                Err(error) => {
-                    if error.exhausted_reserve_budget() {
-                        self.limiter
-                            .user_scope
-                            .reserve_cas_retry_exhausted(direction);
+            let user_reservation =
+                match user_bucket.try_reserve(direction, epoch, granted, &mut budget) {
+                    Ok(reservation) => reservation,
+                    Err(error) => {
+                        if error.exhausted_reserve_budget() {
+                            self.limiter
+                                .user_scope
+                                .reserve_cas_retry_exhausted(direction);
+                        }
+                        return TrafficReservation {
+                            result: TrafficConsumeResult {
+                                granted: 0,
+                                blocked_user: false,
+                                blocked_cidr: false,
+                            },
+                            _binding: binding,
+                            user: None,
+                            cidr: None,
+                            cidr_user: None,
+                        };
                     }
-                    return TrafficReservation {
-                        result: TrafficConsumeResult {
-                            granted: 0,
-                            blocked_user: false,
-                            blocked_cidr: false,
-                        },
-                        _binding: binding,
-                        user: None,
-                        cidr: None,
-                        cidr_user: None,
-                    };
-                }
-            };
+                };
             user_debit = user_reservation.debit;
             if user_reservation.granted == 0 {
                 self.limiter.observe_throttle(direction, true, false);
@@ -107,9 +103,10 @@ impl TrafficLease {
 
         let mut cidr_debit = None;
         let mut cidr_user_debit = None;
-        if let (Some(cidr_bucket), Some(cidr_user_share)) =
-            (binding.cidr_bucket.as_ref(), binding.cidr_user_share.as_ref())
-        {
+        if let (Some(cidr_bucket), Some(cidr_user_share)) = (
+            binding.cidr_bucket.as_ref(),
+            binding.cidr_user_share.as_ref(),
+        ) {
             let cidr_reservation = match cidr_bucket.try_reserve_for_user(
                 direction,
                 cidr_user_share,

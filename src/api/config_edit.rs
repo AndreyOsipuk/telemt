@@ -6,14 +6,14 @@ use serde_json::Value as Json;
 use toml::Value as Toml;
 
 use super::ApiShared;
+#[cfg(test)]
+use super::config_store::write_atomic;
 use super::config_store::{
     EDITABLE_SECTIONS, EDITABLE_SERVER_FIELDS, compute_snapshot_revision, is_editable_section,
     load_candidate_snapshot, load_config_snapshot, render_server_listeners,
     render_top_level_section, resolve_single_source_owner, upsert_toml_table,
     write_atomic_if_unchanged,
 };
-#[cfg(test)]
-use super::config_store::write_atomic;
 use super::model::ApiFailure;
 use crate::config::ProxyConfig;
 use crate::config::hot_reload::classify_config_changes;

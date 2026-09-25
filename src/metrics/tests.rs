@@ -127,9 +127,7 @@ async fn test_render_metrics_format() {
     );
     assert!(output.contains("telemt_handshake_timeouts_total 1"));
     assert!(output.contains("telemt_handshake_failures_by_class_total{class=\"timeout\"} 1"));
-    assert!(
-        output.contains("telemt_conntrack_rule_reconcile_total{result=\"success\"} 1")
-    );
+    assert!(output.contains("telemt_conntrack_rule_reconcile_total{result=\"success\"} 1"));
     assert!(output.contains("telemt_conntrack_rule_reconcile_total{result=\"error\"} 1"));
     assert!(output.contains("telemt_conntrack_rule_rollback_total{result=\"success\"} 1"));
     assert!(output.contains("telemt_conntrack_rule_rollback_total{result=\"error\"} 1"));

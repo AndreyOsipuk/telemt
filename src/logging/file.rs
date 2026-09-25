@@ -1,6 +1,6 @@
-use std::fs::{self, File};
 #[cfg(not(unix))]
 use std::fs::OpenOptions;
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -223,12 +223,7 @@ impl BoundedFileAppender {
         let archive_name = archive_path.file_name().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "archive path has no file name")
         })?;
-        match renameat(
-            &self.dir_fd,
-            current_name,
-            &self.dir_fd,
-            archive_name,
-        ) {
+        match renameat(&self.dir_fd, current_name, &self.dir_fd, archive_name) {
             Ok(()) => Ok(()),
             Err(nix::errno::Errno::ENOENT) => Ok(()),
             Err(error) => Err(io::Error::from_raw_os_error(error as i32)),
@@ -247,11 +242,10 @@ impl BoundedFileAppender {
     fn collect_candidates(&self) -> io::Result<Vec<LogFileCandidate>> {
         use std::os::unix::fs::MetadataExt;
 
-        let descriptor = dup(&self.dir_fd).map_err(|error| {
-            io::Error::from_raw_os_error(error as i32)
-        })?;
-        let mut directory = Dir::from_fd(descriptor)
-            .map_err(|error| io::Error::from_raw_os_error(error as i32))?;
+        let descriptor =
+            dup(&self.dir_fd).map_err(|error| io::Error::from_raw_os_error(error as i32))?;
+        let mut directory =
+            Dir::from_fd(descriptor).map_err(|error| io::Error::from_raw_os_error(error as i32))?;
         let mut candidates = Vec::new();
         let prefix = format!("{}.", self.base_name);
         for entry in directory.iter().flatten() {
@@ -375,9 +369,9 @@ struct LogFileCandidate {
 
 #[cfg(unix)]
 fn open_append_file(dir_fd: &OwnedFd, path: &Path) -> io::Result<(File, u64)> {
-    let name = path.file_name().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "log path has no file name")
-    })?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "log path has no file name"))?;
     let file = crate::util::secure_fs::open_append_regular_at(dir_fd, name, 0o640)?;
     let current_size = file.metadata()?.len();
     Ok((file, current_size))

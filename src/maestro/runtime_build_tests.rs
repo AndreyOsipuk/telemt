@@ -135,14 +135,9 @@ fn conntrack_control_policy_is_restart_only_as_one_process_owned_unit() {
         !old.server.conntrack_control.inline_conntrack_control;
     desired.server.conntrack_control.mode = crate::config::ConntrackMode::Notrack;
     desired.server.conntrack_control.backend = crate::config::ConntrackBackend::Iptables;
-    desired.server.conntrack_control.profile =
-        crate::config::ConntrackPressureProfile::Aggressive;
-    desired.server.conntrack_control.hybrid_listener_ips =
-        vec!["192.0.2.10".parse().unwrap()];
-    desired
-        .server
-        .conntrack_control
-        .pressure_high_watermark_pct = 90;
+    desired.server.conntrack_control.profile = crate::config::ConntrackPressureProfile::Aggressive;
+    desired.server.conntrack_control.hybrid_listener_ips = vec!["192.0.2.10".parse().unwrap()];
+    desired.server.conntrack_control.pressure_high_watermark_pct = 90;
     desired.server.conntrack_control.pressure_low_watermark_pct = 40;
     desired.server.conntrack_control.delete_budget_per_sec = old
         .server

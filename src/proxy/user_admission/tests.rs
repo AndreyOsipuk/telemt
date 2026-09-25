@@ -51,12 +51,7 @@ fn stale_candidate_cannot_overwrite_newer_mutation() {
 
     assert!(
         authority
-            .activate_config_source(
-                2,
-                Some(candidate_epoch),
-                &users(secret),
-                &HashMap::new(),
-            )
+            .activate_config_source(2, Some(candidate_epoch), &users(secret), &HashMap::new(),)
             .is_none()
     );
     assert!(!authority.is_user_enabled("alice"));
@@ -105,9 +100,7 @@ fn registration_dropped_before_publication_cannot_leave_an_owner() {
     let secret = "00112233445566778899aabbccddeeff";
     authority.apply_config(&users(secret), &HashMap::new());
     let credential = credential_id_from_hex(secret).unwrap();
-    let mut publication = authority
-        .claim_authenticated("alice", credential)
-        .unwrap();
+    let mut publication = authority.claim_authenticated("alice", credential).unwrap();
     let registration = publication.take_registration().unwrap();
 
     drop(registration);
@@ -126,9 +119,7 @@ fn quota_identity_follows_credential_rotation_and_recreation() {
     let old_incarnation = authority
         .authenticated_incarnation("alice", credential_id_from_hex(old_secret).unwrap())
         .unwrap();
-    let old_quota = quota_store
-        .handle_exact("alice", old_incarnation)
-        .unwrap();
+    let old_quota = quota_store.handle_exact("alice", old_incarnation).unwrap();
     old_quota.charge(40);
 
     let rotated = authority.stage_user("alice", new_secret, true).unwrap();

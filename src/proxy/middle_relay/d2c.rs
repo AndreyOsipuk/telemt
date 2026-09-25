@@ -191,7 +191,12 @@ where
             if let (Some(limit), Some(quota_handle)) = (quota_limit, quota_handle) {
                 let soft_limit = quota_soft_cap(limit, quota_soft_overshoot_bytes);
                 match reserve_user_quota_with_yield(
-                    quota_handle, data_len, soft_limit, stats, cancel, None,
+                    quota_handle,
+                    data_len,
+                    soft_limit,
+                    stats,
+                    cancel,
+                    None,
                 )
                 .await
                 {

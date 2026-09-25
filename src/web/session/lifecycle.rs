@@ -190,12 +190,11 @@ impl WebSession {
         {
             return None;
         }
-        let released =
-            self.release_on_close_locked(
-                &mut state,
-                SessionCloseReason::CarrierSuperseded,
-                effects,
-            );
+        let released = self.release_on_close_locked(
+            &mut state,
+            SessionCloseReason::CarrierSuperseded,
+            effects,
+        );
         Some(CarrierSupersedeCompletion {
             session: self,
             released,
@@ -264,11 +263,7 @@ impl WebSession {
         {
             return None;
         }
-        Some(self.release_on_close_locked(
-            &mut state,
-            SessionCloseReason::PeerIdle,
-            effects,
-        ))
+        Some(self.release_on_close_locked(&mut state, SessionCloseReason::PeerIdle, effects))
     }
 
     fn release_on_close_locked(

@@ -49,9 +49,7 @@ pub(super) async fn run_telemt_core(
     } = bootstrap::bootstrap(privilege_drop_requested).await?;
 
     if privilege_drop_requested && config.server.conntrack_control.inline_conntrack_control {
-        warn!(
-            "Inline conntrack control is disabled when process privileges are dropped"
-        );
+        warn!("Inline conntrack control is disabled when process privileges are dropped");
         config.server.conntrack_control.inline_conntrack_control = false;
     }
 

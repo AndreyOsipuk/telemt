@@ -219,8 +219,12 @@ impl ProxySharedState {
         users: &HashMap<String, String>,
         user_enabled: &HashMap<String, bool>,
     ) -> Option<Vec<(String, usize)>> {
-        self.user_admission
-            .activate_config_source(source_generation, expected_epoch, users, user_enabled)
+        self.user_admission.activate_config_source(
+            source_generation,
+            expected_epoch,
+            users,
+            user_enabled,
+        )
     }
 
     /// Applies an update only from the active runtime generation.
@@ -276,8 +280,7 @@ impl ProxySharedState {
         user: &str,
         credential_id: UserCredentialId,
     ) -> Option<UserAdmissionPublication<'_>> {
-        self.user_admission
-            .claim_authenticated(user, credential_id)
+        self.user_admission.claim_authenticated(user, credential_id)
     }
 
     pub(crate) fn register_user_session(

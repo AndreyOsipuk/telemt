@@ -86,9 +86,9 @@ pub(in crate::api) async fn write_atomic(
         let _lock = ConfigWriteLock::acquire(&path)?;
         write_atomic_sync(&path, None, &contents, None).map(|_| ())
     })
-        .await
-        .map_err(|error| ApiFailure::internal(format!("failed to join writer: {error}")))?
-        .map_err(|error| ApiFailure::internal(format!("failed to write config: {error}")))
+    .await
+    .map_err(|error| ApiFailure::internal(format!("failed to join writer: {error}")))?
+    .map_err(|error| ApiFailure::internal(format!("failed to write config: {error}")))
 }
 
 /// Replaces one source only if both its graph revision and owner contents are unchanged.
@@ -294,11 +294,7 @@ fn write_atomic_sync(
     let descriptor = openat(
         anchored.parent(),
         temp_name.as_str(),
-        OFlag::O_WRONLY
-            | OFlag::O_CREAT
-            | OFlag::O_EXCL
-            | OFlag::O_NOFOLLOW
-            | OFlag::O_CLOEXEC,
+        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
         Mode::from_bits_truncate(0o600),
     )
     .map_err(errno_to_io)?;
@@ -408,9 +404,9 @@ fn validate_expected_contents(
     existing: Option<&ExistingTarget>,
     expected_contents: Option<&str>,
 ) -> std::io::Result<()> {
-    if expected_contents.is_some_and(|expected| {
-        existing.is_none_or(|target| target.contents != expected)
-    }) {
+    if expected_contents
+        .is_some_and(|expected| existing.is_none_or(|target| target.contents != expected))
+    {
         return Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             "config source changed before persistence",
@@ -419,10 +415,7 @@ fn validate_expected_contents(
     Ok(())
 }
 
-fn target_unchanged(
-    existing: Option<&ExistingTarget>,
-    current: Option<&ExistingTarget>,
-) -> bool {
+fn target_unchanged(existing: Option<&ExistingTarget>, current: Option<&ExistingTarget>) -> bool {
     match (existing, current) {
         (Some(expected), Some(current)) => {
             same_target(&expected.metadata, &current.metadata)

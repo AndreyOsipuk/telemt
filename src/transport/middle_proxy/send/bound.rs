@@ -31,7 +31,8 @@ impl MePool {
         writer_reserved_bytes: usize,
         payload_permit: Option<OwnedSemaphorePermit>,
     ) -> Result<BoundWriterSendOutcome> {
-        let Some((current, current_meta)) = self.registry.get_writer_with_meta(conn_id).await else {
+        let Some((current, current_meta)) = self.registry.get_writer_with_meta(conn_id).await
+        else {
             return Ok(BoundWriterSendOutcome::Retry(payload_permit));
         };
         let deadline = writer_send_deadline(self.route_runtime.me_route_blocking_send_timeout);

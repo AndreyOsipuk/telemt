@@ -66,7 +66,10 @@ fn quiet_queue_release_updates_accounting_before_notification_dispatch() {
     let waker = Waker::from(Arc::clone(&counter));
     let mut context = Context::from_waker(&waker);
     let mut notified = Box::pin(budget.notify.notified());
-    assert!(matches!(notified.as_mut().poll(&mut context), Poll::Pending));
+    assert!(matches!(
+        notified.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
 
     let notify = budget.release_queue_quiet([1; 32], 64, 1, false);
 

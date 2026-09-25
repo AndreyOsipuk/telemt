@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::pending;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::{Notify, watch};
@@ -102,8 +102,7 @@ impl FirewallCommandRunner for FakeRunner {
         let operation = spec.args.get(2).map(String::as_str);
         if (matches!(spec.binary, "iptables" | "ip6tables")
             && matches!(operation, Some("-C" | "-D" | "-F" | "-X")))
-            || (spec.binary == "nft"
-                && spec.args.first().map(String::as_str) == Some("delete"))
+            || (spec.binary == "nft" && spec.args.first().map(String::as_str) == Some("delete"))
         {
             return Err(CommandError {
                 kind: CommandErrorKind::NotFound,
@@ -344,11 +343,7 @@ async fn transaction_cancellation_does_not_claim_a_new_applied_plan() {
     };
     let terminal = CancellationToken::new();
     let process_cancellation = CancellationToken::new();
-    let interruptible = InterruptibleRunner::new(
-        &runner,
-        &terminal,
-        &process_cancellation,
-    );
+    let interruptible = InterruptibleRunner::new(&runner, &terminal, &process_cancellation);
     let mut applied = AppliedState::Known(AppliedPlan::Empty);
     let desired = desired(1, dual_stack_policy(443));
     let failure = {

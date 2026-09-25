@@ -350,8 +350,7 @@ impl TlsFingerprintCollector {
         let mut removed = 0usize;
         self.entries.retain(|_, entry| {
             let last_seen = entry.last_seen_epoch_secs.load(Ordering::Relaxed);
-            let retained =
-                ttl_secs != 0 && now_epoch_secs.saturating_sub(last_seen) <= ttl_secs;
+            let retained = ttl_secs != 0 && now_epoch_secs.saturating_sub(last_seen) <= ttl_secs;
             if !retained {
                 removed += 1;
             }

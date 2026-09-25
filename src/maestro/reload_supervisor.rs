@@ -366,8 +366,8 @@ impl ReloadSupervisor {
         self.runtime_watch_tx
             .send_replace(Some(new_runtime.watch_state()));
         if !conntrack_firewall_published {
-            let warning = "conntrack firewall reconciler is unavailable after runtime activation"
-                .to_string();
+            let warning =
+                "conntrack firewall reconciler is unavailable after runtime activation".to_string();
             warn!(reload_id = command.reload_id, warning = %warning);
             self.control.add_warning(command.reload_id, warning).await;
         }

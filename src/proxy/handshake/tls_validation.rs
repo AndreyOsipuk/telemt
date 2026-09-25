@@ -40,17 +40,17 @@ pub(super) async fn validate_tls_client(
         };
 
         let sticky_ip_hint = sticky_hint_get_by_ip(shared, peer.ip());
-        let sticky_ip_candidates = sticky_ip_hint
-            .and_then(|hint_key| snapshot.candidate_ids_by_hint_key(hint_key));
+        let sticky_ip_candidates =
+            sticky_ip_hint.and_then(|hint_key| snapshot.candidate_ids_by_hint_key(hint_key));
         let preferred_user_id = preferred_user_hint.and_then(|user| snapshot.user_id_by_name(user));
         let sticky_sni_hint = client_sni
             .as_deref()
             .and_then(|sni| sticky_hint_get_by_sni(shared, sni));
-        let sticky_sni_candidates = sticky_sni_hint
-            .and_then(|hint_key| snapshot.candidate_ids_by_hint_key(hint_key));
+        let sticky_sni_candidates =
+            sticky_sni_hint.and_then(|hint_key| snapshot.candidate_ids_by_hint_key(hint_key));
         let sticky_prefix_hint = sticky_hint_get_by_ip_prefix(shared, peer.ip());
-        let sticky_prefix_candidates = sticky_prefix_hint
-            .and_then(|hint_key| snapshot.candidate_ids_by_hint_key(hint_key));
+        let sticky_prefix_candidates =
+            sticky_prefix_hint.and_then(|hint_key| snapshot.candidate_ids_by_hint_key(hint_key));
         let sni_candidates = client_sni
             .as_deref()
             .and_then(|sni| snapshot.sni_candidates(sni));

@@ -203,9 +203,7 @@ async fn stale_incarnation_cleanup_cannot_release_recreated_user_ip() {
         .check_and_add_for_incarnation("test_user", 1, old_ip)
         .await
         .unwrap();
-    tracker
-        .clear_user_ips_if_not_newer("test_user", 2)
-        .await;
+    tracker.clear_user_ips_if_not_newer("test_user", 2).await;
     tracker
         .check_and_add_for_incarnation("test_user", 3, current_ip)
         .await
@@ -275,13 +273,7 @@ async fn stale_runtime_cannot_overwrite_newer_ip_policy() {
     newer.insert("alice".to_string(), 5);
     assert!(
         tracker
-            .apply_policy_from_source(
-                2,
-                7,
-                &newer,
-                UserMaxUniqueIpsMode::Combined,
-                90,
-            )
+            .apply_policy_from_source(2, 7, &newer, UserMaxUniqueIpsMode::Combined, 90,)
             .await
     );
 
@@ -289,13 +281,7 @@ async fn stale_runtime_cannot_overwrite_newer_ip_policy() {
     stale.insert("alice".to_string(), 1);
     assert!(
         !tracker
-            .apply_policy_from_source(
-                1,
-                1,
-                &stale,
-                UserMaxUniqueIpsMode::ActiveWindow,
-                1,
-            )
+            .apply_policy_from_source(1, 1, &stale, UserMaxUniqueIpsMode::ActiveWindow, 1,)
             .await
     );
 
@@ -326,13 +312,7 @@ async fn active_runtime_can_publish_coherent_same_generation_ip_policy() {
 
     assert!(
         tracker
-            .apply_policy_from_source(
-                3,
-                6,
-                &limits,
-                UserMaxUniqueIpsMode::TimeWindow,
-                30,
-            )
+            .apply_policy_from_source(3, 6, &limits, UserMaxUniqueIpsMode::TimeWindow, 30,)
             .await
     );
 

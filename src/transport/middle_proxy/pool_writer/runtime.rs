@@ -92,12 +92,7 @@ impl MePool {
         intent: WriterOpenIntent,
     ) -> Result<PreparedWriter<'a>> {
         let Some(writer_open_reservation) = self
-            .reserve_writer_open(
-                contour,
-                intent,
-                writer_dc,
-                addr,
-            )
+            .reserve_writer_open(contour, intent, writer_dc, addr)
             .await
         else {
             return Err(ProxyError::Proxy(format!(
