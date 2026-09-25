@@ -408,6 +408,12 @@ pub(crate) fn resolve_reload_config(
         fields.push("server.max_connections".to_string());
         effective.server.max_connections = old.server.max_connections;
     }
+    if serde_json::to_value(&old.server.conntrack_control).ok()
+        != serde_json::to_value(&desired.server.conntrack_control).ok()
+    {
+        fields.push("server.conntrack_control".to_string());
+        effective.server.conntrack_control = old.server.conntrack_control.clone();
+    }
     if old.general.direct_relay_buffer_budget_max_bytes
         != desired.general.direct_relay_buffer_budget_max_bytes
     {

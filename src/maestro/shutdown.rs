@@ -23,6 +23,7 @@ use super::control_plane::ProcessControlPlane;
 use super::generation::RuntimeGeneration;
 use super::helpers::{format_uptime, unit_label};
 use super::reload_supervisor::ReloadSupervisorHandle;
+use crate::conntrack_control::FirewallAuthority;
 use crate::quota_state::QuotaStateOwner;
 use crate::stats::Stats;
 use crate::synlimit_control;
@@ -54,6 +55,7 @@ pub(crate) async fn wait_for_shutdown(
     active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
     quota_state: Arc<QuotaStateOwner>,
     reload_supervisor: ReloadSupervisorHandle,
+    conntrack_firewall: Option<FirewallAuthority>,
     process_control_plane: ProcessControlPlane,
 ) {
     let signal = wait_for_shutdown_signal().await;
@@ -63,6 +65,7 @@ pub(crate) async fn wait_for_shutdown(
         active_runtime,
         quota_state,
         reload_supervisor,
+        conntrack_firewall,
         process_control_plane,
     )
     .await;
@@ -95,6 +98,7 @@ async fn perform_shutdown(
     active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
     quota_state: Arc<QuotaStateOwner>,
     reload_supervisor: ReloadSupervisorHandle,
+    conntrack_firewall: Option<FirewallAuthority>,
     process_control_plane: ProcessControlPlane,
 ) {
     let shutdown_started_at = Instant::now();
@@ -124,6 +128,12 @@ async fn perform_shutdown(
         info!("ME shutdown: pool lifecycle completed");
     } else {
         warn!("ME shutdown: pool lifecycle deadline expired");
+    }
+
+    if let Some(conntrack_firewall) = conntrack_firewall
+        && !conntrack_firewall.shutdown_and_clear().await
+    {
+        warn!("Conntrack firewall cleanup did not complete successfully");
     }
 
     if let Err(error) = synlimit_control::clear_synlimit_rules_all_backends().await {

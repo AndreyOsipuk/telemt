@@ -2,10 +2,12 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 const TRUSTED_HELPER_DIRS: [&str; 4] = ["/usr/sbin", "/usr/bin", "/sbin", "/bin"];
-const TRUSTED_HELPERS: [&str; 10] = [
+const TRUSTED_HELPERS: [&str; 12] = [
     "nft",
     "iptables",
+    "iptables-restore",
     "ip6tables",
+    "ip6tables-restore",
     "conntrack",
     "pfctl",
     "systemctl",
@@ -67,6 +69,13 @@ mod tests {
     fn privileged_helper_allowlist_rejects_arbitrary_binary() {
         assert!(resolve_trusted_helper("sh").is_none());
         assert!(resolve_trusted_helper("../bin/nft").is_none());
+    }
+
+    #[test]
+    fn privileged_helper_allowlist_accepts_exact_restore_names() {
+        assert!(TRUSTED_HELPERS.contains(&"iptables-restore"));
+        assert!(TRUSTED_HELPERS.contains(&"ip6tables-restore"));
+        assert!(!TRUSTED_HELPERS.contains(&"iptables-restore-wrapper"));
     }
 
     #[test]

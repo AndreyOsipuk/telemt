@@ -15,8 +15,8 @@ mod firewall;
 
 use firewall::{
     DeleteOutcome, delete_conntrack_entry, effective_conntrack_enabled, probe_runtime_support,
-    reconcile_rules,
 };
+pub(crate) use firewall::FirewallAuthority;
 
 const CONNTRACK_EVENT_QUEUE_CAPACITY: usize = 32_768;
 const PRESSURE_RELEASE_TICKS: u8 = 3;
@@ -115,7 +115,6 @@ async fn run_conntrack_controller_worker(
         runtime_support,
         false,
     );
-    reconcile_rules(&cfg, runtime_support, stats.as_ref()).await;
 
     loop {
         tokio::select! {
@@ -129,7 +128,6 @@ async fn run_conntrack_controller_worker(
                 effective_enabled = effective_conntrack_enabled(&cfg, runtime_support);
                 delete_budget_tokens = cfg.server.conntrack_control.delete_budget_per_sec;
                 apply_runtime_state(stats.as_ref(), shared.as_ref(), &cfg, runtime_support, pressure_state.active);
-                reconcile_rules(&cfg, runtime_support, stats.as_ref()).await;
             }
             event = close_rx.recv() => {
                 let Some(event) = event else {

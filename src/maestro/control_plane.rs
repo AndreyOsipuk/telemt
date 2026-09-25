@@ -133,6 +133,21 @@ impl ProcessControlPlane {
         Ok(())
     }
 
+    /// Registers a cooperatively cancelled task whose cleanup future must finish.
+    pub(crate) fn spawn_cooperative<S, F>(&self, spawn: S) -> Result<(), S>
+    where
+        S: FnOnce(CancellationToken) -> F,
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let Some(registration) = self.inner.admission.try_register() else {
+            return Err(spawn);
+        };
+        let cancellation = self.inner.cancellation.clone();
+        self.inner.tasks.spawn(spawn(cancellation));
+        drop(registration);
+        Ok(())
+    }
+
     /// Closes task admission, cancels all owned work, and joins it within the deadline.
     pub(crate) async fn shutdown(&self, timeout: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
@@ -252,6 +267,24 @@ mod tests {
 
         release_tx.send(()).unwrap();
         assert!(shutdown.await.unwrap());
+        assert!(completed.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn cooperative_task_observes_cancellation_and_finishes_cleanup() {
+        let scope = ProcessControlPlane::new();
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_task = Arc::clone(&completed);
+        assert!(
+            scope
+                .spawn_cooperative(move |cancellation| async move {
+                    cancellation.cancelled().await;
+                    completed_task.store(true, Ordering::Release);
+                })
+                .is_ok()
+        );
+
+        assert!(scope.shutdown(Duration::from_secs(1)).await);
         assert!(completed.load(Ordering::Acquire));
     }
 }

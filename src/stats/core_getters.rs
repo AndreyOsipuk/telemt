@@ -84,6 +84,26 @@ impl Stats {
     pub fn get_conntrack_rule_apply_ok(&self) -> bool {
         self.conntrack_rule_apply_ok_gauge.load(Ordering::Relaxed)
     }
+    /// Returns successful process-owned firewall reconciliations.
+    pub fn get_conntrack_rule_reconcile_success_total(&self) -> u64 {
+        self.conntrack_rule_reconcile_success_total
+            .load(Ordering::Relaxed)
+    }
+    /// Returns failed process-owned firewall reconciliations.
+    pub fn get_conntrack_rule_reconcile_error_total(&self) -> u64 {
+        self.conntrack_rule_reconcile_error_total
+            .load(Ordering::Relaxed)
+    }
+    /// Returns successful firewall transaction rollbacks.
+    pub fn get_conntrack_rule_rollback_success_total(&self) -> u64 {
+        self.conntrack_rule_rollback_success_total
+            .load(Ordering::Relaxed)
+    }
+    /// Returns rollback failures that left applied firewall state unknown.
+    pub fn get_conntrack_rule_rollback_error_total(&self) -> u64 {
+        self.conntrack_rule_rollback_error_total
+            .load(Ordering::Relaxed)
+    }
     pub fn get_conntrack_delete_attempt_total(&self) -> u64 {
         self.conntrack_delete_attempt_total.load(Ordering::Relaxed)
     }

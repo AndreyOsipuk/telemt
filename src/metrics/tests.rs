@@ -43,6 +43,10 @@ async fn test_render_metrics_format() {
     stats.increment_connects_bad_with_class("tls_handshake_bad_client");
     stats.increment_handshake_timeouts();
     stats.increment_handshake_failure_class("timeout");
+    stats.increment_conntrack_rule_reconcile_success_total();
+    stats.increment_conntrack_rule_reconcile_error_total();
+    stats.increment_conntrack_rule_rollback_success_total();
+    stats.increment_conntrack_rule_rollback_error_total();
     shared_state
         .handshake
         .auth_expensive_checks_total
@@ -123,6 +127,12 @@ async fn test_render_metrics_format() {
     );
     assert!(output.contains("telemt_handshake_timeouts_total 1"));
     assert!(output.contains("telemt_handshake_failures_by_class_total{class=\"timeout\"} 1"));
+    assert!(
+        output.contains("telemt_conntrack_rule_reconcile_total{result=\"success\"} 1")
+    );
+    assert!(output.contains("telemt_conntrack_rule_reconcile_total{result=\"error\"} 1"));
+    assert!(output.contains("telemt_conntrack_rule_rollback_total{result=\"success\"} 1"));
+    assert!(output.contains("telemt_conntrack_rule_rollback_total{result=\"error\"} 1"));
     assert!(output.contains("telemt_auth_expensive_checks_total 9"));
     assert!(output.contains("telemt_auth_budget_exhausted_total 2"));
     assert!(output.contains("telemt_upstream_connect_attempt_total 2"));

@@ -61,6 +61,14 @@ pub(super) fn build_zero_all_data(stats: &Stats, configured_users: usize) -> Zer
             conntrack_pressure_active: stats.get_conntrack_pressure_active(),
             conntrack_event_queue_depth: stats.get_conntrack_event_queue_depth(),
             conntrack_rule_apply_ok: stats.get_conntrack_rule_apply_ok(),
+            conntrack_rule_reconcile_success_total: stats
+                .get_conntrack_rule_reconcile_success_total(),
+            conntrack_rule_reconcile_error_total: stats
+                .get_conntrack_rule_reconcile_error_total(),
+            conntrack_rule_rollback_success_total: stats
+                .get_conntrack_rule_rollback_success_total(),
+            conntrack_rule_rollback_error_total: stats
+                .get_conntrack_rule_rollback_error_total(),
             conntrack_delete_attempt_total: stats.get_conntrack_delete_attempt_total(),
             conntrack_delete_success_total: stats.get_conntrack_delete_success_total(),
             conntrack_delete_not_found_total: stats.get_conntrack_delete_not_found_total(),

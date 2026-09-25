@@ -8,6 +8,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::conntrack_control::FirewallAuthority;
 use crate::stats::QuotaStore;
 use crate::tls_front::cache::TlsFullCertBudget;
 use crate::web::trace::WebTraceStore;
@@ -33,6 +34,7 @@ pub(crate) struct ReloadSupervisor {
     runtime_watch_tx: watch::Sender<Option<RuntimeWatchState>>,
     listener_manager: Arc<Mutex<ListenerManager>>,
     web_trace: Arc<WebTraceStore>,
+    conntrack_firewall: Option<FirewallAuthority>,
 }
 
 /// Process-owned handle that quiesces reloads before shutdown snapshots the runtime.
@@ -106,6 +108,7 @@ impl ReloadSupervisor {
         runtime_watch_tx: watch::Sender<Option<RuntimeWatchState>>,
         listener_manager: ListenerManager,
         web_trace: Arc<WebTraceStore>,
+        conntrack_firewall: Option<FirewallAuthority>,
     ) -> ReloadSupervisorHandle {
         let listener_manager = Arc::new(Mutex::new(listener_manager));
         let supervisor = Self {
@@ -120,6 +123,7 @@ impl ReloadSupervisor {
             runtime_watch_tx,
             listener_manager: listener_manager.clone(),
             web_trace,
+            conntrack_firewall,
         };
         let control = supervisor.control.clone();
         let shutdown = CancellationToken::new();
@@ -339,6 +343,14 @@ impl ReloadSupervisor {
             old_runtime.stop_accepting_sessions();
             listener_manager.activate_runtime_generation(new_runtime.clone())
         };
+        let conntrack_firewall_published = match &self.conntrack_firewall {
+            Some(conntrack_firewall) => conntrack_firewall.publish(
+                new_runtime.id,
+                new_runtime.config(),
+                new_runtime.stats.clone(),
+            ),
+            None => true,
+        };
         self.web_trace
             .apply_policy(new_runtime.id, &new_runtime.config().web.debug);
         config_watcher_activation.send_replace(true);
@@ -353,6 +365,12 @@ impl ReloadSupervisor {
             .apply_reload(&new_runtime.config().general.log_level);
         self.runtime_watch_tx
             .send_replace(Some(new_runtime.watch_state()));
+        if !conntrack_firewall_published {
+            let warning = "conntrack firewall reconciler is unavailable after runtime activation"
+                .to_string();
+            warn!(reload_id = command.reload_id, warning = %warning);
+            self.control.add_warning(command.reload_id, warning).await;
+        }
 
         info!(
             reload_id = command.reload_id,

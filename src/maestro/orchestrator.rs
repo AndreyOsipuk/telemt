@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use tokio::sync::{RwLock, Semaphore, watch};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::api;
 use crate::ip_tracker::UserIpTracker;
@@ -40,13 +40,20 @@ pub(super) async fn run_telemt_core(
         process_started_at,
         process_started_at_epoch_secs,
         startup_tracker,
-        config,
+        mut config,
         config_path,
         has_rust_log,
         effective_log_level,
         runtime_log_filter,
         logging_guard: _logging_guard,
     } = bootstrap::bootstrap(privilege_drop_requested).await?;
+
+    if privilege_drop_requested && config.server.conntrack_control.inline_conntrack_control {
+        warn!(
+            "Inline conntrack control is disabled when process privileges are dropped"
+        );
+        config.server.conntrack_control.inline_conntrack_control = false;
+    }
 
     let quota_store = Arc::new(QuotaStore::default());
     let connection_authority = Arc::new(UserConnectionAuthority::default());
@@ -367,9 +374,26 @@ pub(super) async fn run_telemt_core(
         .await
         .map_err(std::io::Error::other)?;
 
+    #[cfg(target_os = "linux")]
+    let conntrack_firewall = {
+        let authority = crate::conntrack_control::FirewallAuthority::spawn(&process_control_plane)
+            .map_err(std::io::Error::other)?;
+        if !authority
+            .publish_initial(1, runtime.config.clone(), stats.clone())
+            .await
+        {
+            warn!(
+                "Initial conntrack firewall reconciliation failed; background retries remain active"
+            );
+        }
+        Some(authority)
+    };
+    #[cfg(not(target_os = "linux"))]
+    let conntrack_firewall = None::<crate::conntrack_control::FirewallAuthority>;
+
     drop_after_bind();
 
-    runtime_tasks::spawn_metrics_if_configured(
+    if let Err(error) = runtime_tasks::spawn_metrics_if_configured(
         &runtime.config,
         &startup_tracker,
         active_runtime.clone(),
@@ -377,7 +401,15 @@ pub(super) async fn run_telemt_core(
         tls_full_cert_budget.clone(),
         process_control_plane.clone(),
     )
-    .await?;
+    .await
+    {
+        if let Some(conntrack_firewall) = &conntrack_firewall
+            && !conntrack_firewall.shutdown_and_clear().await
+        {
+            warn!("Conntrack firewall cleanup failed after metrics startup error");
+        }
+        return Err(error.into());
+    }
 
     runtime_watch_tx.send_replace(Some(active_runtime.load_full().watch_state()));
     active_runtime_tx.send_replace(Some(active_runtime.clone()));
@@ -401,6 +433,7 @@ pub(super) async fn run_telemt_core(
         runtime_watch_tx,
         listener_manager,
         web_trace,
+        conntrack_firewall.clone(),
     );
 
     shutdown::spawn_signal_handlers(
@@ -413,6 +446,7 @@ pub(super) async fn run_telemt_core(
         active_runtime,
         quota_state,
         reload_supervisor,
+        conntrack_firewall,
         process_control_plane,
     )
     .await;

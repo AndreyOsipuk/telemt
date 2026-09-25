@@ -128,6 +128,42 @@ fn process_wide_connection_and_direct_buffer_envelopes_are_restart_only() {
 }
 
 #[test]
+fn conntrack_control_policy_is_restart_only_as_one_process_owned_unit() {
+    let old = ProxyConfig::default();
+    let mut desired = old.clone();
+    desired.server.conntrack_control.inline_conntrack_control =
+        !old.server.conntrack_control.inline_conntrack_control;
+    desired.server.conntrack_control.mode = crate::config::ConntrackMode::Notrack;
+    desired.server.conntrack_control.backend = crate::config::ConntrackBackend::Iptables;
+    desired.server.conntrack_control.profile =
+        crate::config::ConntrackPressureProfile::Aggressive;
+    desired.server.conntrack_control.hybrid_listener_ips =
+        vec!["192.0.2.10".parse().unwrap()];
+    desired
+        .server
+        .conntrack_control
+        .pressure_high_watermark_pct = 90;
+    desired.server.conntrack_control.pressure_low_watermark_pct = 40;
+    desired.server.conntrack_control.delete_budget_per_sec = old
+        .server
+        .conntrack_control
+        .delete_budget_per_sec
+        .saturating_add(1);
+
+    let resolved = resolve_reload_config(&old, &desired).unwrap();
+
+    assert_eq!(
+        resolved.deferred_process_fields,
+        vec!["server.conntrack_control".to_string()]
+    );
+    assert_eq!(
+        serde_json::to_value(&resolved.effective.server.conntrack_control).unwrap(),
+        serde_json::to_value(&old.server.conntrack_control).unwrap()
+    );
+    assert!(!resolved.runtime_changed);
+}
+
+#[test]
 fn mixed_reload_retains_process_state_and_applies_runtime_state() {
     let old = ProxyConfig::default();
     let mut desired = old.clone();
