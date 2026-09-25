@@ -36,6 +36,7 @@ nix = { version = "0.31.3", default-features = false, features = [
   "net",
   "user",
   "process",
+  "dir",
   "fs",
   "signal",
 ] }
