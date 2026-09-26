@@ -85,7 +85,9 @@ fn validate_web_base_path(value: &str, field: &str) -> Result<()> {
         && !value.ends_with('/')
         && value.split('/').all(|segment| {
             let mut bytes = segment.bytes();
-            bytes.next().is_some_and(|byte| byte.is_ascii_alphanumeric())
+            bytes
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphanumeric())
                 && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
         });
     if value.is_empty() || valid {

@@ -63,4 +63,7 @@ use reporting::log_changes;
 use watcher::{ReloadState, reload_config};
 
 #[cfg(test)]
+#[path = "hot_reload/base_path_tests.rs"]
+mod base_path_tests;
+#[cfg(test)]
 mod tests;

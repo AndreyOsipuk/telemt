@@ -211,7 +211,10 @@ async fn malformed_or_over_capacity_recovery_is_indistinguishable_from_decoy() {
     .await;
     let (invalid_headers, invalid_body) = split_response(&invalid_capability);
     assert!(invalid_headers.starts_with(b"HTTP/1.1 200"));
-    assert_eq!(response_header(invalid_headers, "cache-control"), "no-store");
+    assert_eq!(
+        response_header(invalid_headers, "cache-control"),
+        "no-store"
+    );
     assert_eq!(invalid_body, b"<!doctype html><title>decoy</title>");
 
     let malformed_accept = request(

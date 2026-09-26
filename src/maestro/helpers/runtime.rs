@@ -93,12 +93,9 @@ pub(crate) fn print_web_proxy_links(config: &ProxyConfig) {
             "User: {} ({:?})",
             profile.user, profile.secret_mode
         ));
-        if let Some(link) = format_web_proxy_link(
-            &profile.host,
-            &vhost.base_path,
-            secret,
-            profile.secret_mode,
-        ) {
+        if let Some(link) =
+            format_web_proxy_link(&profile.host, &vhost.base_path, secret, profile.secret_mode)
+        {
             print_maestro_line(format!("WEB: {link}"));
         }
     }
@@ -129,9 +126,7 @@ fn format_web_proxy_link(
     let server = url::form_urlencoded::byte_serialize(format!("{host}/{base_path}").as_bytes())
         .collect::<String>();
     let marked = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(marked);
-    Some(format!(
-        "tg://webproxy?server={server}&secret={marked}"
-    ))
+    Some(format!("tg://webproxy?server={server}&secret={marked}"))
 }
 
 /// Durably replaces one Beobachten snapshot without following Unix symlinks.
@@ -450,5 +445,32 @@ mod tests {
             ),
             Some("tg://webproxy?server=proxy.example.com%2Fdobry-cola%2Fsuper_app&secret=cN0AAQIDBAUGBwgJCgsMDQ4P".to_string())
         );
+    }
+
+    #[test]
+    fn path_web_proxy_link_round_trips_through_the_tdesktop_grammar() {
+        for (mode, expected_secret) in [
+            (WebSecretMode::Plain, hex::decode(SECRET).unwrap()),
+            (
+                WebSecretMode::Dd,
+                [vec![0xdd], hex::decode(SECRET).unwrap()].concat(),
+            ),
+        ] {
+            let link = format_web_proxy_link("proxy.example.com", "MixedCase/a_b-9", SECRET, mode)
+                .unwrap();
+            let parsed = url::Url::parse(&link).unwrap();
+            let query = parsed
+                .query_pairs()
+                .collect::<std::collections::BTreeMap<_, _>>();
+            assert_eq!(
+                query["server"].as_ref(),
+                "proxy.example.com/MixedCase/a_b-9"
+            );
+            let marked = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(query["secret"].as_bytes())
+                .unwrap();
+            assert_eq!(marked.first(), Some(&0x70));
+            assert_eq!(&marked[1..], expected_secret.as_slice());
+        }
     }
 }

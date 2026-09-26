@@ -98,16 +98,22 @@ fn rendered_page_resolves_carriers_against_the_exact_base_path() {
         &SecureRandom::new(),
     );
 
-    assert!(page.body.contains(
-        "relayBase=relayOrigin+'/Dobry-Cola/super_app'"
-    ));
+    assert!(
+        page.body
+            .contains("relayBase=relayOrigin+'/Dobry-Cola/super_app'")
+    );
     assert!(page.body.contains("fetch(settings.base()+path"));
-    assert!(page.body.contains(
-        "relayBase.replace(/^https:/,'wss:')+'/api/v1/ws'"
-    ));
+    assert!(
+        page.body
+            .contains("relayBase.replace(/^https:/,'wss:')+'/api/v1/ws'")
+    );
     assert!(page.body.contains("fetch(relayBase+'/api/v1/diagnostic'"));
     assert!(page.body.contains("url:()=>relayOrigin+recoveryPath"));
-    assert!(!page.body.contains("/Dobry-Cola/super_app/Dobry-Cola/super_app"));
+    assert!(
+        !page
+            .body
+            .contains("/Dobry-Cola/super_app/Dobry-Cola/super_app")
+    );
     assert!(!page.body.contains("__BASE_PREFIX__"));
 }
 

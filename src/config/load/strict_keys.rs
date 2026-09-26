@@ -365,13 +365,7 @@ const WEB_TIMEOUTS_CONFIG_KEYS: &[&str] = &[
     "decoy_header_secs",
 ];
 
-const WEB_VHOST_CONFIG_KEYS: &[&str] = &[
-    "host",
-    "base_path",
-    "public_addr",
-    "decoy",
-    "profiles",
-];
+const WEB_VHOST_CONFIG_KEYS: &[&str] = &["host", "base_path", "public_addr", "decoy", "profiles"];
 const WEB_DECOY_CONFIG_KEYS: &[&str] = &["mode", "upstream", "directory", "index"];
 const WEB_PROFILE_CONFIG_KEYS: &[&str] = &[
     "user",

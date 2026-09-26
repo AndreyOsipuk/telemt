@@ -9,9 +9,7 @@ use super::state::{
     Bootstrap, CarrierChainPhase, allow_rate, evict_oldest_unused_bootstrap, matching_profile,
     new_unique_token, profile_key, remove_expired_locked,
 };
-use super::{
-    BootstrapResult, ManagerError, TOKEN_BYTES, TokenHash, TokenKind, WebProcessRuntime,
-};
+use super::{BootstrapResult, ManagerError, TOKEN_BYTES, TokenHash, TokenKind, WebProcessRuntime};
 use crate::config::WebRuntimeProfile;
 use crate::maestro::generation::RuntimeGeneration;
 use crate::web::session::{SessionCloseReason, WebSession};

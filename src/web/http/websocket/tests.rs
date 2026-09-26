@@ -21,6 +21,9 @@ use crate::web::manager::{
     CarrierCapabilities, CarrierClientClass, CarrierFailure, CarrierRequest, WebProcessRuntime,
 };
 
+#[path = "tests/base_path.rs"]
+mod base_path;
+
 fn request(protocol: &str) -> Request<()> {
     Request::builder()
         .method(Method::GET)

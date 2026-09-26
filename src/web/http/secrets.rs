@@ -18,9 +18,9 @@ pub(super) fn mark_internal_credential<B>(
     let uri_contains = uri
         .authority()
         .is_some_and(|authority| contains_secret(authority.as_str().as_bytes(), config, runtime))
-        || uri.path_and_query().is_some_and(|path| {
-            contains_secret(path.as_str().as_bytes(), config, runtime)
-        });
+        || uri
+            .path_and_query()
+            .is_some_and(|path| contains_secret(path.as_str().as_bytes(), config, runtime));
     let headers_contain = request.headers().iter().any(|(name, value)| {
         contains_secret(name.as_str().as_bytes(), config, runtime)
             || contains_secret(value.as_bytes(), config, runtime)
@@ -84,3 +84,7 @@ fn hex_value(value: u8) -> Option<u8> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "secrets/tests.rs"]
+mod tests;

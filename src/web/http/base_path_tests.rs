@@ -1,5 +1,12 @@
 use super::*;
 
+#[path = "base_path_tests/credentials.rs"]
+mod credentials;
+#[path = "base_path_tests/reload.rs"]
+mod reload;
+#[path = "base_path_tests/routing.rs"]
+mod routing;
+
 fn bridge_request(path: &str) -> Vec<u8> {
     format!(
         "GET {path} HTTP/1.1\r\nHost: proxy.example.com\r\nX-Forwarded-For: 192.0.2.10\r\nConnection: close\r\n\r\n"
@@ -65,9 +72,11 @@ async fn base_path_routes_only_the_exact_prefixed_contract() {
     .await;
     let (headers, body) = split_response(&response);
     assert!(headers.starts_with(b"HTTP/1.1 200"));
-    assert!(std::str::from_utf8(body)
-        .unwrap()
-        .contains("relayBase=relayOrigin+'/dobry-cola'"));
+    assert!(
+        std::str::from_utf8(body)
+            .unwrap()
+            .contains("relayBase=relayOrigin+'/dobry-cola'")
+    );
 
     for path in [
         format!("/?bridge={encoded}"),
@@ -310,8 +319,7 @@ async fn process_token_provenance_survives_registry_expiry() {
 #[tokio::test]
 async fn generation_swap_switches_base_path_and_capability_together() {
     let initial_capability = [26u8; 32];
-    let mut initial =
-        runtime_config_with_base(initial_capability, WebCarrier::Https, "/old-path/");
+    let mut initial = runtime_config_with_base(initial_capability, WebCarrier::Https, "/old-path/");
     initial.web.limits.max_bootstraps_per_ip = 2;
     let generation = test_runtime_generation(1, initial);
     let active = Arc::new(ArcSwap::from(Arc::clone(&generation)));
@@ -331,11 +339,7 @@ async fn generation_swap_switches_base_path_and_capability_together() {
     let replacement_capability = [27u8; 32];
     let replacement = test_runtime_generation(
         2,
-        runtime_config_with_base(
-            replacement_capability,
-            WebCarrier::Https,
-            "/new-path/",
-        ),
+        runtime_config_with_base(replacement_capability, WebCarrier::Https, "/new-path/"),
     );
     active.store(Arc::clone(&replacement));
     let stale = request(
@@ -359,9 +363,11 @@ async fn generation_swap_switches_base_path_and_capability_together() {
     .await;
     let (headers, body) = split_response(&current);
     assert!(headers.starts_with(b"HTTP/1.1 200"));
-    assert!(std::str::from_utf8(body)
-        .unwrap()
-        .contains("relayBase=relayOrigin+'/new-path'"));
+    assert!(
+        std::str::from_utf8(body)
+            .unwrap()
+            .contains("relayBase=relayOrigin+'/new-path'")
+    );
 
     runtime.shutdown().await;
     generation.stop_sessions().await;
@@ -414,12 +420,7 @@ async fn prefixed_decoy_request_keeps_its_original_path_and_query() {
     let runtime = WebProcessRuntime::start(Arc::new(ArcSwap::from(Arc::clone(&generation))));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
 
-    let response = request(
-        &listener,
-        &runtime,
-        bridge_request("/relay/ordinary?q=1"),
-    )
-    .await;
+    let response = request(&listener, &runtime, bridge_request("/relay/ordinary?q=1")).await;
     assert!(response.starts_with(b"HTTP/1.1 404"));
     assert_eq!(split_response(&response).1, b"site");
     let forwarded = site_task.await.unwrap();

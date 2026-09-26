@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "web_tests/base_path_tests.rs"]
+mod base_path_tests;
+
 const WEB_CONFIG: &str = r#"
 [access.users]
 alice = "000102030405060708090a0b0c0d0e0f"
@@ -64,7 +67,7 @@ fn web_config_builds_canonical_runtime_snapshot() {
 #[test]
 fn web_base_path_is_canonical_and_precomputed() {
     let maximum = "a".repeat(128);
-    for base_path in ["Dobry-Cola/super_app", maximum.as_str()] {
+    for base_path in ["a", "a/b/c9_x-y", "Dobry-Cola/super_app", maximum.as_str()] {
         let configured = WEB_CONFIG.replace(
             "host = \"Proxy.Example.COM\"",
             &format!("host = \"Proxy.Example.COM\"\nbase_path = \"{base_path}\""),
@@ -99,6 +102,11 @@ fn web_base_path_rejects_noncanonical_forms() {
         "relay//nested",
         "-relay",
         "_relay",
+        "a/-lead",
+        "a/_lead",
+        "dot.ted",
+        "..",
+        "/",
         "relay/.hidden",
         "relay/%2fhidden",
         "relay path",

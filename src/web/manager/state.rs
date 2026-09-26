@@ -7,9 +7,7 @@ use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use super::{
-    CarrierRequest, ProfileKey, TokenAuthenticator, TokenHash, TokenKind,
-};
+use super::{CarrierRequest, ProfileKey, TokenAuthenticator, TokenHash, TokenKind};
 use crate::config::{WebCarrier, WebRuntimeConfig, WebRuntimeProfile, WebTimeoutsConfig};
 use crate::maestro::generation::RuntimeGeneration;
 use crate::proxy::user_admission::UserSessionRegistration;

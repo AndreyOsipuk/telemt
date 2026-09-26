@@ -448,5 +448,8 @@ fn deep_merge(base: &mut Toml, patch: &Toml) {
 }
 
 #[cfg(test)]
+#[path = "config_edit/base_path_tests.rs"]
+mod base_path_tests;
+#[cfg(test)]
 #[path = "config_edit/tests.rs"]
 mod tests;

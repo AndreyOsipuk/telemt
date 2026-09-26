@@ -38,6 +38,23 @@ fn capability_matches_reference_vectors() {
     }
 }
 
+#[test]
+fn capability_binds_the_exact_host_and_base_path_identity() {
+    let secret = hex::decode("000102030405060708090a0b0c0d0e0f").unwrap();
+    let root = derive_web_capability(&secret, b"proxy.example.com", b"").unwrap();
+    let mixed = derive_web_capability(&secret, b"proxy.example.com", b"MixedCase/path").unwrap();
+    let lower = derive_web_capability(&secret, b"proxy.example.com", b"mixedcase/path").unwrap();
+    let other_path =
+        derive_web_capability(&secret, b"proxy.example.com", b"MixedCase/other").unwrap();
+    let other_host =
+        derive_web_capability(&secret, b"other.example.com", b"MixedCase/path").unwrap();
+
+    let identities = [root, mixed, lower, other_path, other_host]
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(identities.len(), 5);
+}
+
 #[cfg(unix)]
 #[test]
 fn static_snapshot_remains_anchored_after_root_path_replacement() {

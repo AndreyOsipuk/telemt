@@ -108,8 +108,7 @@ impl TokenAuthenticator {
         let bootstrap = self.tag(TokenKind::Bootstrap, nonce);
         let session = self.tag(TokenKind::Session, nonce);
         bool::from(
-            bootstrap[..TOKEN_NONCE_BYTES].ct_eq(tag)
-                | session[..TOKEN_NONCE_BYTES].ct_eq(tag),
+            bootstrap[..TOKEN_NONCE_BYTES].ct_eq(tag) | session[..TOKEN_NONCE_BYTES].ct_eq(tag),
         )
     }
 
@@ -513,3 +512,7 @@ impl WebProcessRuntime {
         self.telemetry.record_limit_hit();
     }
 }
+
+#[cfg(test)]
+#[path = "manager/token_authenticator_tests.rs"]
+mod token_authenticator_tests;

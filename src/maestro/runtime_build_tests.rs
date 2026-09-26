@@ -296,6 +296,28 @@ fn web_decoy_fasttrack_mode_is_deferred_without_runtime_publication() {
 }
 
 #[test]
+fn base_path_change_is_runtime_owned_and_rebuilds_route_identity() {
+    let old = web_config_with_fasttrack("off");
+    let old_runtime = old.web.runtime.as_ref().unwrap();
+    let old_capability = old_runtime.vhosts["proxy.example.com"].capabilities[0];
+    let mut desired = old.clone();
+    desired.web.vhosts[0].base_path = "MixedCase/path".to_string();
+
+    let resolved = resolve_reload_config(&old, &desired).unwrap();
+
+    assert!(resolved.deferred_process_fields.is_empty());
+    assert!(resolved.runtime_changed);
+    assert_eq!(resolved.effective.web.vhosts[0].base_path, "MixedCase/path");
+    let runtime = resolved.effective.web.runtime.as_ref().unwrap();
+    let vhost = &runtime.vhosts["proxy.example.com"];
+    assert_eq!(vhost.base, "/MixedCase/path/");
+    assert_ne!(vhost.capabilities[0], old_capability);
+    assert_eq!(vhost.capabilities[0], vhost.profiles[0].capability);
+    assert_eq!(runtime.capabilities.as_ref(), vhost.capabilities.as_ref());
+    assert!(!runtime.capabilities.contains(&old_capability));
+}
+
+#[test]
 fn enabling_learning_is_deferred_when_retained_capacity_is_too_small() {
     let mut old = ProxyConfig::default();
     old.web.limits.max_carrier_learning_entries = 1;
