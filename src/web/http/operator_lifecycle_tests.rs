@@ -153,12 +153,9 @@ async fn pause_preserves_decoy_retry_and_exact_session_replay() {
     .into_bytes();
     let decoy = request(&listener, &runtime, decoy).await;
     let (decoy_headers, decoy_body) = split_response(&decoy);
-    assert!(decoy_headers.starts_with(b"HTTP/1.1 200"));
-    assert!(
-        !decoy_body
-            .windows(11)
-            .any(|window| window == b"bootstrap=\"")
-    );
+    assert!(decoy_headers.starts_with(b"HTTP/1.1 404"));
+    assert_eq!(response_header(decoy_headers, "cache-control"), "no-store");
+    assert_eq!(decoy_body, b"not found\n");
 
     runtime.resume_operator().await.unwrap();
     let created = request(&listener, &runtime, create_request(&bootstrap, &hello)).await;

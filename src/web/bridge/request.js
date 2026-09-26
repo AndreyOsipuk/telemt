@@ -40,7 +40,7 @@ function create(settings){
    const timer=setTimeout(()=>{timedOut=true;controller.abort()},Math.max(1,Math.min(attemptLimit,remaining)));
    let response=null,wait=0;
    try{
-    const fetched=await fetch(settings.origin()+path,requestOptions);
+    const fetched=await fetch(settings.base()+path,requestOptions);
     if(retryableStatus(fetched.status)){
      lastReason='http';wait=retryAfterMs(fetched);settings.cancel(fetched);
     }else{

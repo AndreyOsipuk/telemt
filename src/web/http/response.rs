@@ -62,6 +62,15 @@ pub(super) fn generic_not_found() -> HttpResponse {
     full_response(StatusCode::NOT_FOUND, Bytes::from_static(b"not found\n"))
 }
 
+/// Builds a non-cacheable local rejection for misplaced internal credentials.
+pub(super) fn private_not_found() -> HttpResponse {
+    let mut response = generic_not_found();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
 /// Builds one in-memory response with an exact content length.
 pub(super) fn full_response(status: StatusCode, body: Bytes) -> HttpResponse {
     let length = body.len();

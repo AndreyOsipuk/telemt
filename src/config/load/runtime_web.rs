@@ -30,7 +30,8 @@ use crate::util::secure_fs::open_dir_nofollow;
 #[cfg(not(unix))]
 mod static_site_fallback;
 
-const WEB_CAPABILITY_CONTEXT: &[u8] = b"tdesktop-web-proxy-bridge-v1\n";
+const WEB_CAPABILITY_CONTEXT_V1: &[u8] = b"tdesktop-web-proxy-bridge-v1\n";
+const WEB_CAPABILITY_CONTEXT_V2: &[u8] = b"tdesktop-web-proxy-bridge-v2\n";
 const WEB_DEBUG_FINGERPRINT_CONTEXT: &[u8] = b"telemt-web-debug-key-fingerprint-v1\0";
 const MAX_WEB_STATIC_DEPTH: usize = 64;
 
@@ -41,6 +42,7 @@ pub(super) fn rebuild(config: &mut ProxyConfig) -> Result<()> {
     })?;
     let mut runtime_vhosts = BTreeMap::new();
     let mut runtime_profiles = Vec::new();
+    let mut runtime_capabilities = Vec::new();
     let mut static_files = 0usize;
     let mut static_bytes = 0usize;
 
@@ -67,8 +69,11 @@ pub(super) fn rebuild(config: &mut ProxyConfig) -> Result<()> {
             })?;
             let (client_secret, client_secret_len) =
                 client_secret(auth_entry.secret, profile.secret_mode);
-            let capability =
-                derive_web_capability(&client_secret[..client_secret_len], vhost.host.as_bytes())?;
+            let capability = derive_web_capability(
+                &client_secret[..client_secret_len],
+                vhost.host.as_bytes(),
+                vhost.base_path.as_bytes(),
+            )?;
             let key_fingerprint = debug_key_fingerprint(&client_secret[..client_secret_len]);
             if !capabilities.insert(capability) {
                 return Err(ProxyError::Config(format!(
@@ -104,6 +109,7 @@ pub(super) fn rebuild(config: &mut ProxyConfig) -> Result<()> {
                     .unwrap_or(config.web.limits.max_streams_per_session),
             });
             capability_table.push(capability);
+            runtime_capabilities.push(capability);
             profiles.push(Arc::clone(&runtime_profile));
             runtime_profiles.push(runtime_profile);
         }
@@ -111,6 +117,11 @@ pub(super) fn rebuild(config: &mut ProxyConfig) -> Result<()> {
             vhost.host.clone(),
             Arc::new(WebRuntimeVhost {
                 host: vhost.host.clone(),
+                base: if vhost.base_path.is_empty() {
+                    "/".to_string()
+                } else {
+                    format!("/{}/", vhost.base_path)
+                },
                 decoy_fasttrack_mode: config.web.decoy_fasttrack_mode,
                 decoy,
                 decoy_header_secs: config.web.timeouts.decoy_header_secs,
@@ -123,6 +134,7 @@ pub(super) fn rebuild(config: &mut ProxyConfig) -> Result<()> {
     config.web.runtime = Some(Arc::new(WebRuntimeConfig {
         vhosts: runtime_vhosts,
         profiles: runtime_profiles,
+        capabilities: runtime_capabilities.into_boxed_slice(),
     }));
     Ok(())
 }
@@ -134,12 +146,23 @@ fn debug_key_fingerprint(secret: &[u8]) -> String {
     hex::encode(&digest.finalize()[..8])
 }
 
-/// Derives the Telegram Desktop WEB capability for one exact secret and host.
-pub(crate) fn derive_web_capability(secret: &[u8], host: &[u8]) -> Result<[u8; 32]> {
+/// Derives the Telegram Desktop WEB capability for one exact secret, host, and base path.
+pub(crate) fn derive_web_capability(
+    secret: &[u8],
+    host: &[u8],
+    base_path: &[u8],
+) -> Result<[u8; 32]> {
     let mut mac = Hmac::<Sha256>::new_from_slice(secret)
         .map_err(|_| ProxyError::Config("WEB capability secret must not be empty".to_string()))?;
-    mac.update(WEB_CAPABILITY_CONTEXT);
-    mac.update(host);
+    if base_path.is_empty() {
+        mac.update(WEB_CAPABILITY_CONTEXT_V1);
+        mac.update(host);
+    } else {
+        mac.update(WEB_CAPABILITY_CONTEXT_V2);
+        mac.update(host);
+        mac.update(b"\n");
+        mac.update(base_path);
+    }
     Ok(mac.finalize().into_bytes().into())
 }
 
@@ -482,62 +505,7 @@ fn static_content_type(path: &Path) -> &'static str {
     }
 }
 
+// Runtime WEB construction tests remain separate from the production loader.
 #[cfg(test)]
-mod tests {
-    use base64::Engine as _;
-
-    use super::*;
-
-    #[test]
-    fn capability_matches_reference_vectors() {
-        let secret = hex::decode("000102030405060708090a0b0c0d0e0f").unwrap();
-        let plain = derive_web_capability(&secret, b"proxy.example.com").unwrap();
-        assert_eq!(
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(plain),
-            "MHLEY5PmW1GWqJkSrlmJpvJUiLhBH_QKy6yKg8a0JPk"
-        );
-        let mut dd_secret = vec![0xdd];
-        dd_secret.extend_from_slice(&secret);
-        let dd = derive_web_capability(&dd_secret, b"proxy.example.com").unwrap();
-        assert_eq!(
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(dd),
-            "IpJrt3e7sKtzPyoXy6w-Zj6GGEvsvclN66JzQEfPYLA"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn static_snapshot_remains_anchored_after_root_path_replacement() {
-        use std::os::unix::fs::symlink;
-
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("site");
-        let detached = temp.path().join("detached");
-        let replacement = temp.path().join("replacement");
-        fs::create_dir(&root).unwrap();
-        fs::write(root.join("index.html"), b"original").unwrap();
-        fs::create_dir(&replacement).unwrap();
-        fs::write(replacement.join("index.html"), b"replacement").unwrap();
-
-        let directory = open_static_root(&root).unwrap();
-        fs::rename(&root, &detached).unwrap();
-        symlink(&replacement, &root).unwrap();
-
-        let mut assets = BTreeMap::new();
-        let mut total_files = 0;
-        let mut total_bytes = 0;
-        load_static_directory(
-            directory,
-            Path::new(""),
-            &root,
-            &mut assets,
-            &mut total_files,
-            &mut total_bytes,
-            &WebLimitsConfig::default(),
-            0,
-        )
-        .unwrap();
-
-        assert_eq!(assets["/index.html"].body.as_ref(), b"original");
-    }
-}
+#[path = "runtime_web/tests.rs"]
+mod tests;

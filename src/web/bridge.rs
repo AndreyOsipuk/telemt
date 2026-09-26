@@ -17,6 +17,7 @@ pub(crate) struct BridgePage {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render(
     host: &str,
+    base: &str,
     bootstrap: &str,
     batch_limit: usize,
     queue_limit: usize,
@@ -55,6 +56,7 @@ pub(crate) fn render(
     } else {
         String::new()
     };
+    let base_prefix = base.strip_suffix('/').unwrap_or(base);
     let body = DOCUMENT
         .replace("__DIAGNOSTIC_RUNTIME__\n", &diagnostic_script)
         .replace("__RESPONSE_RUNTIME__", RESPONSE_RUNTIME)
@@ -120,6 +122,7 @@ pub(crate) fn render(
         )
         .replace("__NONCE__", &nonce)
         .replace("__HOST__", host)
+        .replace("__BASE_PREFIX__", base_prefix)
         .replace("__BOOTSTRAP__", bootstrap)
         .replace("__BATCH_LIMIT__", &batch_limit.to_string())
         .replace("__QUEUE_LIMIT__", &queue_limit.to_string())

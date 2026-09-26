@@ -3,6 +3,7 @@ use super::*;
 fn render_page(bootstrap: &str, candidate_count: usize) -> BridgePage {
     render(
         "proxy.example.com",
+        "/",
         bootstrap,
         2 * 1024 * 1024,
         32 * 1024 * 1024,
@@ -26,6 +27,7 @@ fn render_page(bootstrap: &str, candidate_count: usize) -> BridgePage {
 fn render_diagnostic_page(bootstrap: &str) -> BridgePage {
     render(
         "proxy.example.com",
+        "/",
         bootstrap,
         2 * 1024 * 1024,
         32 * 1024 * 1024,
@@ -73,6 +75,43 @@ fn rendered_page_contains_bounded_negotiation_contract() {
 }
 
 #[test]
+fn rendered_page_resolves_carriers_against_the_exact_base_path() {
+    let page = render(
+        "proxy.example.com",
+        "/Dobry-Cola/super_app/",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        2 * 1024 * 1024,
+        32 * 1024 * 1024,
+        16 * 1024,
+        1024,
+        true,
+        4,
+        [3, 5, 8, 12],
+        25,
+        10,
+        90,
+        15,
+        15,
+        120,
+        0,
+        true,
+        &SecureRandom::new(),
+    );
+
+    assert!(page.body.contains(
+        "relayBase=relayOrigin+'/Dobry-Cola/super_app'"
+    ));
+    assert!(page.body.contains("fetch(settings.base()+path"));
+    assert!(page.body.contains(
+        "relayBase.replace(/^https:/,'wss:')+'/api/v1/ws'"
+    ));
+    assert!(page.body.contains("fetch(relayBase+'/api/v1/diagnostic'"));
+    assert!(page.body.contains("url:()=>relayOrigin+recoveryPath"));
+    assert!(!page.body.contains("/Dobry-Cola/super_app/Dobry-Cola/super_app"));
+    assert!(!page.body.contains("__BASE_PREFIX__"));
+}
+
+#[test]
 fn rendered_page_preserves_the_ios_bootstrap_literal() {
     let bootstrap = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
     let page = render_page(bootstrap, 2);
@@ -86,6 +125,7 @@ fn rendered_page_preserves_the_ios_bootstrap_literal() {
 fn rendered_page_embeds_the_configured_bridge_timing_policy() {
     let page = render(
         "proxy.example.com",
+        "/",
         "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG",
         2 * 1024 * 1024,
         32 * 1024 * 1024,
@@ -138,6 +178,7 @@ fn effective_deadline_formula_uses_the_final_checkpoint() {
 fn disabled_negotiation_does_not_arm_a_carrier_deadline() {
     let page = render(
         "proxy.example.com",
+        "/",
         "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
         2 * 1024 * 1024,
         32 * 1024 * 1024,
@@ -284,7 +325,7 @@ fn enabled_bridge_diagnostics_use_the_https_sideband_only() {
     let page = render_diagnostic_page("JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ");
 
     assert!(!page.body.contains("__"));
-    assert!(page.body.contains("fetch(relayOrigin+'/api/v1/diagnostic'"));
+    assert!(page.body.contains("fetch(relayBase+'/api/v1/diagnostic'"));
     assert!(page.body.contains("JSON.stringify({v:1,event})"));
     assert!(page.body.contains("'Content-Type':'application/json'"));
     assert!(page.body.contains("keepalive:true"));

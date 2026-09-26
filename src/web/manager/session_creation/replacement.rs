@@ -60,7 +60,12 @@ impl WebProcessRuntime {
             self.cancel_replacement(bootstrap_hash, &replacement.old_session);
             return Err(ManagerError::Closed);
         };
-        let Some((session_token, session_hash)) = new_unique_token(&generation, &state) else {
+        let Some((session_token, session_hash)) = new_unique_token(
+            &generation,
+            &state,
+            &self.token_authenticator,
+            TokenKind::Session,
+        ) else {
             self.record_limit_hit();
             self.telemetry
                 .record_rejection(crate::web::telemetry::WebRejectionReason::SessionCapacity);

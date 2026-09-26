@@ -32,28 +32,35 @@ pub(super) fn bridge_candidate(query: Option<&str>) -> BridgeCandidate {
     let Some(value) = query.and_then(|query| query.strip_prefix("bridge=")) else {
         return BridgeCandidate::NonCanonical;
     };
+    canonical_credential(value.as_bytes())
+        .map(BridgeCandidate::Canonical)
+        .unwrap_or(BridgeCandidate::NonCanonical)
+}
+
+/// Decodes one exact canonical 32-byte base64url credential.
+pub(super) fn canonical_credential(value: &[u8]) -> Option<[u8; 32]> {
     if value.len() != 43 {
-        return BridgeCandidate::NonCanonical;
+        return None;
     }
     let mut decoded = [0u8; 32];
     let Ok(decoded_len) =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.decode_slice(value, &mut decoded)
     else {
-        return BridgeCandidate::NonCanonical;
+        return None;
     };
     let mut canonical = [0u8; 43];
     let Ok(encoded_len) =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode_slice(decoded, &mut canonical)
     else {
-        return BridgeCandidate::NonCanonical;
+        return None;
     };
     if decoded_len != decoded.len()
         || encoded_len != canonical.len()
-        || !bool::from(canonical.ct_eq(value.as_bytes()))
+        || !bool::from(canonical.ct_eq(value))
     {
-        return BridgeCandidate::NonCanonical;
+        return None;
     }
-    BridgeCandidate::Canonical(decoded)
+    Some(decoded)
 }
 
 /// Internal result of one complete capability-table scan.

@@ -5,12 +5,17 @@ use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use hmac::{Hmac, Mac};
 use parking_lot::Mutex;
+use sha2::Sha256;
+use subtle::ConstantTimeEq;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+use zeroize::Zeroizing;
 
 use crate::config::{WebCarrier, WebLimitsConfig};
+use crate::crypto::SecureRandom;
 use crate::maestro::generation::RuntimeGeneration;
 use crate::web::telemetry::{WebRejectionReason, WebTelemetry};
 use crate::web::trace::WebTraceStore;
@@ -67,6 +72,58 @@ pub(crate) use websocket::{WebSocketConnection, WebSocketKind};
 
 const TOKEN_BYTES: usize = 32;
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
+const TOKEN_NONCE_BYTES: usize = 16;
+const BOOTSTRAP_TOKEN_CONTEXT: &[u8] = b"telemt-web-bootstrap-token-v1\0";
+const SESSION_TOKEN_CONTEXT: &[u8] = b"telemt-web-session-token-v1\0";
+
+/// Distinguishes process-authenticated WEB credential domains.
+#[derive(Clone, Copy)]
+enum TokenKind {
+    Bootstrap,
+    Session,
+}
+
+struct TokenAuthenticator {
+    key: Zeroizing<[u8; 32]>,
+}
+
+impl TokenAuthenticator {
+    fn new(rng: &SecureRandom) -> Self {
+        let mut key = Zeroizing::new([0; 32]);
+        rng.fill(key.as_mut());
+        Self { key }
+    }
+
+    fn issue(&self, kind: TokenKind, nonce: [u8; TOKEN_NONCE_BYTES]) -> [u8; TOKEN_BYTES] {
+        let mut token = [0; TOKEN_BYTES];
+        token[..TOKEN_NONCE_BYTES].copy_from_slice(&nonce);
+        let tag = self.tag(kind, &nonce);
+        token[TOKEN_NONCE_BYTES..].copy_from_slice(&tag[..TOKEN_NONCE_BYTES]);
+        token
+    }
+
+    fn authentic(&self, token: &[u8; TOKEN_BYTES]) -> bool {
+        let nonce = &token[..TOKEN_NONCE_BYTES];
+        let tag = &token[TOKEN_NONCE_BYTES..];
+        let bootstrap = self.tag(TokenKind::Bootstrap, nonce);
+        let session = self.tag(TokenKind::Session, nonce);
+        bool::from(
+            bootstrap[..TOKEN_NONCE_BYTES].ct_eq(tag)
+                | session[..TOKEN_NONCE_BYTES].ct_eq(tag),
+        )
+    }
+
+    fn tag(&self, kind: TokenKind, nonce: &[u8]) -> [u8; 32] {
+        let mut mac = Hmac::<Sha256>::new_from_slice(self.key.as_ref())
+            .expect("HMAC accepts every WEB token key length");
+        mac.update(match kind {
+            TokenKind::Bootstrap => BOOTSTRAP_TOKEN_CONTEXT,
+            TokenKind::Session => SESSION_TOKEN_CONTEXT,
+        });
+        mac.update(nonce);
+        mac.finalize().into_bytes().into()
+    }
+}
 
 /// Stable hash key used for bootstrap and session credentials.
 pub(crate) type TokenHash = [u8; TOKEN_BYTES];
@@ -162,6 +219,7 @@ pub(crate) struct WebProcessRuntime {
     runtime_instance: Arc<str>,
     active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
     trace: Arc<WebTraceStore>,
+    token_authenticator: TokenAuthenticator,
     limits: WebLimitsConfig,
     state: Mutex<ManagerState>,
     stream_admission: Mutex<StreamAdmissionState>,
@@ -205,6 +263,7 @@ impl WebProcessRuntime {
     ) -> Arc<Self> {
         let initial_generation = active_runtime.load_full();
         let config = initial_generation.config();
+        let token_authenticator = TokenAuthenticator::new(&initial_generation.rng);
         trace.apply_policy(initial_generation.id, &config.web.debug);
         let limits = config.web.limits.clone();
         let learning_capacity = limits.max_carrier_learning_entries;
@@ -231,6 +290,7 @@ impl WebProcessRuntime {
             runtime_instance,
             active_runtime,
             trace,
+            token_authenticator,
             http_connections: Arc::new(Semaphore::new(limits.max_http_connections)),
             http_overload_connections: Arc::new(Semaphore::new(
                 limits.max_http_overload_connections,
@@ -300,6 +360,11 @@ impl WebProcessRuntime {
     /// Returns the process-owned operational telemetry handle.
     pub(crate) fn telemetry(&self) -> &Arc<WebTelemetry> {
         &self.telemetry
+    }
+
+    /// Returns whether one canonical raw credential was minted by this process.
+    pub(crate) fn authentic_token(&self, token: &[u8; TOKEN_BYTES]) -> bool {
+        self.token_authenticator.authentic(token)
     }
 
     /// Returns whether terminal process shutdown has started.

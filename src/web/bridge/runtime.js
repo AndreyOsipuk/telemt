@@ -1,6 +1,6 @@
 (()=>{'use strict';
 let bootstrap="__BOOTSTRAP__";
-const relayOrigin='https://__HOST__',carrierCapabilities='https,https-lanes,websocket,websocket-lanes';
+const relayOrigin='https://__HOST__',relayBase=relayOrigin+'__BASE_PREFIX__',carrierCapabilities='https,https-lanes,websocket,websocket-lanes';
 __DIAGNOSTIC_BINDING__;
 __DIAGNOSTIC_RUNTIME_STARTED__;
 const responseBody=globalThis.TelemtBridgeResponse;if(!responseBody)throw new Error('missing response runtime');
@@ -26,9 +26,9 @@ const canonicalFailures=['timeout','network','upgrade','http','protocol'];
 const failure=(reason,message)=>Object.assign(new Error(message||reason),{telemtReason:reason});
 const failureReason=(error,fallback)=>error&&canonicalFailures.includes(error.telemtReason)?error.telemtReason:fallback;
 const status=__STATUS_FUNCTION__;
-const socketURL=()=>relayOrigin.replace(/^https:/,'wss:')+'/api/v1/ws';
+const socketURL=()=>relayBase.replace(/^https:/,'wss:')+'/api/v1/ws';
 const requestClient=requestSupport.create({
- origin:()=>relayOrigin,closed:()=>closed,retryMs:()=>bridgeRetryMs,longPollMs:()=>longPollMs,requestMs:()=>bridgeRequestMs,
+ base:()=>relayBase,closed:()=>closed,retryMs:()=>bridgeRetryMs,longPollMs:()=>longPollMs,requestMs:()=>bridgeRequestMs,
  batchLimit:()=>batchLimit,read:(response,limit,exact,signal)=>responseBody.read(response,limit,exact,signal),cancel:responseBody.cancel,
  failure,reason:failureReason,retrying:()=>status('reconnecting')
 });
@@ -478,7 +478,7 @@ async function pollLane(lane){
 }
 function deleteSession(){
  const token=cleanupToken||sessionToken,headers=canonicalFailures.includes(terminalFailure)?{'X-Carrier-Failure':terminalFailure}:null;
- if(token)fetch(relayOrigin+'/api/v1/session',options('DELETE',token,null,headers,undefined,true)).catch(()=>{});
+ if(token)fetch(relayBase+'/api/v1/session',options('DELETE',token,null,headers,undefined,true)).catch(()=>{});
 }
 function close(notifyServer){
  if(closed)return;closed=true;if(recoveryController)recoveryController.cancel();rejectRecoveryCommit(failure('network','bridge closed'));if(helloTimer)clearTimeout(helloTimer);helloTimer=null;if(carrierTimer)clearTimeout(carrierTimer);clearProbeTimer();if(schedulerTimer)clearTimeout(schedulerTimer);schedulerTimer=null;if(attemptController)attemptController.abort();if(pollController)pollController.abort();

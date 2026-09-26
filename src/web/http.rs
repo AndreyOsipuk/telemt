@@ -28,6 +28,8 @@ mod activity;
 mod body;
 // Canonical capability parsing and complete scans remain isolated from HTTP routing.
 mod capability;
+// Authentic credential containment stays independent from carrier routing.
+mod secrets;
 // Decoy routing and upstream proxying are isolated from carrier authentication.
 mod decoy;
 // Authenticated generated-bridge diagnostics remain outside carrier framing.
@@ -71,13 +73,13 @@ type BoxError = Box<dyn Error + Send + Sync>;
 type HttpBody = UnsyncBoxBody<Bytes, BoxError>;
 type HttpResponse = Response<HttpBody>;
 
-const TRANSPORT_PATHS: [&str; 4] = [
-    "/api/v1/session",
-    "/api/v1/up",
-    "/api/v1/down",
-    "/api/v1/diagnostic",
+const TRANSPORT_SUFFIXES: [&str; 4] = [
+    "api/v1/session",
+    "api/v1/up",
+    "api/v1/down",
+    "api/v1/diagnostic",
 ];
-const WEBSOCKET_PATH: &str = "/api/v1/ws";
+const WEBSOCKET_SUFFIX: &str = "api/v1/ws";
 
 /// Serves one bounded HTTP/1.1 connection accepted from an external TLS terminator.
 pub(crate) async fn serve_connection(
@@ -185,8 +187,9 @@ async fn handle_request(
     let Some(vhost) = web_runtime.vhosts.get(host).cloned() else {
         return generic_not_found();
     };
-    let path = request.uri().path();
-    if path == WEBSOCKET_PATH {
+    secrets::mark_internal_credential(&mut request, web_runtime, &runtime);
+    let suffix = request.uri().path().strip_prefix(&vhost.base);
+    if suffix == Some(WEBSOCKET_SUFFIX) {
         return websocket::handle(
             request,
             peer,
@@ -197,7 +200,7 @@ async fn handle_request(
         )
         .await;
     }
-    if TRANSPORT_PATHS.contains(&path) {
+    if suffix.is_some_and(|suffix| TRANSPORT_SUFFIXES.contains(&suffix)) {
         return handle_api(
             request,
             peer,
@@ -208,7 +211,7 @@ async fn handle_request(
         )
         .await;
     }
-    if path == "/" && matches!(*request.method(), Method::GET | Method::HEAD) {
+    if suffix == Some("") && matches!(*request.method(), Method::GET | Method::HEAD) {
         return handle_root(
             request,
             peer,
@@ -369,6 +372,7 @@ async fn handle_root(
     }
     let page = bridge::render(
         &vhost.host,
+        &vhost.base,
         &bootstrap.token,
         config.web.limits.carrier_batch_bytes,
         config.web.limits.pending_bytes_per_session,
@@ -440,11 +444,13 @@ async fn handle_api(
     let Some(token_hash) = bearer_token_hash(&request) else {
         return serve_decoy(request, vhost, true, &runtime).await;
     };
-    match request.uri().path() {
-        "/api/v1/session" => handle_session(request, runtime, vhost, token_hash, client_ip).await,
-        "/api/v1/up" => handle_up(request, runtime, vhost, token_hash).await,
-        "/api/v1/down" => handle_down(request, runtime, vhost, token_hash).await,
-        "/api/v1/diagnostic" => {
+    match request.uri().path().strip_prefix(&vhost.base) {
+        Some("api/v1/session") => {
+            handle_session(request, runtime, vhost, token_hash, client_ip).await
+        }
+        Some("api/v1/up") => handle_up(request, runtime, vhost, token_hash).await,
+        Some("api/v1/down") => handle_down(request, runtime, vhost, token_hash).await,
+        Some("api/v1/diagnostic") => {
             diagnostic::handle(request, runtime, vhost, token_hash, client_ip).await
         }
         _ => serve_decoy(request, vhost, true, &runtime).await,

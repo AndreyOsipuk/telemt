@@ -1,6 +1,6 @@
 (()=>{'use strict';
 let bootstrap="__BOOTSTRAP__",hello=false,emitted=0,boundaryTimer=null;
-const relayOrigin='https://__HOST__',requestMs=__BRIDGE_REQUEST_SECS__*1000;
+const relayOrigin='https://__HOST__',relayBase=relayOrigin+'__BASE_PREFIX__',requestMs=__BRIDGE_REQUEST_SECS__*1000;
 function eventBit(event){
  if(event==='runtime_started')return 1;if(event==='status_posted')return 2;if(event==='hello_received')return 4;if(event==='boundary_timeout')return 8;
  if(event==='hello_timeout')return 16;if(event==='client_close_before_hello')return 32;if(event==='document_unloaded_before_hello')return 64;
@@ -12,7 +12,7 @@ function report(event){
  let timer=null;
  try{
   const controller=new AbortController(),body=JSON.stringify({v:1,event});timer=setTimeout(()=>controller.abort(),requestMs);
-  fetch(relayOrigin+'/api/v1/diagnostic',{method:'POST',body,signal:controller.signal,keepalive:true,mode:'same-origin',credentials:'omit',cache:'no-store',redirect:'error',referrerPolicy:'no-referrer',headers:{Authorization:'Bearer '+bootstrap,'Content-Type':'application/json'}})
+  fetch(relayBase+'/api/v1/diagnostic',{method:'POST',body,signal:controller.signal,keepalive:true,mode:'same-origin',credentials:'omit',cache:'no-store',redirect:'error',referrerPolicy:'no-referrer',headers:{Authorization:'Bearer '+bootstrap,'Content-Type':'application/json'}})
    .then(discard,()=>{}).then(()=>clearTimeout(timer),()=>clearTimeout(timer));
  }catch(error){if(timer)clearTimeout(timer)}
 }

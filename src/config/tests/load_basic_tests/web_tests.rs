@@ -40,9 +40,11 @@ fn web_config_builds_canonical_runtime_snapshot() {
         .vhosts
         .get("proxy.example.com")
         .expect("canonical WEB vhost");
+    assert_eq!(vhost.base, "/");
     assert_eq!(vhost.profiles.len(), 1);
     assert_eq!(vhost.capabilities.len(), vhost.profiles.len());
     assert_eq!(vhost.capabilities[0], vhost.profiles[0].capability);
+    assert_eq!(runtime.capabilities.as_ref(), vhost.capabilities.as_ref());
     assert_eq!(vhost.decoy_fasttrack_mode, WebDecoyFastTrackMode::Off);
     assert_eq!(vhost.profiles[0].user, "alice");
     assert_eq!(vhost.profiles[0].secret_mode, WebSecretMode::Dd);
@@ -57,6 +59,61 @@ fn web_config_builds_canonical_runtime_snapshot() {
         vhost.profiles[0].carriers.as_ref(),
         [WebCarrier::HttpsLanes]
     );
+}
+
+#[test]
+fn web_base_path_is_canonical_and_precomputed() {
+    let maximum = "a".repeat(128);
+    for base_path in ["Dobry-Cola/super_app", maximum.as_str()] {
+        let configured = WEB_CONFIG.replace(
+            "host = \"Proxy.Example.COM\"",
+            &format!("host = \"Proxy.Example.COM\"\nbase_path = \"{base_path}\""),
+        );
+        let config = load_config_from_temp_toml(&configured);
+        assert_eq!(config.web.vhosts[0].base_path, base_path);
+        assert_eq!(
+            config.web.runtime.as_ref().unwrap().vhosts["proxy.example.com"].base,
+            format!("/{base_path}/")
+        );
+    }
+
+    let strict = format!(
+        "[general]\nconfig_strict = true\n{}",
+        WEB_CONFIG.replace(
+            "host = \"Proxy.Example.COM\"",
+            "host = \"Proxy.Example.COM\"\nbase_path = \"relay\"",
+        )
+    );
+    assert_eq!(
+        load_config_from_temp_toml(&strict).web.vhosts[0].base_path,
+        "relay"
+    );
+}
+
+#[test]
+fn web_base_path_rejects_noncanonical_forms() {
+    let oversized = "a".repeat(129);
+    for base_path in [
+        "/relay",
+        "relay/",
+        "relay//nested",
+        "-relay",
+        "_relay",
+        "relay/.hidden",
+        "relay/%2fhidden",
+        "relay path",
+        "relay/тест",
+        oversized.as_str(),
+    ] {
+        let invalid = WEB_CONFIG.replace(
+            "host = \"Proxy.Example.COM\"",
+            &format!("host = \"Proxy.Example.COM\"\nbase_path = \"{base_path}\""),
+        );
+        assert!(
+            load_config_error_from_temp_toml(&invalid).contains("web.vhosts[0].base_path"),
+            "base path {base_path:?} was accepted"
+        );
+    }
 }
 
 #[test]

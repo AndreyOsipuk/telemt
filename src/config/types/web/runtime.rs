@@ -7,6 +7,8 @@ pub(crate) struct WebRuntimeConfig {
     pub(crate) vhosts: BTreeMap<String, Arc<WebRuntimeVhost>>,
     /// Flat profile inventory used by startup link emission.
     pub(crate) profiles: Vec<Arc<WebRuntimeProfile>>,
+    /// Complete active capability table used to contain misplaced credentials.
+    pub(crate) capabilities: Box<[[u8; 32]]>,
 }
 
 /// Precomputed immutable virtual-host data.
@@ -14,6 +16,8 @@ pub(crate) struct WebRuntimeConfig {
 pub(crate) struct WebRuntimeVhost {
     /// Canonical lowercase ACE hostname.
     pub(crate) host: String,
+    /// Exact slash-delimited endpoint base, including the trailing slash.
+    pub(crate) base: String,
     /// Restart-frozen decoy capability-scan policy.
     pub(crate) decoy_fasttrack_mode: WebDecoyFastTrackMode,
     /// Immutable ordinary-site fallback snapshot.

@@ -6,7 +6,8 @@ const WEB_DEBUG_GROUP_SCRATCH_BYTES: usize = 4 * 1024 * 1024;
 const WEB_CARRIER_LEARNING_ENTRY_BYTES: usize = 512;
 const WEB_LANE_STATE_BYTES: usize = 512;
 const WEB_OVERLOAD_CONNECTION_BYTES: usize = 4 * 1024;
-const WEB_CAPABILITY_INDEX_ENTRY_BYTES: usize = 32;
+// Each profile capability is stored in its vhost and in the global containment table.
+const WEB_CAPABILITY_INDEX_ENTRY_BYTES: usize = 64;
 
 /// Validates process-wide body, header, queue, static, and debug reservations.
 pub(super) fn validate(limits: &WebLimitsConfig) -> Result<()> {

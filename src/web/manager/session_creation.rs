@@ -13,7 +13,7 @@ use super::state::{
     profile_key, remember_closed_token_locked, remove_expired_locked,
 };
 use super::{
-    CarrierLearningContext, CarrierRequest, CreateResult, ManagerError, TokenHash,
+    CarrierLearningContext, CarrierRequest, CreateResult, ManagerError, TokenHash, TokenKind,
     WebProcessRuntime,
 };
 use crate::config::{WebCarrier, WebRuntimeProfile};
@@ -316,7 +316,12 @@ impl WebProcessRuntime {
         if !admit_initial(self, &mut state, now, client_ip, profile_key, &profile) {
             return Err(ManagerError::Limit);
         }
-        let Some((session_token, session_hash)) = new_unique_token(&generation, &state) else {
+        let Some((session_token, session_hash)) = new_unique_token(
+            &generation,
+            &state,
+            &self.token_authenticator,
+            TokenKind::Session,
+        ) else {
             self.record_limit_hit();
             self.telemetry
                 .record_rejection(crate::web::telemetry::WebRejectionReason::SessionCapacity);

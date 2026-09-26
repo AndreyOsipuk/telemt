@@ -7,7 +7,9 @@ use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use super::{CarrierRequest, ProfileKey, TOKEN_BYTES, TokenHash};
+use super::{
+    CarrierRequest, ProfileKey, TokenAuthenticator, TokenHash, TokenKind,
+};
 use crate::config::{WebCarrier, WebRuntimeConfig, WebRuntimeProfile, WebTimeoutsConfig};
 use crate::maestro::generation::RuntimeGeneration;
 use crate::proxy::user_admission::UserSessionRegistration;
@@ -233,10 +235,13 @@ impl Default for ManagerState {
 pub(super) fn new_unique_token(
     generation: &RuntimeGeneration,
     state: &ManagerState,
+    authenticator: &TokenAuthenticator,
+    kind: TokenKind,
 ) -> Option<(String, TokenHash)> {
     for _ in 0..8 {
-        let mut raw = [0u8; TOKEN_BYTES];
-        generation.rng.fill(&mut raw);
+        let mut nonce = [0u8; 16];
+        generation.rng.fill(&mut nonce);
+        let raw = authenticator.issue(kind, nonce);
         let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
         let hash = Sha256::digest(raw).into();
         if !state.bootstraps.contains_key(&hash)
