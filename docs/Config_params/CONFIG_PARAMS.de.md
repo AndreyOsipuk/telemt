@@ -10,10 +10,10 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 >
 > Die in diesem Dokument beschriebenen Konfigurationsparameter richten sich an erfahrene Nutzer und dienen dem Feintuning. Änderungen ohne klares Verständnis der jeweiligen Funktion können zu Instabilität oder anderem unerwarteten Verhalten führen. Gehen Sie entsprechend vorsichtig und auf eigenes Risiko vor.
 
-> `Hot-Reload` zeigt an, ob ein geänderter Wert vom Config-Watcher ohne Prozessneustart übernommen wird; `✘` bedeutet, dass für den Runtime-Effekt ein Neustart erforderlich ist.
+> `Hot-Reload` zeigt an, ob der Config-Watcher einen geänderten Wert direkt übernimmt. `✘` bedeutet, dass der Watcher ihn nicht anwendet; je nach Feld ist für die vollständige Wirkung ein prozessinterner Runtime-Generation-Reload oder ein Prozessneustart erforderlich.
 
 # Inhaltsverzeichnis
- - [Schlüssel auf oberster Ebene](#top-level-keys)
+ - [Schlüssel auf oberster Ebene](#schlüssel-auf-oberster-ebene)
  - [logging](#logging)
  - [general](#general)
  - [general.modes](#generalmodes)
@@ -65,10 +65,10 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
   - **Beispiel**:
 
     ```toml
-    # Links für alle konfigurierten User anzeigen
+    # Show links for all configured users
     show_link = "*"
 
-    # oder: Links nur für ausgewählte User anzeigen
+    # Or show links only for selected users
     # show_link = ["alice", "bob"]
     ```
 ## dc_overrides
@@ -87,8 +87,8 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
   - **Beispiel**:
 
     ```toml
-    # Wenn ein Client ein unbekanntes/nicht standardisiertes DC ohne Override anfordert,
-    # wird er an diesen Default-Cluster weitergeleitet (1..=5).
+    # When a client requests an unknown or non-standard DC without an override,
+    # route it to this default cluster (1..=5).
     default_dc = 2
     ```
 
@@ -204,6 +204,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 | [`me_keepalive_payload_random`](#me_keepalive_payload_random) | `bool` | `true` | `✘` |
 | [`rpc_proxy_req_every`](#rpc_proxy_req_every) | `u64` | `0` | `✘` |
 | [`me_writer_cmd_channel_capacity`](#me_writer_cmd_channel_capacity) | `usize` | `4096` | `✘` |
+| [`me_writer_byte_budget_bytes`](#me_writer_byte_budget_bytes) | `usize` | `33570816` | `✘` |
 | [`me_route_channel_capacity`](#me_route_channel_capacity) | `usize` | `768` | `✘` |
 | [`me_c2me_channel_capacity`](#me_c2me_channel_capacity) | `usize` | `1024` | `✘` |
 | [`me_c2me_send_timeout_ms`](#me_c2me_send_timeout_ms) | `u64` | `4000` | `✘` |
@@ -216,6 +217,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 | [`me_d2c_frame_buf_shrink_threshold_bytes`](#me_d2c_frame_buf_shrink_threshold_bytes) | `usize` | `262144` | `✔` |
 | [`direct_relay_copy_buf_c2s_bytes`](#direct_relay_copy_buf_c2s_bytes) | `usize` | `65536` | `✔` |
 | [`direct_relay_copy_buf_s2c_bytes`](#direct_relay_copy_buf_s2c_bytes) | `usize` | `262144` | `✔` |
+| [`direct_relay_buffer_budget_max_bytes`](#direct_relay_buffer_budget_max_bytes) | `usize` | `0` | `✘` |
 | [`crypto_pending_buffer`](#crypto_pending_buffer) | `usize` | `262144` | `✘` |
 | [`max_client_frame`](#max_client_frame) | `usize` | `16777216` | `✘` |
 | [`desync_all_full`](#desync_all_full) | `bool` | `false` | `✔` |
@@ -301,13 +303,14 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 | [`me_pool_drain_soft_evict_per_writer`](#me_pool_drain_soft_evict_per_writer) | `u8` | `2` | `✘` |
 | [`me_pool_drain_soft_evict_budget_per_core`](#me_pool_drain_soft_evict_budget_per_core) | `u16` | `16` | `✘` |
 | [`me_pool_drain_soft_evict_cooldown_ms`](#me_pool_drain_soft_evict_cooldown_ms) | `u64` | `1000` | `✘` |
-| [`me_bind_stale_mode`](#me_bind_stale_mode) | `"never"`, `"ttl"` oder `"always"` | `"ttl"` | `✔` |
+| [`me_bind_stale_mode`](#me_bind_stale_mode) | `"never"`, `"ttl"` oder `"always"` | `"never"` | `✔` |
 | [`me_bind_stale_ttl_secs`](#me_bind_stale_ttl_secs) | `u64` | `90` | `✔` |
 | [`me_pool_min_fresh_ratio`](#me_pool_min_fresh_ratio) | `f32` | `0.8` | `✔` |
 | [`me_reinit_drain_timeout_secs`](#me_reinit_drain_timeout_secs) | `u64` | `90` | `✔` |
 | [`proxy_secret_auto_reload_secs`](#proxy_secret_auto_reload_secs) | `u64` | `3600` | `✔` |
 | [`proxy_config_auto_reload_secs`](#proxy_config_auto_reload_secs) | `u64` | `3600` | `✔` |
 | [`me_reinit_singleflight`](#me_reinit_singleflight) | `bool` | `true` | `✔` |
+| [`me_reinit_max_concurrency`](#me_reinit_max_concurrency) | `usize` | `2` | `✔` |
 | [`me_reinit_trigger_channel`](#me_reinit_trigger_channel) | `usize` | `64` | `✘` |
 | [`me_reinit_coalesce_window_ms`](#me_reinit_coalesce_window_ms) | `u64` | `200` | `✔` |
 | [`me_deterministic_writer_sort`](#me_deterministic_writer_sort) | `bool` | `true` | `✔` |
@@ -346,6 +349,8 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
     [general]
     config_strict = true
     ```
+
+  - **Bekannte Einschränkung**: In dieser Revision weist `config_strict = true` die ansonsten unterstützten Schlüssel `access.user_source_deny` und `[[upstreams]].prefer` zurück. Lassen Sie den Strict-Modus deaktiviert, wenn einer dieser Schlüssel verwendet wird.
 ## prefer_ipv6
   - **Einschränkungen / Validierung**: Veraltet. Verwenden Sie `network.prefer`.
   - **Beschreibung**: Veraltetes Legacy-Einstellungsflag IPv6 wurde nach `network.prefer` migriert.
@@ -482,8 +487,8 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
     stun_nat_probe_concurrency = 8
     ```
 ## middle_proxy_pool_size
-  - **Einschränkungen / Validierung**: `usize`. Der effektive Wert ist `max(value, 1)` zur Runtime (daher verhält sich `0` wie `1`).
-  - **Beschreibung**: Zielgröße des aktiven ME Writer-Pools.
+  - **Einschränkungen / Validierung**: `usize`. Der an die ME-Initialisierung übergebene Wert wird als `max(value, 1)` normalisiert.
+  - **Beschreibung**: Nicht erzwingender Kompatibilitätswert, der derzeit im ME-Initialisierungslog ausgegeben wird. Aktive Writer-Ziele werden aus der DC-Family-Floor-Policy abgeleitet, nicht aus diesem Wert.
   - **Beispiel**:
 
     ```toml
@@ -574,16 +579,25 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
     rpc_proxy_req_every = 0
     ```
 ## me_writer_cmd_channel_capacity
-  - **Einschränkungen / Validierung**: Muss `> 0` sein.
-  - **Beschreibung**: Kapazität des Befehlskanals pro Autor.
+  - **Einschränkungen / Validierung**: Muss innerhalb von `1..=16384` liegen.
+  - **Beschreibung**: Kapazität des Befehlskanals pro ME-Writer.
   - **Beispiel**:
 
     ```toml
     [general]
     me_writer_cmd_channel_capacity = 4096
     ```
+## me_writer_byte_budget_bytes
+  - **Einschränkungen / Validierung**: Muss ein Vielfaches von `16384` zwischen dem dynamischen Minimum und `268435456` sein. Das Minimum ist `2 * general.max_client_frame + 256`, auf `16384` aufgerundet; bei der Standard-Framegröße beträgt es `33570816`.
+  - **Beschreibung**: Residenter Speicheretat für die Daten-Queue jedes ME-Writers. Der Datei-Watcher baut vorhandene Writer für dieses Feld nicht neu; es wird wirksam, wenn über die API eine neue ME-/Runtime-Generation erstellt wird oder nach einem Neustart.
+  - **Beispiel**:
+
+    ```toml
+    [general]
+    me_writer_byte_budget_bytes = 33570816
+    ```
 ## me_route_channel_capacity
-  - **Einschränkungen / Validierung**: Muss `> 0` sein.
+  - **Einschränkungen / Validierung**: Muss innerhalb von `1..=8192` liegen.
   - **Beschreibung**: Kapazität des ME-Antwortroutenkanals pro Verbindung.
   - **Beispiel**:
 
@@ -592,7 +606,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
     me_route_channel_capacity = 768
     ```
 ## me_c2me_channel_capacity
-  - **Einschränkungen / Validierung**: Muss `> 0` sein.
+  - **Einschränkungen / Validierung**: Muss innerhalb von `1..=8192` liegen.
   - **Beschreibung**: Kapazität der Befehlswarteschlange pro Client (Client-Leser -> ME Absender).
   - **Beispiel**:
 
@@ -690,6 +704,15 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
     [general]
     direct_relay_copy_buf_s2c_bytes = 262144
     ```
+## direct_relay_buffer_budget_max_bytes
+  - **Einschränkungen / Validierung**: `0` oder ein Vielfaches von `4096` innerhalb von `16777216..=2147483648`.
+  - **Beschreibung**: Prozesseigene harte Obergrenze für Direct-Relay-Copy-Buffer; `0` leitet sie beim Prozessstart aus den cgroup-/Host-Speichergrenzen ab. Die Änderung wird bis zum Neustart zurückgestellt.
+  - **Beispiel**:
+
+    ```toml
+    [general]
+    direct_relay_buffer_budget_max_bytes = 0
+    ```
 ## crypto_pending_buffer
   - **Einschränkungen / Validierung**: `usize` (Byte).
   - **Beschreibung**: Maximaler Puffer für ausstehenden Chiffretext pro Client-Writer (Byte).
@@ -700,7 +723,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
     crypto_pending_buffer = 262144
     ```
 ## max_client_frame
-  - **Einschränkungen / Validierung**: `usize` (Byte).
+  - **Einschränkungen / Validierung**: Muss innerhalb von `4096..=16777216` (Byte) liegen.
   - **Beschreibung**: Maximal zulässige Client-Framegröße MTProto (Byte).
   - **Beispiel**:
 
@@ -1213,7 +1236,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
     me_route_hybrid_max_wait_ms = 3000
     ```
 ## me_route_blocking_send_timeout_ms
-  - **Einschränkungen / Validierung**: Muss innerhalb von `0..=5000` (Millisekunden) liegen. `0` behält das alte unbegrenzte Warteverhalten bei.
+  - **Einschränkungen / Validierung**: Muss innerhalb von `1..=5000` (Millisekunden) liegen.
   - **Beschreibung**: Maximale Wartezeit für das Blockieren des Route-Channel-Sende-Fallbacks.
   - **Beispiel**:
 
@@ -1291,7 +1314,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 
     ```toml
     [general]
-    # Standard: 3 (erlaubter Bereich: 0..=10)
+    # Default: 3 (allowed range: 0..=10)
     me_hardswap_warmup_extra_passes = 3
     ```
 ## me_hardswap_warmup_pass_backoff_base_ms
@@ -1301,7 +1324,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 
     ```toml
     [general]
-    # Standard: 500
+    # Default: 500
     me_hardswap_warmup_pass_backoff_base_ms = 500
     ```
 ## me_config_stable_snapshots
@@ -1311,7 +1334,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 
     ```toml
     [general]
-    # erfordern drei identische Snapshots, bevor ME Endpunktkartenaktualisierungen angewendet werden
+    # Require three identical snapshots before applying ME endpoint map updates
     me_config_stable_snapshots = 3
     ```
 ## me_config_apply_cooldown_secs
@@ -1321,7 +1344,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 
     ```toml
     [general]
-    # erlaubt die sofortige Anwendung stabiler Snapshots (keine Abklingzeit)
+    # Allow applying stable snapshots immediately without a cooldown
     me_config_apply_cooldown_secs = 0
     ```
 ## me_snapshot_require_http_2xx
@@ -1331,7 +1354,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 
     ```toml
     [general]
-    # ermöglicht das Anwenden von Snapshots, auch wenn der HTTP-Status nicht 2xx ist
+    # Allow applying snapshots even when the HTTP status is not 2xx
     me_snapshot_require_http_2xx = false
     ```
 ## me_snapshot_reject_empty_map
@@ -1341,7 +1364,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 
     ```toml
     [general]
-    # Anwenden leerer Snapshots zulassen (mit Vorsicht verwenden)
+    # Allow applying empty snapshots with care
     me_snapshot_reject_empty_map = false
     ```
 ## me_snapshot_min_proxy_for_lines
@@ -1351,7 +1374,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 
     ```toml
     [general]
-    # erfordern mindestens 10 Proxy_for-Zeilen, bevor ein Snapshot akzeptiert wird
+    # Require at least 10 proxy_for rows before accepting a snapshot
     me_snapshot_min_proxy_for_lines = 10
     ```
 ## proxy_secret_stable_snapshots
@@ -1361,7 +1384,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 
     ```toml
     [general]
-    # erfordern zwei identische getProxySecret-Snapshots, bevor sie zur Runtime rotieren
+    # Require two identical getProxySecret snapshots before rotating at runtime
     proxy_secret_stable_snapshots = 2
     ```
 ## proxy_secret_rotate_runtime
@@ -1371,7 +1394,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 
     ```toml
     [general]
-    # Deaktivieren Sie die Proxy-Secret-Rotation zur Runtime (Start verwendet weiterhin Proxy_secret_path/proxy_secret_len_max)
+    # Disable runtime proxy-secret rotation; startup still uses proxy_secret_path/proxy_secret_len_max
     proxy_secret_rotate_runtime = false
     ```
 ## me_secret_atomic_snapshot
@@ -1381,7 +1404,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 
     ```toml
     [general]
-    # HINWEIS: Wenn use_middle_proxy=true, wird Telemt dies beim Laden automatisch aktivieren
+    # Telemt enables this automatically during load when use_middle_proxy=true
     me_secret_atomic_snapshot = false
     ```
 ## proxy_secret_len_max
@@ -1391,17 +1414,17 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 
     ```toml
     [general]
-    # Standard: 256 (Byte)
+    # Default: 256 bytes
     proxy_secret_len_max = 256
     ```
 ## me_pool_drain_ttl_secs
   - **Einschränkungen / Validierung**: `u64` (Sekunden). `0` deaktiviert das Drain-TTL-Fenster (und unterdrückt Drain-TTL-Warnungen für nicht leere Draining-Writer).
-  - **Beschreibung**: Drain-TTL-Zeitfenster für stale ME-Writer nach Änderungen der Endpoint-Map. Während der TTL dürfen stale Writer nur als Fallback für neue Bindungen verwendet werden (abhängig von der Bindungsrichtlinie).
+  - **Beschreibung**: Altersschwelle für Warnungen bei langem Drain nach Endpoint-Map-Änderungen und Untergrenze bei der Normalisierung des Force-Close-Timeouts. Stale-Bind-Zulassung wird separat durch `me_bind_stale_mode` und `me_bind_stale_ttl_secs` gesteuert.
   - **Beispiel**:
 
     ```toml
     [general]
-    # Drain TTL deaktivieren (Draining Writer geben keine „Past Drain TTL“-Warnungen aus)
+    # Disable drain TTL warnings for writers that remain draining past the threshold
     me_pool_drain_ttl_secs = 0
     ```
 ## me_instadrain
@@ -1476,17 +1499,17 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
     ```
 ## me_bind_stale_mode
   - **Einschränkungen / Validierung**: `"never"`, `"ttl"` oder `"always"`.
-  - **Beschreibung**: Policy für neue Binds auf stale draining Writern.
+  - **Beschreibung**: Policy für neue Binds auf stale draining Writern in nicht abgedeckten DC-Family-Gruppen. Der Default `never` verlangt vollständige Gruppenabdeckung, bevor ein partieller Hardswap committen darf; `ttl` und `always` erlauben policy-begrenzten Fallback.
   - **Beispiel**:
 
     ```toml
     [general]
-    # veraltete Bindungen nur für ein begrenztes Zeitfenster zulassen
+    # Allow stale binds only for a limited time window
     me_bind_stale_mode = "ttl"
     ```
 ## me_bind_stale_ttl_secs
   - **Einschränkungen / Validierung**: `u64`.
-  - **Beschreibung**: TTL für stale Bind-Zulassung, wenn der stale mode `ttl` ist.
+  - **Beschreibung**: TTL für stale Bind-Zulassung im Modus `ttl`; `0` deaktiviert den TTL-Ablauf für zulässige draining Writer.
   - **Beispiel**:
 
     ```toml
@@ -1496,22 +1519,22 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
     ```
 ## me_pool_min_fresh_ratio
   - **Einschränkungen / Validierung**: Muss innerhalb von `[0.0, 1.0]` liegen.
-  - **Beschreibung**: Mindestanteil frischer Desired-DC-Coverage, bevor stale Writer gedraint werden.
+  - **Beschreibung**: Mindestanteil frischer DC-Family-Coverage beim Generation-Commit. Fehlende Gruppen blockieren den Commit unter `me_bind_stale_mode = "never"` auch dann, wenn dieses Verhältnis erreicht ist.
   - **Beispiel**:
 
     ```toml
     [general]
-    # erfordern >=90 % der gewünschten DC-Abdeckung, bevor stale Writer gedraint werden
+    # Require at least 90% desired-DC coverage before draining stale writers
     me_pool_min_fresh_ratio = 0.9
     ```
 ## me_reinit_drain_timeout_secs
-  - **Einschränkungen / Validierung**: `u64`. `0` verwendet das Runtime-Sicherheits-Fallback-Timeout für erzwungenes Schließen. Wenn `> 0` und `< me_pool_drain_ttl_secs`, erhöht die Runtime den Wert auf TTL.
-  - **Beschreibung**: Force-Close-Timeout für draining stale Writer. Bei der Einstellung `0` entspricht das effektive Timeout dem Runtime-Safety-Fallback (300 Sekunden).
+  - **Einschränkungen / Validierung**: `u64`. `0` wählt zuerst den 300-Sekunden-Runtime-Sicherheitsfallback; anschließend wird das effektive Timeout mindestens auf `me_pool_drain_ttl_secs` angehoben.
+  - **Beschreibung**: Force-Close-Timeout für draining stale Writer. Der effektive Wert ist das Maximum aus dem konfigurierten Wert ungleich Null (oder 300 Sekunden bei `0`) und der Drain-TTL.
   - **Beispiel**:
 
     ```toml
     [general]
-    # Runtime-Safety-Fallback-Force-Close-Timeout (300 s) verwenden
+    # Use the runtime safety fallback force-close timeout of 300 seconds
     me_reinit_drain_timeout_secs = 0
     ```
 ## proxy_secret_auto_reload_secs
@@ -1521,10 +1544,10 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 
     ```toml
     [general]
-    # Legacy-Modus: update_every weglassen, um Proxy_*_auto_reload_secs zu verwenden
+    # Legacy mode: omit update_every to use proxy_*_auto_reload_secs
     proxy_secret_auto_reload_secs = 600
     proxy_config_auto_reload_secs = 120
-    # effektives Aktualisierungsintervall = min(600, 120) = 120 Sekunden
+    # Effective updater interval = min(600, 120) = 120 seconds
     ```
 ## proxy_config_auto_reload_secs
   - **Einschränkungen / Validierung**: Veraltet. Verwenden Sie `general.update_every`. Wenn `general.update_every` nicht explizit festgelegt ist, beträgt das effektive Legacy-Aktualisierungsintervall `min(proxy_secret_auto_reload_secs, proxy_config_auto_reload_secs)` und muss `> 0` betragen.
@@ -1533,10 +1556,10 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 
     ```toml
     [general]
-    # Legacy-Modus: update_every weglassen, um Proxy_*_auto_reload_secs zu verwenden
+    # Legacy mode: omit update_every to use proxy_*_auto_reload_secs
     proxy_secret_auto_reload_secs = 600
     proxy_config_auto_reload_secs = 120
-    # effektives Aktualisierungsintervall = min(600, 120) = 120 Sekunden
+    # Effective updater interval = min(600, 120) = 120 seconds
     ```
 ## me_reinit_singleflight
   - **Einschränkungen / Validierung**: `bool`.
@@ -1547,9 +1570,18 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
     [general]
     me_reinit_singleflight = true
     ```
+## me_reinit_max_concurrency
+  - **Einschränkungen / Validierung**: Muss innerhalb von `[1, 8]` liegen. Der effektive Wert ist `1`, solange `me_reinit_singleflight = true` ist.
+  - **Beschreibung**: Begrenzt gleichzeitige Warmups von ME-Generationen; zusätzliche Trigger werden zu genau einem ausstehenden Wiederholungslauf zusammengeführt.
+  - **Beispiel**:
+
+    ```toml
+    [general]
+    me_reinit_max_concurrency = 2
+    ```
 ## me_reinit_trigger_channel
-  - **Einschränkungen / Validierung**: Muss `> 0` sein.
-  - **Beschreibung**: Trigger-Queue-Kapazität für Reinit-Planer.
+  - **Einschränkungen / Validierung**: Muss innerhalb von `[1, 4096]` liegen.
+  - **Beschreibung**: Trigger-Queue-Kapazität für den Reinit-Planer. Eine neue Runtime-Generation erstellt ihren Kanal aus diesem Wert; der Datei-Watcher allein ändert die Größe des aktiven Kanals nicht.
   - **Beispiel**:
 
     ```toml
@@ -1699,7 +1731,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
     ```toml
     [general.links]
     show = "*"
-    # oder:
+    # Or:
     # show = ["alice", "bob"]
     ```
 ## public_host
@@ -1792,10 +1824,10 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 
     ```toml
     [network]
-    # IPv6 explizit aktivieren
+    # Enable IPv6 explicitly
     ipv6 = true
 
-    # oder: IPv6 explizit deaktivieren
+    # Or disable IPv6 explicitly
     # ipv6 = false
     ```
 ## prefer
@@ -1972,7 +2004,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 
     ```toml
     [server]
-    # Erzwingen Sie die Aktivierung von TCP, auch wenn auch ein Unix-Socket gebunden wird
+    # Force-enable TCP even when also binding a Unix socket
     listen_unix_sock = "/run/telemt.sock"
     listen_tcp = true
     ```
@@ -2561,6 +2593,8 @@ Der WEB-Modus transportiert MTProxy-Datenverkehr von Telegram Desktop über HTTP
 | `carriers` | `false` oder ein nicht leeres Array eindeutiger Carrier | `false` | `✔` |
 | `carrier_learning` | `bool` | `true` | `✔` |
 | `carrier_negotiation_aggressiveness` | `"conservative"`, `"balanced"` oder `"aggressive"` | `"conservative"` | `✔` |
+| `decoy_fasttrack_mode` | `"off"`, `"shadow"` oder `"enforce"` | `"off"` | `✘` |
+| `http_connection_capacity_action` | `"drop"`, `"wait"` oder `"respond"` | `"drop"` | `✔` |
 | `debug` | Tabelle | deaktiviert, begrenzte Defaults | `✔` |
 | `limits` | Tabelle | begrenzte Defaults | `✘` |
 | `timeouts` | Tabelle | begrenzte Defaults | `✔` |
@@ -2569,6 +2603,10 @@ Der WEB-Modus transportiert MTProxy-Datenverkehr von Telegram Desktop über HTTP
 `enabled = true` erfordert mindestens einen durch die Netzwerkrichtlinie zugelassenen WEB-Listener, einen vhost und mindestens ein Profil in jedem vhost. `https` behält den serialisierten HTTPS-Transport bei und erfordert `max_http_handlers >= 2`. Mit `https-lanes` erhalten Stream null und jeder logische Stream eigene Uplink-Sequenzen, Downlink-Cursor, Wiederholungen und Long Polls; dieser Carrier erfordert `max_http_handlers >= 4` und öffentliches HTTP/2 am TLS-Terminator. `websocket` transportiert alle logischen Streams über eine geordnete RFC-6455-Verbindung, während `websocket-lanes` jedem Stream ungleich null eine eigene Verbindung zuweist und Lane-Fehler isoliert. Beide WebSocket-Carrier verwenden nach der HTTPS-Sitzungserstellung `GET /api/v1/ws` und erfordern, dass der TLS-Terminator die HTTP/1.1-Upgrade-Header unverändert weiterleitet.
 
 Fehlt `carriers` oder ist es `false`, sind Auto-Negotiation und Lernen deaktiviert und `carrier` ist der einzige Modus. Ein nicht leeres `carriers`-Array aktiviert die Start-Negotiation in der konfigurierten Reihenfolge; `carrier` wird genau einmal als letzter Fallback angehängt. Leere Arrays, Duplikate und `true` werden abgelehnt. Der Client darf nur vor dem Carrier-Commit zum nächsten Kandidaten wechseln; nach dem Commit erfordert ein Carrier-Wechsel eine neue Sitzung. Ein nativer Client ohne Metadaten, einschließlich Telegram iOS, verwendet immer den konfigurierten festen `carrier`, auch bei aktivierter Negotiation. Das aktuelle iOS unterstützt nur `https`; solche Bereitstellungen müssen daher `carrier = "https"` setzen. Die CFNetwork- und Darwin-User-Agent-Klassifizierung leitet keine Carrier-Unterstützung ab. Explizite native iOS-Capabilities werden mit `{https}` geschnitten; andere explizite Client-Capabilities gelten wie gemeldet.
+
+`http_connection_capacity_action` gilt erst, nachdem Telemt eine private WEB-TCP-Verbindung akzeptiert hat und `max_http_connections` ausgeschöpft ist. `drop` schließt wie bisher sofort. `respond` sendet eine leere wiederholbare `503 Service Unavailable` mit `Retry-After: 1`, `Cache-Control: no-store` und `Connection: close`. `wait` wartet höchstens `http_overload_timeout_ms` auf normale Kapazität und beginnt danach die übliche HTTP-Verarbeitung; bei Timeout wird dieselbe begrenzte `503` gesendet. Höchstens `max_http_overload_connections` akzeptierte Sockets dürfen außerhalb der normalen Kapazität warten oder antworten.
+
+`decoy_fasttrack_mode` ist restart-only und betrifft nur Capability-Arbeit für `GET/HEAD` am konfigurierten Basis-Root. `off` behält den vollständigen Scan bei, `shadow` zählt geeignete Requests ohne den Scan zu überspringen, und `enforce` überspringt ihn nur für `HEAD` oder eine fehlende/nicht kanonische `bridge`-Query. Ein kanonisch geformtes Bridge-`GET` scannt immer alle Profile des ausgewählten vhost. Die Optimierung begrenzt keine feindlichen kanonischen Probes; `enforce` muss hinter dem produktiven TLS-Terminator auf Timing-Unterscheidbarkeit geprüft werden.
 
 `carrier_learning` wirkt nur bei aktivierter Negotiation. Das Lernen ist prozesslokal, speicherresident, begrenzt und ausschließlich positiv: Nur ein Carrier, der den serverdefinierten Zustand healthy erreicht, liefert Evidenz. `conservative` erfordert die breiteste Evidenz und deaktiviert IP-Ranking, `balanced` verwendet mittlere User-Agent-/Profil-Schwellen sowie geeignete öffentliche IPs nur als Tie-Breaker, und `aggressive` reagiert auf die ersten begrenzten Samples. Vom Client gemeldete Fehler bleiben rein diagnostisch und erzeugen keine negative Evidenz. Ein Reload wendet die Richtlinie auf neue Negotiation-Ketten an und verwirft inkompatible gespeicherte Evidenz. Das Deaktivieren von WEB beendet die Ausgabe neuer Bridge- und Session-Zugangsdaten; zum Widerrufen aktiver Sitzungen eines einzelnen Benutzers verwenden Sie die Users-API.
 
@@ -2580,6 +2618,7 @@ Diese hot-reload-fähige Tabelle steuert den prozesseigenen serverseitigen WEB-D
 | --- | --- | --- | --- |
 | `enabled` | `bool` | `false` | Aktiviert WEB-HTTP-, WebSocket-Message-, Frame- und Lifecycle-Debugdatensätze. |
 | `capture_lifecycle` | `bool` | `true` | Zeichnet typisierte Bridge-, Sitzungs-, Stream-, Handshake-, Relay- und Close-Ereignisse auf. |
+| `sideband` | `bool` | `false` | Aktiviert Lifecycle-Diagnostik der generierten Bridge; wirksam nur zusammen mit `enabled` und `capture_lifecycle`. |
 | `capture_headers` | `bool` | `true` | Speichert Headernamen und nur ausdrücklich zugelassene Werte ohne Zugangsdaten. |
 | `capture_timings` | `bool` | `true` | Speichert Zeitpunkte für Request-Body, fertige Response, Response-Body und WebSocket-Message-Verarbeitung. |
 | `capture_frames` | `bool` | `true` | Zerlegt begrenzte Carrier-Bodys in Frame-Typ, Stream-ID, Länge, WINDOW- und Fehlermetadaten, ohne die Frame-Nutzlast zusätzlich zu speichern. |
@@ -2590,6 +2629,8 @@ Diese hot-reload-fähige Tabelle steuert den prozesseigenen serverseitigen WEB-D
 | `max_window_secs` | `u64` | `3600` | Größtes von `/web-status` akzeptiertes Beobachtungsfenster; validiert auf höchstens 86400. |
 
 Eine Änderung von `enabled` oder einem Erfassungsfeld löscht gespeicherte Datensätze und verwirft Commits, die unter der vorherigen Policy-Epoche begonnen wurden. Ändert sich nur das standardmäßige oder maximale Beobachtungsfenster, bleiben kompatible Datensätze erhalten. `full` speichert den vollständigen Body eines erkannten Carriers nur bis `web.limits.max_body_bytes`; Decoy-Bodys bleiben immer auf einen Präfix begrenzt. Ein Präfix, der nur mit einer gleichzeitig erhöhten, neustartpflichtigen Kapazität zulässig wäre, wird zusammen mit `web.debug` bis zum Neustart zurückgestellt. URI-Queries werden nie gespeichert, Werte von Credential-Headern werden ausgelassen, Body-Kopien werden von bekannten WEB-Capabilities und Bearer-Tokens bereinigt und Profilschlüssel ausschließlich als domänengetrennter Fingerprint mit 16 Hex-Zeichen dargestellt.
+
+Wenn `enabled`, `sideband` und `capture_lifecycle` alle aktiv sind, senden neu generierte Bridge-Seiten begrenzte einmalige Lifecycle-Ereignisse an die exakte konfigurierte Basis plus `api/v1/diagnostic`. Die Route ist Telemt-intern und keine öffentliche Control API. Bereits ausgegebene Bridge-Dokumente erhalten dieses Verhalten durch Reload nicht nachträglich.
 
 Die authentifizierte JSON-Steuerung kann den Ring mit `POST /v1/runtime/web/debug/clear` explizit löschen. Die erforderliche prozessbezogene `runtime_instance` sperrt veraltete Controller, die zurückgegebene Epoche sperrt laufende Writer und `leased_bytes` meldet Speicher, der noch von bereits gerenderten Snapshots gehalten wird.
 
@@ -2605,6 +2646,7 @@ Diese prozessweiten Obergrenzen begrenzen alle WEB-Register, Warteschlangen, Req
 | `carrier_batch_bytes` | `usize` | `2097152` | Maximale Größe eines kodierten Downlink-Batches. |
 | `max_frames_per_body` | `usize` | `4096` | Maximale Zahl geparster oder ausgegebener Frames pro Carrier-Body. |
 | `max_http_connections` | `usize` | `1024` | Prozessweit akzeptierte WEB-HTTP-Verbindungen. |
+| `max_http_overload_connections` | `usize` | `64` | Akzeptierte überlastete Sockets, die außerhalb normaler HTTP-Kapazität warten oder eine begrenzte wiederholbare Antwort senden dürfen. |
 | `max_http_handlers` | `usize` | `512` | Prozessweit gleichzeitig ausgeführte HTTP-Handler; HTTPS-Lanes dürfen höchstens die Hälfte mit Long Polls belegen, der Rest bleibt für Session-, Uplink- und Steuerarbeit verfügbar. |
 | `max_lane_open_waits_per_session` | `usize` | `16` | Kanonische Cursor-null-Downlink-Polls, die pro Sitzung auf ein konkurrierendes Lane-`OPEN` warten dürfen. |
 | `pending_bytes_per_lane` | `usize` | `8388608` | Eingereihte und residente `DATA`-Bytes pro unabhängiger HTTPS- oder WebSocket-Lane. |
@@ -2659,6 +2701,7 @@ Sofern eine Zeile nichts anderes angibt, werden Timeouts in Sekunden angegeben u
 | `long_poll_secs` | `u64` | `25` | `✔` | Maximale Dauer eines leeren Downlink-Long-Polls. |
 | `bridge_request_secs` | `u64` | `10` | `✔` | Bridge-seitige Deadline eines HTTP-Versuchs bis zum vollständigen Lesen des Response-Bodys; `/down` erhält zusätzlich `long_poll_secs`. Bereich `1..=60`. |
 | `bridge_retry_secs` | `u64` | `90` | `✔` | Absolutes Bridge-Retry-Fenster einschließlich Versuchen und Backoff; Bereich `1..=300` und nicht kleiner als `bridge_request_secs`. |
+| `bridge_recovery_secs` | `u64` | `15` | `✔` | Absolutes Recovery-Fenster nach dem Commit für ein weiterlebendes Bridge-Dokument; Bereich `1..=60`, beim Recovery-Start fixiert. |
 | `carrier_probe_coalesce_ms` | `u64` | `0` | `✔` | Optionales Bridge-Warten nach `OPEN` auf passendes `DATA`; Millisekunden im Bereich `0..=10`, wobei `0` sofortiges Probing beibehält. |
 | `lane_open_wait_secs` | `u64` | `2` | `✔` | Wartezeit für einen kanonischen Cursor-null-Downlink, der sein Lane-`OPEN` überholt; höchstens `long_poll_secs`. |
 | `carrier_health_secs` | `u64` | `30` | `✔` | Beobachtungsintervall nach dem Commit, bevor ein Carrier Learning-Evidenz liefern kann. |
@@ -2672,6 +2715,7 @@ Sofern eine Zeile nichts anderes angibt, werden Timeouts in Sekunden angegeben u
 | `bootstrap_lifetime_secs` | `u64` | `120` | `✔` | Lebensdauer ungenutzter Bootstraps und geschlossener Token-Replay-Marker. |
 | `reconnect_grace_secs` | `u64` | `120` | `✔` | Maximale Carrier-Inaktivität bis zum Schließen der Sitzung. |
 | `http_idle_secs` | `u64` | `75` | `✔` | Idle-Grenze zwischen HTTP-Austauschvorgängen und bei ausbleibendem Fortschritt eines bereits ausgegebenen Response-Bodys. Explizit begrenzte Request-Body-, Long-Poll-, Decoy- und ausstehende Upgrade-Phasen behalten ihre eigenen Deadlines und werden nicht durch diesen Timer verkürzt. Der Wert wird beim Annehmen der Verbindung fixiert. |
+| `http_overload_timeout_ms` | `u64` | `250` | `✔` | Deadline je Phase in Millisekunden, um bei akzeptierter Überlast auf Kapazität zu warten oder die wiederholbare Antwort zu schreiben; Bereich `1..=60000`. Wait-Timeout und Response-Write erhalten jeweils höchstens ein Phasenbudget. |
 | `shutdown_secs` | `u64` | `15` | `✔` | Ein absolutes Budget für das Beenden des Prozesses, das von allen Listener-Acceptoren und Verbindungen sowie WEB-Sitzungs- und Hilfstask-Drains gemeinsam verwendet wird. Der aktive Wert wird beim Start des Shutdowns einmalig erfasst. |
 | `decoy_header_secs` | `u64` | `30` | `✔` | Deadline für Verbindung und Response-Head eines HTTP-Decoys. |
 
@@ -2680,11 +2724,12 @@ Sofern eine Zeile nichts anderes angibt, werden Timeouts in Sekunden angegeben u
 | Schlüssel | Typ | Erforderlich | Hot-Reload | Beschreibung |
 | --- | --- | --- | --- | --- |
 | `host` | `String` | ja | `✔` | Eindeutiger, kanonischer ACE-FQDN in Kleinbuchstaben ohne Port, Pfad, Zugangsdaten oder abschließenden Punkt. |
+| `base_path` | `String` | nein | `✔` | Exaktes, groß-/kleinschreibungssensitives WEB-Präfix ohne führenden oder abschließenden Schrägstrich; standardmäßig leer. Höchstens 128 ASCII-Bytes in durch Schrägstriche getrennten Segmenten `[A-Za-z0-9][A-Za-z0-9_-]*`. |
 | `public_addr` | `SocketAddr` | ja | `✔` | Konkrete öffentliche IP auf Port `443`; wird im Ziel-Tupel des inneren Relays verwendet. |
 | `decoy` | Tabelle | ja | `✔` | Gewöhnlicher Site-Fallback für nicht authentifizierten oder ungültigen Datenverkehr. |
 | `profiles` | Tabellen-Array | bei aktiviertem WEB | `✔` | Explizite Benutzer und Client-Secret-Modi für diesen Hostnamen. |
 
-Der Hostname wird bei der Validierung normalisiert und muss von Telegram Desktop akzeptiert werden. Ein Bootstrap ist ein Bearer-Token: Client-Adresse und IP-Familie dürfen sich vor der Sitzungserstellung ändern. Ein ungenutzter Bootstrap bleibt über einen Konfigurations-Reload hinweg nur gültig, solange dieselbe Profilidentität aktiv bleibt.
+Der Hostname wird bei der Validierung normalisiert und muss von Telegram Desktop akzeptiert werden. Ein leerer `base_path` behält die Root-Capability v1 und das bisherige hexadezimale Link-Secret. Ein nicht leerer Pfad verwendet die v2-Host/Pfad-Capability und einen Telegram-Desktop-Pfadlink mit percent-encoded `HOST/BASE` sowie dem base64url-Secret-Marker `0x70`. Das Routing verlangt das exakte Präfix mit abschließendem Schrägstrich und leitet es nie um, normalisiert oder entfernt es. Ein Bootstrap ist ein Bearer-Token: Client-Adresse und IP-Familie dürfen sich vor der Sitzungserstellung ändern. Ein ungenutzter Bootstrap bleibt über einen Konfigurations-Reload hinweg nur gültig, solange dieselbe Profilidentität aktiv bleibt.
 
 # [web.vhosts.decoy]
 
@@ -2710,6 +2755,7 @@ Profilgrenzen müssen ungleich null sein und dürfen die zugehörigen globalen G
 ## WEB-Lebenszyklus und API-Verwaltung
 
 - Config-Watcher und Generations-Reload wenden `web.enabled`, Carrier- und Negotiation-Richtlinie, `web.debug`, `web.timeouts`, vhosts, Profile und Decoy-Snapshots ohne Prozessneustart an. Ein einzelner unveränderlicher expandierter Source-Snapshot wird validiert und aktiviert; der Watcher einer Kandidatengeneration startet erst nach deren Aktivierung. Bestehende Sitzungen und laufende Negotiation-Ketten behalten Carrier-Kandidaten, Grenzen, Timeouts und absolute Deadlines ihres Ausgabezeitpunkts; neue Bridge-Sitzungen verwenden genau eine fixierte aktive Generation.
+- Eine Änderung von `base_path` ersetzt atomar sowohl die Route für neue Requests als auch die abgeleitete Capability. Geben Sie zuerst neue Links aus und beenden Sie betroffene aktive Sitzungen: etablierte WebSockets und bereits geroutete Austauschvorgänge laufen weiter; spätere Requests an die alte Basis mit einem prozessauthentischen Bootstrap- oder Session-Token erhalten ein lokales, nicht cachebares `404`, während die nun inaktive alte Capability der gewöhnlichen Decoy-Behandlung folgt.
 - Bestand und Vertrauensrichtlinie der WEB-Listener unter `server.listeners` sowie alle Werte in `web.limits` sind prozesseigen und erfordern einen Neustart.
 - `GET /v1/config` liefert den vollständigen verfassten `[web]`-Baum außer dem abgeleiteten Snapshot `web.runtime`. `PATCH /v1/config` akzeptiert ein dünn besetztes `web`-Objekt, führt Tabellen tief zusammen, ersetzt Arrays vollständig, validiert den gesamten Kandidaten und meldet `web.limits` bis zum Neustart in `deferred_process_fields`.
 - `GET /v1/runtime/web/status`, `/sessions`, `/sessions/{session_ref}` und `/operations/{operation_id}` stellen begrenzten, nicht geheimen Runtime-Zustand bereit. POST-Steuerungen schließen ausgewählte Sitzungen, löschen Debugdaten oder setzen Carrier-Learning zurück und verlangen die aktuelle zufällige `runtime_instance`.
@@ -2837,8 +2883,10 @@ Profilgrenzen müssen ungleich null sein und dürfen die zugehörigen globalen G
 | [`tls_fetch_scope`](#tls_fetch_scope) | `String` | `""` | `✘` |
 | [`tls_fetch`](#tls_fetch) | `Table` | integrierte Standardeinstellungen | `✘` |
 | [`mask`](#mask) | `bool` | `true` | `✘` |
+| [`mask_dynamic`](#mask_dynamic) | `bool` | `true` | `✘` |
 | [`mask_host`](#mask_host) | `String` | — | `✘` |
 | [`mask_port`](#mask_port) | `u16` | `443` | `✘` |
+| [`exclusive_mask`](#exclusive_mask) | `Map<String, String>` | `{}` | `✘` |
 | [`mask_unix_sock`](#mask_unix_sock) | `String` | — | `✘` |
 | [`fake_cert_len`](#fake_cert_len) | `usize` | `2048` | `✘` |
 | [`tls_emulation`](#tls_emulation) | `bool` | `true` | `✘` |
@@ -2926,11 +2974,20 @@ Profilgrenzen müssen ungleich null sein und dürfen die zugehörigen globalen G
     [censorship]
     mask = true
     ```
+## mask_dynamic
+  - **Einschränkungen / Validierung**: `bool`.
+  - **Beschreibung**: Wenn weder `mask_host` noch `mask_unix_sock` gesetzt ist, wird eine passende ClientHello-SNI aus `tls_domain`/`tls_domains` als TCP-Mask-Ziel verwendet; ohne Treffer wird auf die primäre `tls_domain` zurückgegriffen. Ein passender `exclusive_mask`-Eintrag hat immer Vorrang vor regulären Zielen.
+  - **Beispiel**:
+
+    ```toml
+    [censorship]
+    mask_dynamic = true
+    ```
 ## mask_host
   - **Einschränkungen / Validierung**: `String` (optional).
     - Wenn `mask_unix_sock` gesetzt ist, muss `mask_host` ausgelassen werden (mutually exclusive).
-    - Wenn weder `mask_host` noch `mask_unix_sock` gesetzt ist, verwendet Telemt standardmäßig `tls_domain` als `mask_host`.
-  - **Beschreibung**: Upstream-Mask-Host für das TLS-Fronting-Relay.
+    - Wenn weder `mask_host` noch `mask_unix_sock` gesetzt ist, darf `mask_dynamic` eine passende konfigurierte SNI wählen; andernfalls verwendet Telemt `tls_domain`.
+  - **Beschreibung**: Expliziter Upstream-Mask-Host für das TLS-Fronting-Relay. Wenn gesetzt, deaktiviert er die dynamische SNI-Zielwahl mit Ausnahme von `exclusive_mask`-Overrides.
   - **Beispiel**:
 
     ```toml
@@ -3444,8 +3501,9 @@ Wenn Backend oder Netzwerk stark bandbreitenbeschränkt sind, reduzieren Sie zue
     user_max_tcp_conns_global_each = 200
 
     [access.user_max_tcp_conns]
-    alice = 500   # uses 500, not the global cap
-    # bob hat keinen Eintrag → verwendet 200
+    # Alice uses 500 rather than the global cap.
+    alice = 500
+    # Bob has no entry and therefore uses 200.
     ```
 ## user_expirations
   - **Einschränkungen / Validierung**: `Map<String, DateTime<Utc>>`. Jeder Wert muss eine gültige RFC3339/ISO-8601-Datumszeit sein.
@@ -3463,7 +3521,8 @@ Wenn Backend oder Netzwerk stark bandbreitenbeschränkt sind, reduzieren Sie zue
 
     ```toml
     [access.user_data_quota]
-    alice = 1073741824 # 1 GiB
+    # Alice receives a 1 GiB quota.
+    alice = 1073741824
     ```
 ## user_max_unique_ips
   - **Einschränkungen / Validierung**: `Map<String, usize>`.
@@ -3545,7 +3604,7 @@ Wenn Backend oder Netzwerk stark bandbreitenbeschränkt sind, reduzieren Sie zue
 
 
 ## user_rate_limits
-  - **Einschränkungen / Validierung**: Tabelle `username -> { up_bps, down_bps }`. Mindestens eine Richtung muss ungleich Null sein.
+  - **Einschränkungen / Validierung**: Tabelle `username -> { up_bps, down_bps }`. Jede Richtung muss in `0..=100000000000` liegen; `0` bedeutet für diese Richtung unbegrenzt, und mindestens eine Richtung muss ungleich Null sein.
   - **Beschreibung**: Bandbreitenobergrenzen pro User in Bits/Sekunde für Upload (`up_bps`) und Download (`down_bps`).
   - **Beispiel**:
 
@@ -3554,7 +3613,7 @@ Wenn Backend oder Netzwerk stark bandbreitenbeschränkt sind, reduzieren Sie zue
     alice = { up_bps = 1048576, down_bps = 2097152 }
     ```
 ## cidr_rate_limits
-  - **Einschränkungen / Validierung**: Tabelle `CIDR oder Auto-Template -> { up_bps, down_bps }`. Explizite CIDR-Schlüssel müssen als `IpNetwork` parsbar sein; Auto-Template-Schlüssel müssen `*4/N` (`N=0..32`), `*6/N` (`N=0..128`) oder `*/N` (`N=0..32`) verwenden. Mindestens eine Richtung muss ungleich Null sein. Doppelte normalisierte Auto-Templates werden abgelehnt.
+  - **Einschränkungen / Validierung**: Tabelle `CIDR oder Auto-Template -> { up_bps, down_bps }`. Jede Richtung muss in `0..=100000000000` liegen; `0` bedeutet für diese Richtung unbegrenzt, und mindestens eine Richtung muss ungleich Null sein. Explizite CIDR-Schlüssel müssen als `IpNetwork` parsbar sein; Auto-Template-Schlüssel müssen `*4/N` (`N=0..32`), `*6/N` (`N=0..128`) oder `*/N` (`N=0..32`) verwenden. Doppelte normalisierte Auto-Templates werden abgelehnt.
   - **Beschreibung**: Source-Subnetz-Bandbreitenlimits, die zusätzlich zu Per-User-Limits greifen. Explizite CIDR-Regeln verwenden Longest-Prefix-Wins und haben Vorrang vor Auto-Templates. Auto-Templates erzeugen Buckets lazy pro passendem Source-Subnetz: `*4/N` für IPv4, `*6/N` für IPv6 und `*/N` als Dual-Stack-Shorthand, bei dem IPv4 `/N` und IPv6 `/(N * 4)` nutzt.
   - **Beispiel**:
 
@@ -3683,7 +3742,8 @@ Wenn Backend oder Netzwerk stark bandbreitenbeschränkt sind, reduzieren Sie zue
     [[upstreams]]
     type = "socks5"
     address = "203.0.113.10:1080"
-    interface = "192.0.2.10" # explicit local bind IP
+    # Use an explicit local bind IP.
+    interface = "192.0.2.10"
     ```
 ## bind_addresses
   - **Einschränkungen / Validierung**: `String[]` (optional). Gilt nur für `type = "direct"`.

@@ -22,11 +22,23 @@ Telemt WEB listener
     `-- ordinary or invalid request --> configured decoy site
 ```
 
-Route the complete public vhost to Telemt. Splitting only recognized carrier paths at the TLS terminator would make ordinary and authenticated behavior observably different and would bypass Telemt's decoy policy.
+Route the complete configured WEB scope to Telemt. With the default empty `base_path`, that scope is the complete public vhost. With a non-empty `base_path`, it is the exact slash-terminated subtree. Splitting only recognized carrier endpoints inside that scope would make ordinary and authenticated behavior observably different and would bypass Telemt's decoy policy.
+
+Let `BASE` mean `/` for an empty `base_path`, or `/<base_path>/` otherwise. The public WEB routes are relative to that exact base:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `BASE?bridge=<capability>` | Initial bridge document, or the recovery representation when the recovery `Accept` header and optional bearer are present. |
+| `POST`, `DELETE` | `BASEapi/v1/session` | Create or close the parent session. |
+| `POST` | `BASEapi/v1/up` | HTTPS carrier uplink. |
+| `POST` | `BASEapi/v1/down` | HTTPS carrier downlink. |
+| `GET` | `BASEapi/v1/ws` | WebSocket Upgrade. |
+
+`POST BASEapi/v1/diagnostic` is an internal generated-bridge sideband route, not a public client API. Route matching is case-sensitive and byte-exact: there are no aliases, extra-slash variants, percent-encoded slash variants, or query parameters on carrier endpoints. A wrong-shaped request containing a capability or bearer authenticated by the current process receives a local no-store `404`; an unmatched request without authentic carrier material follows the configured decoy. `base_path` changes only these WEB listener routes. It does not prefix the Control API, `/web-status`, or Prometheus metrics.
 
 ## Supported client contract
 
-- The public endpoint is always `https://HOST:443`.
+- The public endpoint is `https://HOST:443/` when `base_path` is empty and `https://HOST:443/BASE/` otherwise. The base is case-sensitive and exact; Telemt does not redirect, normalize, or strip it before decoy forwarding.
 - `plain` and `dd` 16-byte MTProxy secrets are supported. `ee` FakeTLS secrets are not supported by WEB mode.
 - `web.carrier` selects the sole carrier when auto-negotiation is disabled and the final fallback when it is enabled. `https` uses serialized HTTPS uplink and long polling. `https-lanes` uses independent HTTPS sequencing and polling per logical stream. `websocket` uses one ordered WebSocket for all streams. `websocket-lanes` uses one independently owned WebSocket per non-zero logical stream.
 - Missing `web.carriers` or `web.carriers = false` disables auto-negotiation and learning. A non-empty array enables startup-only sequential negotiation; it never migrates an already committed session.
@@ -40,9 +52,10 @@ Telegram Desktop WEB links omit a port because the client requires port 443:
 ```text
 tg://webproxy?server=proxy.example.com&secret=0123456789abcdef0123456789abcdef
 tg://webproxy?server=proxy.example.com&secret=dd0123456789abcdef0123456789abcdef
+tg://webproxy?server=proxy.example.com%2Ftelegram%2Fweb&secret=cAABAgMEBQYHCAkKCwwNDg8
 ```
 
-Telemt prints links for WEB profiles selected by `[general.links].show` through the existing `telemt::links` log target.
+Telemt prints links at process startup for WEB profiles selected by `[general.links].show` through the existing `telemt::links` log target. Root links keep the legacy hexadecimal secret. A path link percent-encodes `HOST/BASE` in `server` and uses unpadded base64url of `0x70 || client_secret`, where `client_secret` is the raw 16-byte secret in `plain` mode or `0xdd || secret` in `dd` mode. The users API returns only the raw secret, not a WEB link. `[general.links].public_host` and `public_port` affect native links only and do not override WEB vhost links.
 
 ## Prerequisites
 
@@ -81,6 +94,7 @@ http_connection_capacity_action = "drop"
 
 [[web.vhosts]]
 host = "proxy.example.com"
+base_path = "telegram/web"
 public_addr = "203.0.113.10:443"
 
 [web.vhosts.decoy]
@@ -97,7 +111,9 @@ max_streams_per_session = 64
 
 Accepted-socket overload handling is independently configurable. `drop` preserves the legacy close after `accept(2)`. `respond` writes an empty retryable `503` without parsing a request. `wait` waits outside the accept loop for ordinary connection capacity and then enters normal HTTP handling; timeout writes the same `503`. Both waiting and response writing use `web.timeouts.http_overload_timeout_ms` per phase. `web.limits.max_http_overload_connections` bounds sockets outside ordinary capacity and requires a process restart when changed; the action and timeout are hot-reloadable.
 
-`decoy_fasttrack_mode` controls only capability work for `GET/HEAD /`. `off` is the default and preserves the legacy full scan without fast-track counters. `shadow` records which structurally impossible requests could bypass the scan but still performs the complete legacy scan. `enforce` bypasses capability work only for `HEAD` or an absent/noncanonical `bridge` query. Every exact canonical `GET /?bridge=<43-character-base64url>` performs a complete scan across all profiles of the selected vhost, for both matches and misses. The setting requires a process restart; reload persists the desired value but reports `web.decoy_fasttrack_mode` as deferred. Fast-track does not protect against adversarial CPU load because a scanner can always submit canonical candidates, and enforce mode may expose a public request-shape timing class, especially with a static decoy. Do not enable enforce without external timing measurements through the production TLS terminator.
+`base_path` defaults to empty. A non-empty value is at most 128 ASCII bytes and consists of slash-separated `[A-Za-z0-9][A-Za-z0-9_-]*` segments without leading or trailing slash. Root vhosts preserve the v1 capability derivation. Path vhosts use the v2 context over the exact canonical host and base path, so changing case or any segment changes both the route and capability.
+
+`decoy_fasttrack_mode` controls only capability work for `GET/HEAD` at the configured base root. `off` is the default and preserves the legacy full scan without fast-track counters. `shadow` records which structurally impossible requests could bypass the scan but still performs the complete legacy scan. `enforce` bypasses capability work only for `HEAD` or an absent/noncanonical `bridge` query. Every exact canonical bridge GET at the base root performs a complete scan across all profiles of the selected vhost, for both matches and misses. The setting requires a process restart; reload persists the desired value but reports `web.decoy_fasttrack_mode` as deferred. Fast-track does not protect against adversarial CPU load because a scanner can always submit canonical candidates, and enforce mode may expose a public request-shape timing class, especially with a static decoy. Do not enable enforce without external timing measurements through the production TLS terminator.
 
 ## Server-side carrier negotiation
 
@@ -127,7 +143,7 @@ The bridge emits additive v1 status objects with `state`, `phase`, `reason`, and
 
 Attempts are strictly sequential. Accepted `OPEN` or `DATA` progress commits the chosen carrier immediately and permanently closes the pre-commit replacement boundary. A `409` for an authenticated committed chain echoes the committed metadata and is terminal; it is not permission to advance. Exact `/session` replay is used only while that response is ambiguous. Once an authenticated response has selected a provisional carrier, a transport failure requests the next attempt directly; if the previous probe actually committed, the server answers with the terminal `409` instead of permitting an unsafe replacement. The server's final absolute deadline also bounds a successor response that the client never received. Post-commit in-place carrier switching remains unsupported; a surviving bridge recovers by creating a fresh server session.
 
-After commit, an HTTP failure first replays the exact frozen request against the current bearer. A successful replay keeps the current session. WebSocket loss, or a foreground/online/native event after at least `reconnect_grace_secs` of scheduler gap, starts one recovery epoch. The bridge performs exactly one `GET /?bridge=<capability>` with `Accept: application/vnd.telemt.web-recovery+json` and optional current bearer authorization. A positive response is an uncacheable JSON document of at most 1024 bytes containing a fresh bootstrap plus current limits, timeouts, and negotiation policy. Telemt issues that bootstrap before synchronously retiring a matching current session, so recreation remains possible with a one-session capacity. Unknown or already retired bearer authorization receives the same positive representation; malformed recovery headers, disabled admission, pause, drain, and capacity rejection follow the sanitized decoy path.
+After commit, an HTTP failure first replays the exact frozen request against the current bearer. A successful replay keeps the current session. WebSocket loss, or a foreground/online/native event after at least `reconnect_grace_secs` of scheduler gap, starts one recovery epoch. The bridge performs exactly one GET at its original configured base root with `bridge=<capability>`, `Accept: application/vnd.telemt.web-recovery+json`, and optional current bearer authorization. A positive response is an uncacheable JSON document of at most 1024 bytes containing a fresh bootstrap plus current limits, timeouts, and negotiation policy. Telemt issues that bootstrap before synchronously retiring a matching current session, so recreation remains possible with a one-session capacity. Unknown or already retired bearer authorization receives the same positive representation; malformed recovery headers, disabled admission, pause, drain, and capacity rejection follow the sanitized decoy path.
 
 The recovery epoch has one dual wall/monotonic absolute `bridge_recovery_secs` deadline, a single recovery-document request, and bounded carrier retries with 250 ms through 2 s backoff. Recovery status is repeated at most every 2.5 seconds while active. A fresh incarnation aborts and releases old requests, sockets, lanes, and queues, sends one synthetic `CLOSE` for each still-active native stream, suppresses a second `WELCOME`, and commits only after real carrier progress. Retired stream IDs are retained in a bounded set so valid late frames cannot enter a new stream; the native side must allocate a new stream ID. Frequent native reconnect attempts are valid, but they neither extend the recovery epoch nor retain old incarnation state. Destroying the WebView destroys this recovery owner; a native supervisor must then create a new bridge document.
 
@@ -147,9 +163,9 @@ This removes application-level serialization between WEB streams. Public HTTP/2 
 
 All lane queues and resident response bodies remain inside the existing per-session and process-wide byte/item budgets. Telemt additionally limits each lane to `pending_bytes_per_lane` and `pending_items_per_lane`; the generated bridge caps its corresponding queues at 8 MiB and 1024 items. Telemt permits lane long polls to occupy at most half of `web.limits.max_http_handlers`, preserving handler capacity for session creation, uplink, DELETE, and other control work. `https` requires `max_http_handlers >= 2`, and `https-lanes` requires `max_http_handlers >= 4`.
 
-The `/api/v1/up` and `/api/v1/down` paths do not change. In `https-lanes`, every request on those paths carries one canonical decimal `X-Lane-ID`. Uplink sequence starts at `1` and downlink cursor at `0` independently for each lane. Lane zero accepts only session `PONG`; every frame in a non-zero lane must have the same stream ID, and a new lane must begin with `OPEN`. A canonical cursor-zero downlink that reaches Telemt just before its lane `OPEN` waits up to `lane_open_wait_secs` without creating lane state; per-session and process auxiliary permits bound these waits. Expiry returns an empty `204`, while a missing lane with an advanced cursor remains a protocol failure routed through the decoy. After a closed lane's queued and unacknowledged downlink data is drained, Telemt returns an empty response with `X-Lane-Closed: 1`, and the bridge stops polling it. Retries remain byte-identical and replay the original acknowledgement or downlink batch.
+The `/api/v1/up` and `/api/v1/down` suffixes do not change and are appended to the configured base. In `https-lanes`, every request on those paths carries one canonical decimal `X-Lane-ID`. Uplink sequence starts at `1` and downlink cursor at `0` independently for each lane. Lane zero accepts only session `PONG`; every frame in a non-zero lane must have the same stream ID, and a new lane must begin with `OPEN`. A canonical cursor-zero downlink that reaches Telemt just before its lane `OPEN` waits up to `lane_open_wait_secs` without creating lane state; per-session and process auxiliary permits bound these waits. Expiry returns an empty `204`, while a missing lane with an advanced cursor remains a protocol failure routed through the decoy. After a closed lane's queued and unacknowledged downlink data is drained, Telemt returns an empty response with `X-Lane-Closed: 1`, and the bridge stops polling it. Retries remain byte-identical and replay the original acknowledgement or downlink batch.
 
-Both WebSocket carriers still create and delete the parent session over HTTPS. They then use a strict bodyless `GET /api/v1/ws` Upgrade request. `websocket` offers exactly `tproxy-v1.<session-token>` in `Sec-WebSocket-Protocol`; binary messages are ordered carrier batches, and a protocol, deadline, or connection failure closes the complete parent session. `websocket-lanes` offers exactly `tproxy-lane-v1.<session-token>.<stream-id>`, where the stream ID is canonical decimal in `1..=16777215`. Its first binary message must begin with `OPEN`, every frame must use that stream ID, and failure after upgrade closes only that lane. There is no lane-zero WebSocket: HTTPS carries `HELLO` and `WELCOME`, while RFC 6455 Ping/Pong supplies connection liveness.
+Both WebSocket carriers still create and delete the parent session over HTTPS. They then use a strict bodyless Upgrade GET at the configured base plus `/api/v1/ws`. `websocket` offers exactly `tproxy-v1.<session-token>` in `Sec-WebSocket-Protocol`; binary messages are ordered carrier batches, and a protocol, deadline, or connection failure closes the complete parent session. `websocket-lanes` offers exactly `tproxy-lane-v1.<session-token>.<stream-id>`, where the stream ID is canonical decimal in `1..=16777215`. Its first binary message must begin with `OPEN`, every frame must use that stream ID, and failure after upgrade closes only that lane. There is no lane-zero WebSocket: HTTPS carries `HELLO` and `WELCOME`, while RFC 6455 Ping/Pong supplies connection liveness.
 
 Before HTTP `101`, a WebSocket-lane reservation binds to the exact process connection and lane incarnation; an accepted `OPEN` transfers ownership to the exact stream incarnation before its backend task can run. A late poll, close, or reservation drop from an older socket cannot acknowledge, close, or release a replacement that reused the same numeric lane ID.
 
@@ -218,6 +234,8 @@ server {
 
 Place the `map` in NGINX's `http` context. `client_max_body_size` must be at least `web.limits.max_body_bytes`. Read, send, and client timeouts must exceed both the 25-second default long poll and twice the configured WebSocket liveness interval; 65 seconds covers the defaults. Overwrite, rather than append to, `X-Forwarded-For`. Telemt accepts one parseable IP address; if a trusted terminator omits the header, Telemt falls back to the direct peer address, but per-client limits and source policy then see the terminator rather than the real client. Do not enable upstream retries: the bridge performs byte-identical HTTPS retries, while an established WebSocket is never transparently replayed.
 
+For prefix-only cohosting with `base_path = "telegram/web"`, replace `location /` with `location ^~ /telegram/web/`. Keep `proxy_pass http://telemt_web;` without a URI component and do not add `rewrite`; NGINX must forward the original prefix. Requests outside that subtree may use another site, but every request inside it must go to Telemt. Also define an exact `location = /telegram/web` that uses the ordinary non-WEB site behavior, or proxies unchanged to Telemt's decoy path. Otherwise NGINX can synthesize a slash-appending `301` for the no-slash alias, which is not part of the WEB contract.
+
 Public HTTP/2 is mandatory for `https-lanes`; use the equivalent HTTP/2 directive supported by the installed NGINX release. WebSocket Upgrade requires HTTP/1.1, so the public endpoint must also permit HTTP/1.1 and the private NGINX-to-Telemt hop remains HTTP/1.1. Preserve `Connection`, `Upgrade`, and `Sec-WebSocket-*` exactly as shown. Ensure the upstream connection capacity can sustain the expected simultaneous lane polls or WebSocket lanes; `keepalive` controls the idle pool and is not a concurrency limit.
 
 ### Distinguishing refusal from WEB capacity
@@ -250,7 +268,7 @@ backend telemt_web
     server telemt_web_1 127.0.0.1:18080 check
 ```
 
-The frontend or `defaults` section must also set `timeout client 65s` or longer for the default WebSocket liveness interval. HAProxy's public ALPN must include `h2` for `https-lanes` and `http/1.1` for WebSocket Upgrade. Preserve `Connection`, `Upgrade`, and `Sec-WebSocket-*`; do not rewrite the path, raw query, body, or the `Authorization`, `Content-Type`, `X-Up-Seq`, `X-Down-Cursor`, and `X-Lane-ID` carrier headers.
+The frontend or `defaults` section must also set `timeout client 65s` or longer for the default WebSocket liveness interval. HAProxy's public ALPN must include `h2` for `https-lanes` and `http/1.1` for WebSocket Upgrade. Preserve `Connection`, `Upgrade`, and `Sec-WebSocket-*`; do not rewrite the path, raw query, body, or the `Authorization`, `Content-Type`, `X-Up-Seq`, `X-Down-Cursor`, and `X-Lane-ID` carrier headers. For prefix-only cohosting, add `acl telemt_web_path path_beg /telegram/web/` and require both the host and path ACLs on `use_backend`; do not remove the prefix.
 
 ## Lifecycle and reload behavior
 
@@ -259,6 +277,7 @@ The frontend or `defaults` section must also set `timeout client 65s` or longer 
 | WEB listener inventory, bind address, and trust policy | Process-owned; restart Telemt. |
 | Any `[web.limits]` value | Process-owned memory/resource contract; restart Telemt. |
 | `web.enabled`, carrier/negotiation policy, `web.debug`, timeouts, vhosts, profiles, and decoys | Applied by the config watcher or a runtime generation reload. |
+| A vhost `base_path` change | Atomically switches new HTTP routing and capability derivation. Reissue the generated link. Already upgraded WebSockets and in-flight routed exchanges continue. Later old-base requests carrying a process-authentic bootstrap or session token receive a local no-store `404`; the now-inactive old capability follows ordinary decoy handling. An existing session bearer remains usable only on the new exact base, while an unused bootstrap issued for the old capability cannot create a session on the new base. |
 | Operator pause/drain state | Process-owned and ephemeral; survives generation reload, never writes config, and resets to `running` after process restart. |
 | Existing HTTP connections and WEB sessions | Keep their acquisition-time HTTP idle limit, carrier candidates, limits, body timeout, closed-token replay lifetime, and absolute session/negotiation deadlines; each issued bridge embeds its request, retry, recovery, and probe-coalescing values. A recovery epoch freezes its current bridge budget, while a successful recovery representation refreshes the policy used by later epochs and the fresh session. WebSocket upgrade, open, write, backpressure, and eviction operations use the parent session's frozen deadlines. Newly issued bridges use the active policy, while new logical streams use the active relay generation. |
 | Process shutdown | Captures the latest reloaded `web.timeouts.shutdown_secs` once and shares that single absolute deadline across listener acceptors and connections plus WEB sessions and auxiliary tasks. The waits do not receive sequential per-component budgets. |
@@ -268,6 +287,8 @@ Each logical stream keeps its session's creation-time client IP and owns a proce
 HTTP idle accounting protects only explicitly bounded request-body, long-poll, decoy connect/response-head, and pending-Upgrade phases. The operation's own deadline remains exact; if its lease is still present at that instant, the connection watchdog allows at most one connection-idle interval for the scheduled task to publish its timeout/result before forcing closure. Between exchanges, and after a response head is ready, progress resets the idle clock while a stalled response body remains idle-bounded. Completion of an older phase cannot release the deadline protection owned by a newer phase.
 
 An `OPEN` reserves the bounded logical-stream and tuple ownership but does not consume the relay generation's `max_connections` permit. Telemt acquires that permit only after the first inner byte arrives; the frozen first-byte deadline and stream limits bound silent opens, and capacity exhaustion then closes only the affected stream.
+
+Treat a live `base_path` change as a credential-bearing route migration. Stop issuing or distribute no new old links, prepare the new link, drain affected sessions when feasible, apply the reload, verify the new route through the public TLS endpoint, and then distribute the new link. Keep both the old and new frontend prefixes routed to Telemt while old capabilities or tokens may still arrive: Telemt must perform the credential-aware local rejection. One vhost cannot accept both bases simultaneously. A true overlap window requires a second hostname/vhost and, when the same host must be retained, a separate process or deployment boundary.
 
 ## API management
 
@@ -328,6 +349,7 @@ Enable bounded collection in the owned configuration file:
 [web.debug]
 enabled = true
 capture_lifecycle = true
+sideband = true
 capture_headers = true
 capture_timings = true
 capture_frames = true
@@ -343,6 +365,8 @@ Open `http://127.0.0.1:9091/web-status` with the same direct-peer whitelist and 
 The process-owned ring survives runtime generation replacement. Capture-policy changes clear incompatible retained records; window-only changes do not. The ring defaults to 65536 records and 64 MiB retained plus in-flight bytes, the HTML response is capped at 8 MiB, grouping is capped at 1024 groups, and no more than two response bodies retain page permits concurrently. Change `web.limits.debug_records_capacity` or `web.limits.debug_bytes_global` only with a process restart. A hot prefix that fits only a simultaneously increased restart-only capacity is deferred until that restart.
 
 `body_capture = "off"` omits bodies, `metadata` retains lengths and terminal states, `prefix` retains configured prefixes, and `full` retains recognized carrier bodies up to `web.limits.max_body_bytes`. Ordinary decoy bodies remain limited by `decoy_body_prefix_bytes` even in `full` mode. Queries and raw capabilities are never stored; credential header values are omitted; known WEB capabilities and bearer tokens are scrubbed from captured bodies; the displayed key is a non-secret domain-separated fingerprint. Timing ends at Hyper body polling and does not claim kernel flush or TCP acknowledgment.
+
+Generated-bridge sideband reporting is effective only when `enabled`, `capture_lifecycle`, and `sideband` are all `true`. The policy is hot-reloadable, but only newly issued bridge pages contain the reporter. Each page can report each of the eight fixed events at most once: `runtime_started`, `status_posted`, `hello_received`, `boundary_timeout`, `hello_timeout`, `client_close_before_hello`, `document_unloaded_before_hello`, and `runtime_error_before_hello`. Reports are exact canonical JSON POSTs to `BASEapi/v1/diagnostic`, use the bootstrap bearer without consuming it, and do not participate in carrier framing. Malformed or unauthenticated reports follow the sanitized decoy path.
 
 After an administrator or configuration system atomically updates the TOML file, set `TELEMT_API_AUTH` to the exact value configured in `auth_header` and submit an observable generation reload:
 
@@ -379,6 +403,7 @@ See the complete [Control API contract](../Architecture/API/API.md) for request 
 
 - Never expose the plain HTTP WEB listener to an untrusted network. Enforce the restriction with host firewall rules even when it binds to loopback.
 - Disable request-target and authorization logging at the TLS terminator, or use a verified redacted format. Raw queries contain bridge capabilities and `Authorization` contains bootstrap or session bearer credentials.
+- Telemt rejects a request locally when its URI or headers contain an active capability or any authentic token minted by the current process but the request does not match the carrier contract. Such credentials are never forwarded to the decoy. A merely canonical-looking forged value remains ordinary decoy traffic.
 - Keep one stable public address per vhost. If DNS returns several ingress addresses, each deployment must use the address matching its external path.
 - Bootstrap and session registries are process-local. A multi-process or multi-host upstream pool requires affinity for the complete vhost: initial and recovery root GET, session creation, uplink, downlink, WebSocket Upgrade, and DELETE. A single Telemt process needs no extra affinity.
 - An unused bootstrap survives a configuration reload only when the exact profile identity remains active: host, `public_addr`, user, secret mode, carrier candidates, negotiation deadlines, and capability. Existing created sessions retain their immutable carrier and profile identity and remain lifecycle-bounded.
@@ -387,7 +412,7 @@ See the complete [Control API contract](../Architecture/API/API.md) for request 
 ## Initial verification
 
 1. Start the rebuilt Telemt binary with the WEB configuration and confirm that the private listener is bound.
-2. Confirm through the public TLS endpoint that `GET /`, an unknown path, and an invalid `bridge` query return the configured decoy site.
+2. Confirm through the public TLS endpoint that a GET at the configured base root, the no-slash alias, an unknown path inside that base, and an invalid `bridge` query return the intended ordinary site or configured decoy without a synthesized redirect. For prefix-only cohosting, also confirm that the TLS terminator preserves the base path byte-for-byte.
 3. Confirm that Telemt receives one parseable `X-Forwarded-For` address and `Host: proxy.example.com` or `Host: proxy.example.com:443`.
 4. Import the printed `tg://webproxy` link in the intended Telegram Desktop build and establish a proxy connection.
 5. For `https-lanes`, confirm that the public connection negotiated HTTP/2 and exercise at least two simultaneous logical streams; the private Telemt hop remains HTTP/1.1.
@@ -402,10 +427,12 @@ See the complete [Control API contract](../Architecture/API/API.md) for request 
 | --- | --- |
 | WEB configuration is valid on disk but listener behavior did not change | Inspect reload `deferred_process_fields`; listener and `[web.limits]` changes require restart. |
 | Carrier requests reach the decoy | Verify exact vhost, link secret mode, direct proxy CIDR, and one parseable `X-Forwarded-For` value. |
+| A link stopped working after `base_path` changed | Import the newly printed path link and verify that the complete new prefix reaches Telemt unchanged. Existing sessions may recover only through the new exact base; old capabilities cannot be reused. |
+| `/telegram/web` redirects to `/telegram/web/` | Add an exact non-WEB handler for the no-slash path. Only the slash-terminated configured subtree belongs to Telemt's WEB contract. |
 | A racing `https-lanes` downlink reaches the decoy with `404` | Confirm it starts at `X-Down-Cursor: 0`, preserve `X-Lane-ID`, and set `lane_open_wait_secs` above the observed down-before-`OPEN` skew. Advanced cursors for missing lanes intentionally fail closed. |
 | Auto-negotiation advances after traffic was already accepted | This is not valid behavior. Inspect the authenticated `X-Carrier-State` replay and the carrier commit lifecycle row; a committed or healthy response is terminal and requires a new session. |
 | Long polls disconnect near a fixed interval | Raise NGINX/HAProxy client, server, send, and read timeouts above `web.timeouts.long_poll_secs`. |
-| WebSocket Upgrade reaches the decoy instead of returning `101` | Preserve HTTP/1.1 `Connection: Upgrade`, `Upgrade: websocket`, the single exact `Sec-WebSocket-Protocol`, and the canonical bodyless `/api/v1/ws` request. Also check carrier/session compatibility and the process connection reserve. |
+| WebSocket Upgrade reaches the decoy instead of returning `101` | Preserve HTTP/1.1 `Connection: Upgrade`, `Upgrade: websocket`, the single exact `Sec-WebSocket-Protocol`, and the canonical bodyless request at the configured base plus `/api/v1/ws`. Also check carrier/session compatibility and the process connection reserve. |
 | One `websocket-lanes` stream closes while siblings stay connected | This is the intended failure boundary. Inspect that lane's message/frame rows in `/web-status`; malformed, cross-lane, write-timeout, and backend-close paths terminate only the affected lane. |
 | `/web-status` is empty | Confirm `[web.debug].enabled = true`, apply the configuration, select a window within `max_window_secs`, and generate new WEB traffic after the policy change. |
 | `https-lanes` works but streams still block each other | Confirm public HTTP/2 negotiation, preserve `X-Lane-ID`, and provide enough TLS-terminator upstream connections for concurrent private HTTP/1.1 polls. |

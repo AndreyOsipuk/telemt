@@ -57,12 +57,14 @@ Refill работает асинхронно и не должен блокиро
 `Registry` — маршрутизационный индекс между ME и клиентскими сессиями:
 - `conn_id -> канал ответа клиенту`;
 - map биндов `conn_id <-> writer_id`;
+- send routes writer-ов и их replacement state;
 - снимки активности writer-ов и idle-трекинг.
 
 Ключевые инварианты:
 - один `conn_id` маршрутизируется максимум в один активный канал ответа;
 - потеря writer-а приводит к безопасному unbind/cleanup и отправке close;
 - именно `Registry` является источником истины по активным ME-биндам.
+- binding lock registry линеаризует client binds, публикацию writer-а и переход, закрывающий replacement victim для новых binds.
 
 ## Adaptive Floor
 
@@ -100,7 +102,9 @@ Refill работает асинхронно и не должен блокиро
 ### Логика переходов
 - `Warm -> Active`: когда достигнуты условия покрытия/готовности.
 - `Active -> Draining`: при swap поколения, замене endpoint или контролируемом выводе.
-- `Draining -> removed`: после drain TTL/force-close политики (или естественного опустошения).
+- `Draining -> removed`: после естественного опустошения, при effective force-close deadline либо через threshold/control-path eviction. `me_pool_drain_ttl_secs` — порог предупреждений и нижняя граница force-close, а не самостоятельный deadline удаления.
+
+Writer replacement имеет отдельный registry-local lifecycle: `Open -> Preparing -> Retiring`. `Preparing` исключает дублирующую replacement work, но намеренно разрешает новые client binds. Commit повторно проверяет victim под binding lock; `Retiring` отклоняет новые binds. Отмена незакоммиченного reservation возвращает `Open`, а contour writer-а независимо остаётся `Warm`, `Active` или `Draining`.
 
 Такое разделение снижает SPOF-риски и делает cutover предсказуемым.
 
@@ -111,14 +115,17 @@ Generation изолирует эпохи пула при reinit/reconfiguration.
 ### Фазы жизненного цикла
 1. `Bootstrap`: поднимается начальный набор writer-ов.
 2. `Warmup`: создаётся и валидируется новое поколение.
-3. `Activation`: новое поколение становится active после прохождения coverage-gate.
-4. `Drain`: предыдущее поколение переводится в draining, текущим сессиям дают завершиться.
-5. `Retire`: старое поколение удаляется по graceful-правилам.
+3. `Activation`: generation атомарно становится active после commit-time проверки настроенной доли coverage и stale-binding policy.
+4. `Drain`: подходящие по policy старые writers сохраняются как ограниченный stale fallback; покрытые старые writers становятся недоступны для новых binds и входят в retirement во время commit, после чего могут закрыться сразу по его завершении.
+5. `Retire`: draining writers удаляются после опустошения либо по force-close, threshold или явной control policy.
 
 ### Операционные гарантии
-- нельзя активировать поколение частично без минимального покрытия;
-- healthy-клиенты не должны теряться только из-за появления нового поколения;
-- draining-поколение служит буфером для in-flight трафика во время swap.
+- activation атомарна, но committed topology может содержать отсутствующие DC-family groups, если достигнут `me_pool_min_fresh_ratio` и `me_bind_stale_mode` разрешает ограниченный stale fallback. Режим `never` запрещает отсутствующие groups;
+- generation handover ограничен policy и не даёт универсальной zero-drop гарантии: покрытые старые writers могут retire с закрытием их sessions сразу после commit, а для непокрытых groups сохраняются только выбранные stale writers;
+- pending generation владеет только writer-ами, принятыми для её generation и текущей endpoint map; устаревшие задачи не могут публиковать состояние в более новую generation;
+- pending generation привязана к desired-map hash и endpoint revision и переиспользуется не более 1800 секунд;
+- replacement сначала подготавливает successor; под единым binding guard commit сначала переводит predecessor в `Retiring`, а затем регистрирует successor до освобождения guard. Неудачная или отменённая до этой границы подготовка сохраняет predecessor и освобождает reservation;
+- pool-state telemetry публикует число и дефицит pending writers, отсутствующие DC-family groups, актуальность map, orphan warm writers и счётчики фаз replacement `preparing`/`retiring`.
 
 ### Готовность и приём клиентов
 Готовность пула не равна "все endpoint полностью насыщены".
@@ -149,8 +156,9 @@ Runtime специально разделён на две плоскости:
 
 ### Модель владения состоянием
 Владение разделено по доменам:
-- `MePool` владеет жизненным циклом writer-ов и policy-state.
-- `Registry` владеет routing-биндами клиентских сессий.
+- `MePool` владеет inventory writer-ов, contour lifecycle и runtime policy state.
+- Reinit coordinator владеет authority active/pending generation, привязанной к map hash и endpoint revision.
+- `Registry` владеет routing-биндами клиентских сессий, send routes writer-ов и replacement state.
 - `Writer task` владеет исходящей прогрессией ME-сокета.
 - `Reader task` владеет входящим парсингом и dispatch-событиями.
 
@@ -188,6 +196,8 @@ Data Plane не должен ждать операций, не критичны�
 - Для shared map используются короткие и узкие lock-секции.
 - Read-heavy пути избегают длительных write-lock окон.
 - Решения по backpressure локализованы на границе route/channel.
+- Generation и replacement commits используют порядок locks `writers -> registry binding -> reinit coordinator`.
+- После получения registry publication guard до согласованной публикации и retirement state нет cancellation point.
 
 Цель:
 - медленный consumer должен деградировать локально, не останавливая глобальный прогресс writer-а.
@@ -196,6 +206,7 @@ Data Plane не должен ждать операций, не критичны�
 Reader/Writer loop должны быть cancellation-aware:
 - явные cancel token / close command;
 - безопасный unbind/cleanup через registry;
+- RAII replacement reservations возвращают `Preparing` в `Open`, если подготовка отменена до commit;
 - детерминированный порядок: stop admission -> drain/close -> release resources.
 
 ## Модель согласованности
@@ -208,9 +219,10 @@ Reader/Writer loop должны быть cancellation-aware:
 
 ### Согласованность поколения
 Гарантии generation:
-- новое поколение не активируется до прохождения минимального coverage-gate;
-- предыдущее поколение остаётся в `draining` на время handover;
-- принудительный вывод writer-ов ограничен policy (`drain ttl`, optional force-close), а не мгновенный.
+- commit повторно проверяет generation, desired-map hash, endpoint revision и fresh coverage под publication barriers;
+- promotion требует `me_pool_min_fresh_ratio`; отсутствующие DC-family groups дополнительно требуют stale-binding mode, отличного от `never`;
+- writers предыдущей generation сохраняются только там, где их требует выбранная stale-fallback policy. Покрытые writers становятся недоступны для новых binds при commit и могут закрыться сразу после него;
+- draining writers удаляются после опустошения, при effective force-close deadline (`0` сначала выбирает safety fallback 300 секунд, после чего drain TTL остаётся нижней границей) либо по threshold/control-path eviction; один drain TTL только вызывает предупреждения.
 
 ### Согласованность политик
 Изменение policy (`adaptive/static floor`, fallback mode, retries) не должно ломать инварианты маршрутизации уже активных сессий.

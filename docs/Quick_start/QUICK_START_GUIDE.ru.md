@@ -12,6 +12,7 @@ curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh
 ```
 После запуска скрипт запросит:
  - ваш язык (1 - English, 2 - Русский);
+ - порт сервера (нажмите Enter для 443);
  - ваш TLS-домен (нажмите Enter для petrovich.ru).
 
 Во время установки скрипт проверяет, свободен ли порт (по умолчанию **443**). Если порт занят другим процессом - установка завершится с ошибкой. Для повторной установки необходимо освободить порт или указать другой через флаг **-p**.
@@ -23,7 +24,7 @@ curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh
  - **-a, --ad-tag** - ad_tag;
  - **-l, --lang** - язык (1/en или 2/ru).
 
-Если заданы флаги для языка и домена, интерактивных вопросов не будет.
+Если заданы все параметры, интерактивных вопросов не будет.
 
 После завершения установки скрипт выдаст ссылку для подключения клиентов:
 ```bash
@@ -32,7 +33,8 @@ tg://proxy?server=IP&port=PORT&secret=SECRET
 
 ### Установка нужной версии
 ```bash
-curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh -s -- 3.3.39
+TELEMT_VERSION=3.5.7
+curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh -s -- "$TELEMT_VERSION"
 ```
 
 ### Удаление с полной очисткой
@@ -104,21 +106,21 @@ nano /etc/telemt/telemt.toml
 Вставьте свою конфигурацию
 
 ```toml
-### Конфигурационный файл на основе Telemt
-# Мы полагаем, что этих настроек достаточно для большинства сценариев, 
-# где не требуются передовые методы, параметры или специальные решения
+# Minimal Telemt configuration
+# These settings are sufficient for most deployments that do not require
+# advanced methods, parameters, or specialized solutions.
 
-# === Общие настройки ===
+# General settings
 [general]
 use_middle_proxy = true
-# Глобальный ad_tag, если у пользователя нет индивидуального тега в [access.user_ad_tags]
+# Global ad_tag fallback when user has no per-user tag in [access.user_ad_tags]
 # ad_tag = "00000000000000000000000000000000"
-# Индивидуальный ad_tag в [access.user_ad_tags] (32 шестнадцатеричных символа от @MTProxybot)
+# Per-user ad_tag in [access.user_ad_tags] (32 hex from @MTProxybot)
 
-# === Уровень логирования ===
-# Уровень логирования: debug | verbose | normal | silent
-# Можно переопределить с помощью флагов командной строки --silent или --log-level
-# Переменная окружения RUST_LOG имеет абсолютный приоритет над всеми этими настройками
+# Logging
+# Log level: debug | verbose | normal | silent
+# Can be overridden with --silent or --log-level CLI flags
+# RUST_LOG env var takes absolute priority over all of these
 log_level = "normal"
 
 [general.modes]
@@ -128,17 +130,23 @@ tls = true
 
 [general.links]
 show = "*"
-# show = ["alice", "bob"] # Показывать ссылки только для alice и bob
-# show = "*"              # Показывать ссылки для всех пользователей
-# public_host = "proxy.example.com"  # Хост (IP-адрес или домен) для ссылок tg://
-# public_port = 443                  # Порт для ссылок tg:// (по умолчанию: server.port)
+# Only show links for alice and bob
+# show = ["alice", "bob"]
+# Show links for all users
+# show = "*"
+# Host (IP or domain) for tg:// links
+# public_host = "proxy.example.com"
+# Port for tg:// links; defaults to server.port
+# public_port = 443
 
-# === Привязка сервера ===
+# Server binding
 [server]
 port = 443
-# proxy_protocol = false           # Включите, если сервер находится за HAProxy/nginx с протоколом PROXY
+# Enable behind HAProxy/nginx with PROXY protocol
+# proxy_protocol = false
 # metrics_port = 9090
-# metrics_listen = "127.0.0.1:9090"  # Адрес прослушивания для метрик (переопределяет metrics_port)
+# Listen address for metrics; overrides metrics_port
+# metrics_listen = "127.0.0.1:9090"
 # metrics_whitelist = ["127.0.0.1/32", "::1/128"]
 
 [server.api]
@@ -148,19 +156,22 @@ whitelist = ["127.0.0.1/32", "::1/128"]
 minimal_runtime_enabled = false
 minimal_runtime_cache_ttl_ms = 1000
 
-# Прослушивание на нескольких интерфейсах/IP-адресах - IPv4
+# Listen on multiple interfaces/IPs - IPv4
 [[server.listeners]]
 ip = "0.0.0.0"
 
-# === Обход блокировок и маскировка ===
+# Anti-censorship and masking
 [censorship]
-tls_domain = "petrovich.ru"  # Домен Fake-TLS / SNI, который будет использоваться в сгенерированных ee-ссылках
+# Fake-TLS/SNI masking domain used in generated ee links.
+tls_domain = "petrovich.ru"
 mask = true
-tls_emulation = true         # Получить реальную длину сертификата и эмулировать запись TLS
-tls_front_dir = "tlsfront"   # Директория кэша для эмуляции TLS
+# Fetch real certificate lengths and emulate TLS records.
+tls_emulation = true
+# Cache directory for TLS emulation.
+tls_front_dir = "tlsfront"
 
 [access.users]
-# формат: "имя_пользователя" = "секрет_из_32_шестнадцатеричных_символов"
+# format: "username" = "32_hex_chars_secret"
 hello = "00000000000000000000000000000000"
 ```
 
@@ -235,9 +246,10 @@ curl -s http://127.0.0.1:9091/v1/users | jq -r '.data[] | "[\(.username)]", (.li
 
 # Telemt через Docker Compose
 
-**1. Создайте директорию `config/` и поместите в неё отрдеактированный `config.toml` (указав как минимум: порт, пользовательские секреты, tls_domain):**
+**1. Создайте директорию `config/` и поместите в неё отредактированный `config.toml` (указав как минимум порт, пользовательские секреты и `tls_domain`):**
 ```bash
-mkdir config && mv config.toml config/
+mkdir -p config
+mv config.toml config/
 ```
 **2. Запустите контейнер:**
 ```bash
@@ -252,21 +264,26 @@ docker compose logs -f telemt
 docker compose down
 ```
 > [!NOTE]
-> - Директория `./config/` монтируется в `/etc/telemt/` (read-write), что позволяет API атомарно обновлять config.toml
-> - По умолчанию публикуются порты 443:443, а контейнер запускается со сброшенными привилегиями (добавлена только `NET_BIND_SERVICE`)  
-> - Если вам действительно нужна сеть хоста (обычно это требуется только для некоторых конфигураций IPv6), раскомментируйте `network_mode: host`
+> - `docker-compose.yml` монтирует `./config/` в `/etc/telemt/` с правом записи и запускает Telemt с `/etc/telemt/config.toml`.
+> - Монтирование директории необходимо для изменяющих Control API endpoints: Telemt сохраняет полный граф источников конфигурации через временные файлы в тех же директориях и атомарные rename. Не заменяйте его bind mount одного файла.
+> - Host-директория `./config/` и файлы источников должны быть доступны для записи пользователю контейнера (UID/GID `65532` в production image), если включены изменения конфигурации.
+> - `/run/telemt` предоставляется как небольшой записываемый `tmpfs`; остальная файловая система контейнера остаётся read-only.
+> - По умолчанию публично доступен только `443:443`. Опубликованные порты Metrics и Control API ограничены loopback хоста, а из capabilities оставлена только `NET_BIND_SERVICE`.
+> - Публикация порта не включает сервис и не делает доступным listener, привязанный к loopback контейнера. В поставляемом `config.toml` Metrics выключены, а Control API привязан к `127.0.0.1` внутри контейнера. Чтобы использовать любой из host mappings, явно привяжите сервис к адресу, доступному из контейнерной сети, и добавьте в whitelist только непосредственный Docker peer/network; host-side mapping оставьте на loopback.
 
 **Запуск без Docker Compose**
 ```bash
 docker build -t telemt:local .
 docker run --name telemt --restart unless-stopped \
   -p 443:443 \
-  -p 9090:9090 \
-  -p 9091:9091 \
+  -p 127.0.0.1:9090:9090 \
+  -p 127.0.0.1:9091:9091 \
   -e RUST_LOG=info \
-  -v "$PWD/config.toml:/app/config.toml:ro" \
+  -v "$PWD/config:/etc/telemt:rw" \
+  --tmpfs /run/telemt:rw,mode=1777,size=4m \
+  -w /run/telemt \
   --read-only \
   --cap-drop ALL --cap-add NET_BIND_SERVICE \
   --ulimit nofile=65536:65536 \
-  telemt:local
+  telemt:local /etc/telemt/config.toml
 ```

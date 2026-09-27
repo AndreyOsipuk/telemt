@@ -42,8 +42,8 @@ that does not occur in modern browsers.
 > TLS fingerprint has been fixed in latest version of clients for Desktop / Android / iOS.  
 > Please update your client for MTProxy Fake-TLS to work correctly.
 
-- We consider this a breakthrough aspect, which has no stable analogues today
-- Based on this: if `telemt` configured correctly, **TLS mode is completely identical to real-life handshake + communication** with a specified host
+- For investigations based on JA4 ClientHello, see the [Telemt JA3/JA4 analysis guide](Architecture/Fronting-splitting/TLS_JA3_JA4_ANALYSIS.ru.md) (currently available in Russian).
+- Correctly configured TLS fronting preserves the real upstream TLS handshake and response path for unauthenticated traffic. Fingerprint resistance still depends on the client version, selected host, network path, and external validation.
 - Here is our evidence:
     - 212.220.88.77 - "dummy" host, running `telemt`
     - `petrovich.ru` - `tls` + `masking` host, in HEX: `706574726f766963682e7275`
@@ -59,7 +59,10 @@ that does not occur in modern browsers.
     - with original handshake
     - with full request-response way
     - with low-latency overhead
-```bash
+> [!NOTE]
+> The following capture is historical evidence from January 1, 2026, not a live availability check. Its displayed certificate expired on March 1, 2026; validate the current endpoint and certificate independently.
+
+```text
 root@debian:~/telemt# curl -v -I --resolve petrovich.ru:443:212.220.88.77 https://petrovich.ru/
 * Added petrovich.ru:443:212.220.88.77 to DNS cache
 * Hostname petrovich.ru was found in DNS cache
@@ -175,6 +178,24 @@ Those cross-DC requests are normal and happen constantly.
 This is also why it is required for MTProxy to reach Telegram's DC infrastructure as a whole.  
 The proxy itself doesn't care which DC your account lives on. The client negotiates the correct DC through the proxy after connecting.
 
+### What do `dd` and `ee` mean in MTProxy?
+
+They select different proxy modes and appear at the start of the encoded secret. `dd` enables the secure obfuscated transport. `ee` enables Fake TLS and appends the configured SNI domain to the secret. Choose between them according to client support, the censorship environment, and the configured fronting/masking path. Use `ee` only when TLS-shaped traffic is required and validate it through the real public endpoint; WEB mode supports `plain` and `dd`, not `ee`.
+
+### Where are these modes configured?
+
+Configure the modes in `[general.modes]`:
+
+```toml
+[general.modes]
+# Classic MTProxy mode.
+classic = false
+# dd mode.
+secure = false
+# ee Fake TLS mode.
+tls = true
+```
+
 ### How many people can use one link
 By default, an unlimited number of people can use a single link.  
 However, you can limit the number of unique IP addresses for each user:
@@ -223,17 +244,19 @@ This does not recover stale clients, but it makes port 443 wire-indistinguishabl
 2. Add the following parameters:
 ```toml
 [server]
-metrics_port = 9090
-metrics_whitelist = ["127.0.0.1/32", "::1/128", "0.0.0.0/0"]
+metrics_listen = "127.0.0.1:9090"
+metrics_whitelist = ["127.0.0.1/32", "::1/128"]
 ```
 3. Save the changes (Ctrl+S -> Ctrl+X).
-4. After that, metrics will be available at: `SERVER_IP:9090/metrics`. 
+4. Metrics will be available locally at `http://127.0.0.1:9090/metrics`.
 > [!WARNING]
-> The value `"0.0.0.0/0"` in `metrics_whitelist` opens access to metrics from any IP address. It is recommended to replace it with your personal IP, for example: `"1.2.3.4/32"`.
+> Keep metrics on loopback unless a remote collector is required. For remote collection, bind an explicit private address, whitelist only the collector CIDR, and enforce the same boundary in the host firewall. Never expose metrics with a `/0` whitelist.
+
+For load-related counters and operating-system checks, see the [high-load guide](Advanced_settings/HIGH_LOAD.en.md#5-diagnostics--monitoring).
 
 ### Too many open files
 - On a fresh Linux install the default open file limit is low; under load `telemt` may fail with `Accept error: Too many open files`
-- **Systemd**: add `LimitNOFILE=65536` to the `[Service]` section (already included in the example above)
+- **Systemd**: add `LimitNOFILE=65536` to the `[Service]` section.
 - **Docker**: add `--ulimit nofile=65536:65536` to your `docker run` command, or in `docker-compose.yml`:
 ```yaml
 ulimits:
@@ -242,7 +265,7 @@ ulimits:
     hard: 65536
 ```
 - **System-wide** (optional): add to `/etc/security/limits.conf`:
-```
+```conf
 *       soft    nofile  1048576
 *       hard    nofile  1048576
 root    soft    nofile  1048576
@@ -253,17 +276,20 @@ root    hard    nofile  1048576
 ## Additional parameters
 
 ### Domain in the link instead of IP
-To display a domain instead of an IP address in the connection links, add the following lines to the configuration file:
+To display a domain instead of an IP address in native `tg://proxy` links, add the following lines to the configuration file:
 ```toml
 [general.links]
 public_host = "proxy.example.com"
 ```
 
+This setting, together with `public_port`, affects only native links. WEB `tg://webproxy` links always use `[[web.vhosts]].host` and external port `443`.
+
 ### Total server connection limit
 This parameter limits the total number of active connections to the server:
 ```toml
 [server]
-max_connections = 10000    # 0 - unlimited, 10000 - default
+# Zero disables the limit; 10000 is the default.
+max_connections = 10000
 ```
 
 ### Upstream Manager
@@ -275,27 +301,36 @@ To configure outbound connections (upstreams), add the corresponding parameters 
 type = "direct"
 weight = 1
 enabled = true
-interface = "192.168.1.100" # Replace with your outbound IP
+# Replace this value with your outbound IP.
+interface = "192.168.1.100"
 ```
 
 #### Using SOCKS4/5 as an Upstream
 - Without authorization:
 ```toml
 [[upstreams]]
-type = "socks5"            # Specify SOCKS4 or SOCKS5
-address = "1.2.3.4:1234"   # SOCKS-server Address
-weight = 1                 # Set Weight for Scenarios
+# Specify SOCKS4 or SOCKS5.
+type = "socks5"
+# SOCKS server address.
+address = "1.2.3.4:1234"
+# Selection weight.
+weight = 1
 enabled = true
 ```
 
 - With authorization:
 ```toml
 [[upstreams]]
-type = "socks5"            # Specify SOCKS4 or SOCKS5
-address = "1.2.3.4:1234"   # SOCKS-server Address
-username = "user"          # Username for Auth on SOCKS-server
-password = "pass"          # Password for Auth on SOCKS-server
-weight = 1                 # Set Weight for Scenarios
+# Specify SOCKS4 or SOCKS5.
+type = "socks5"
+# SOCKS server address.
+address = "1.2.3.4:1234"
+# SOCKS username.
+username = "user"
+# SOCKS password.
+password = "pass"
+# Selection weight.
+weight = 1
 enabled = true
 ```
 

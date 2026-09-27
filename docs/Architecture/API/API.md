@@ -40,7 +40,7 @@ Runtime validation for API config:
 | Content type | `application/json; charset=utf-8` |
 | Prefix | `/v1` |
 | Optimistic concurrency | `If-Match: <revision>` on mutating requests (optional) |
-| Revision format | SHA-256 hex of current `config.toml` content |
+| Revision format | SHA-256 hex of the canonical recursive source manifest: normalized source paths plus each source's raw bytes. Formatting, comments, and path changes therefore change the revision. |
 
 ### Success Envelope
 ```json
@@ -175,7 +175,7 @@ Notes:
 | `POST /v1/users` | Creates a user and returns the effective user view plus secret. |
 | `GET /v1/users/{username}` | Returns one disk-first user view or `404` when absent. |
 | `PATCH /v1/users/{username}` | Updates selected per-user fields with JSON Merge Patch semantics. |
-| `DELETE /v1/users/{username}` | Deletes one user and related per-user access-map entries. |
+| `DELETE /v1/users/{username}` | Deletes one user and related API-managed per-user access-map entries. It does not modify `access.user_source_deny`. |
 | `POST /v1/users/{username}/rotate-secret` | Rotates one user's secret and returns the effective secret. |
 | `POST /v1/users/{username}/enable` | Enables one user, removing any disabled override from config. |
 | `POST /v1/users/{username}/disable` | Disables one user and closes active runtime sessions for that user. |
@@ -194,7 +194,7 @@ Notes:
 | `403` | `read_only` | Mutating endpoint called while `read_only=true`. |
 | `404` | `not_found` | Unknown route, unknown user, or unsupported sub-route. |
 | `405` | `method_not_allowed` | Unsupported method for `/v1/users/{username}` route shape. |
-| `409` | `revision_conflict` | `If-Match` revision mismatch. |
+| `409` | `revision_conflict` | `If-Match` mismatch, or the source graph/owner changed during a fenced write. |
 | `409` | `reload_in_progress` | Another reload operation is non-terminal. |
 | `409` | `web_runtime_mismatch` | A runtime instance, session reference, or operation reference belongs to another WEB process instance. |
 | `409` | `web_issuance_enabled` | A WEB close-all operation was requested while effective issuance remained enabled. |
@@ -264,14 +264,14 @@ Notes:
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `secret` | `string` | no | Exactly 32 hex chars. |
-| `user_ad_tag` | `string|null` | no | Exactly 32 hex chars; `null` removes the per-user ad tag. |
-| `max_tcp_conns` | `usize|null` | no | Per-user concurrent TCP limit; `null` removes the per-user override. |
-| `expiration_rfc3339` | `string|null` | no | RFC3339 expiration timestamp; `null` removes the expiration. |
-| `data_quota_bytes` | `u64|null` | no | Per-user traffic quota; `null` removes the per-user quota. |
-| `rate_limit_up_bps` | `u64|null` | no | Per-user upload rate limit in bits per second; `null` removes the upload direction limit. |
-| `rate_limit_down_bps` | `u64|null` | no | Per-user download rate limit in bits per second; `null` removes the download direction limit. |
-| `max_unique_ips` | `usize|null` | no | Per-user unique source IP limit; `null` removes the per-user override. |
-| `enabled` | `bool|null` | no | `false` disables the user. `true` or `null` removes the disabled override, so the user is enabled. |
+| `user_ad_tag` | `string` or `null` | no | Exactly 32 hex chars; `null` removes the per-user ad tag. |
+| `max_tcp_conns` | `usize` or `null` | no | Per-user concurrent TCP limit; `null` removes the per-user override. |
+| `expiration_rfc3339` | `string` or `null` | no | RFC3339 expiration timestamp; `null` removes the expiration. |
+| `data_quota_bytes` | `u64` or `null` | no | Per-user traffic quota; `null` removes the per-user quota. |
+| `rate_limit_up_bps` | `u64` or `null` | no | Per-user upload rate limit in bits per second; `null` removes the upload direction limit. |
+| `rate_limit_down_bps` | `u64` or `null` | no | Per-user download rate limit in bits per second; `null` removes the download direction limit. |
+| `max_unique_ips` | `usize` or `null` | no | Per-user unique source IP limit; `null` removes the per-user override. |
+| `enabled` | `bool` or `null` | no | `false` disables the user. `true` or `null` removes the disabled override, so the user is enabled. |
 
 ### `access.user_source_deny` via API
 - In current API surface, per-user deny-list is **not** exposed as a dedicated field in `CreateUserRequest` / `PatchUserRequest`.
@@ -290,7 +290,7 @@ bob = ["198.51.100.42/32"]
 
 ### `PatchConfigRequest`
 
-A sparse JSON object containing only the top-level config sections to modify. Each key must be one of the editable sections (`general`, `timeouts`, `censorship`, `upstreams`, `dc_overrides`, `web`) or the partially editable `server` object (only `listeners` is allowed under `server`; see below). Tables within a section are deep-merged field-by-field into the existing config; arrays and scalar values replace the existing value wholesale. Untouched sections and file comments are preserved.
+A sparse JSON object containing only the top-level config sections to modify. Each key must be one of the editable sections (`general`, `timeouts`, `censorship`, `upstreams`, `dc_overrides`, `web`) or the partially editable `server` object (only `listeners` is allowed under `server`; see below). Tables within a section are deep-merged field-by-field into the existing config; arrays and scalar values replace the existing value wholesale. Untouched table bodies and other source files remain byte-identical; a touched TOML table body is reserialized, so comments and formatting inside it can change.
 
 **Rejected keys:**
 - `access` → `400 access_not_editable` (users/secrets are managed via `POST/PATCH /v1/users`).
@@ -323,15 +323,15 @@ Returned by `GET /v1/config` as the envelope `data`. The fields are exactly the 
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `general` | `object?` | `[general]` section, if present in config. |
-| `timeouts` | `object?` | `[timeouts]` section, if present. |
-| `censorship` | `object?` | `[censorship]` section, if present. |
-| `upstreams` | `object?` | `[upstreams]` section, if present. |
-| `dc_overrides` | `object?` | `[dc_overrides]` section, if present. |
-| `web` | `object?` | Complete authored `[web]` section, if present. The derived runtime-only `web.runtime` field is excluded. |
+| `general` | `object` | Complete normalized `[general]` section, including defaults. |
+| `timeouts` | `object` | Complete normalized `[timeouts]` section, including defaults. |
+| `censorship` | `object` | Complete normalized `[censorship]` section, including defaults. |
+| `upstreams` | `object[]` | Complete normalized upstream array. When no upstream is authored, the loader inserts one enabled direct upstream. |
+| `dc_overrides` | `object` | Complete normalized DC override map, including the synthesized DC 203 endpoint when it is not authored. |
+| `web` | `object` | Complete normalized `[web]` section, including defaults. Each `web.vhosts[]` item includes `base_path` (empty string when omitted in TOML). The derived runtime-only `web.runtime` field is excluded. |
 | `server` | `object?` | Partial `[server]` view when editable nested fields are present. Currently only `listeners` may appear; `api`/`admin_api`, `port`, unix sockets, and other bind-identity fields are never returned. |
 
-Sections absent from the config file are absent from the response (not `null`). Only the editable sections above are returned; `access` (users/secrets) and `network` (per-node addresses) are always excluded. Under `server`, only the nested field-level allowlist (`listeners`) is exposed. Changes under `[web.limits]` are valid desired configuration but remain process-deferred; the patch response reports `web.limits` in `deferred_process_fields` until restart.
+The editable typed sections are serialized from the fully defaulted configuration, even when omitted from the source files. Only the editable sections above are returned; `access` (users/secrets) and `network` (per-node addresses) are always excluded. Under `server`, only the nested field-level allowlist (`listeners`) is exposed, and an empty listener array is omitted. Changes under `[web.limits]` are valid desired configuration but remain process-deferred; the patch response reports `web.limits` in `deferred_process_fields` until restart.
 
 ### WEB runtime identity and lifecycle
 
@@ -463,9 +463,9 @@ Returned by `PATCH /v1/config` on success (`200`, or `202` when a reload was acc
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `revision` | `string` | SHA-256 hex of the config file after the patch was written. |
+| `revision` | `string` | SHA-256 hex of the canonical recursive source manifest after the patch was written. |
 | `restart_required` | `bool` | Legacy classifier result: `true` when the old file watcher alone cannot apply every changed field. Use `runtime_reload_required` and `process_restart_required` for new integrations. |
-| `runtime_reload_required` | `bool` | `true` when full effect requires a Maestro runtime-generation reload rather than the legacy hot-field overlay. |
+| `runtime_reload_required` | `bool` | `true` when effective runtime-owned state differs and must be activated. With a reload query an operation is enqueued; without one, supported hot fields may be applied by the file watcher. |
 | `process_restart_required` | `bool` | `true` when a process-owned field changed and remains deferred after an in-process reload. |
 | `deferred_process_fields` | `string[]` | Process-owned sockets, paths, capacities, or policies retained by the active process. |
 | `changed` | `string[]` | Top-level section names that differed between the old and new config (e.g. `["censorship"]`). |
@@ -495,7 +495,6 @@ Returned by `PATCH /v1/config` on success (`200`, or `202` when a reload was acc
 | `connections_bad_total` | `u64` | Failed/invalid client connections. |
 | `connections_bad_by_class` | `ClassCount[]` | Failed/invalid connections grouped by class. |
 | `handshake_failures_by_class` | `ClassCount[]` | Handshake failures grouped by class. |
-| `handshake_failures_by_stage` | `StageCount[]` | Handshake failures grouped by state-machine stage. |
 | `handshake_timeouts_total` | `u64` | Handshake timeout count. |
 | `configured_users` | `usize` | Number of configured users in config. |
 
@@ -504,38 +503,6 @@ Returned by `PATCH /v1/config` on success (`200`, or `202` when a reload was acc
 | --- | --- | --- |
 | `class` | `string` | Failure class label. |
 | `total` | `u64` | Counter value for this class. |
-
-#### `StageCount`
-| Field | Type | Description |
-| --- | --- | --- |
-| `stage` | `string` | State-machine stage label. |
-| `total` | `u64` | Counter value for this stage. |
-
-#### Handshake failure stage diagnostics
-
-`handshake_failures_by_class` and `telemt_handshake_failures_by_class_total` describe the error kind. `handshake_failures_by_stage` and `telemt_handshake_failures_by_stage_total` describe where the same failure happened in the handshake state machine.
-
-This does not add a DPI verdict or any protocol decision. The stage is derived from the existing Telemt handshake control flow and is counted only when the existing handshake failure or timeout accounting path is reached.
-
-Fixed stage labels:
-
-| Stage | Meaning |
-| --- | --- |
-| `first_packet_prelude` | Reading the first 5 bytes before selecting the TLS or direct branch. |
-| `tls_clienthello_body` | Reading the TLS ClientHello body after the TLS record header. |
-| `tls_core` | Running the TLS-F handshake/auth flow. |
-| `tls_post_serverhello_mtproto` | Waiting for the 64-byte MTProto handshake after TLS ServerHello. |
-| `direct_mtproto` | Reading the direct classic/secure 64-byte MTProto handshake. |
-
-Example:
-
-```text
-telemt_handshake_failures_by_class_total{class="expected_64_got_0_unexpected_eof"} 3
-telemt_handshake_failures_by_stage_total{stage="direct_mtproto"} 1
-telemt_handshake_failures_by_stage_total{stage="tls_post_serverhello_mtproto"} 2
-```
-
-This means the same EOF-while-reading-64-bytes failure happened once in the direct MTProto path and twice after TLS ServerHello.
 
 ### `SystemInfoData`
 | Field | Type | Description |
@@ -550,7 +517,7 @@ This means the same EOF-while-reading-64-bytes failure happened once in the dire
 | `process_started_at_epoch_secs` | `u64` | Process start time as Unix epoch seconds. |
 | `uptime_seconds` | `f64` | Process uptime in seconds. |
 | `config_path` | `string` | Active config file path used by runtime. |
-| `config_hash` | `string` | SHA-256 hash of current config content (same value as envelope `revision`). |
+| `config_hash` | `string` | SHA-256 hash of the canonical recursive configuration source manifest (same value as envelope `revision`). |
 | `config_reload_count` | `u64` | Number of successfully observed config updates since process start. |
 | `last_config_reload_epoch_secs` | `u64?` | Unix epoch seconds of the latest observed config reload; null/absent before first reload. |
 
@@ -730,6 +697,15 @@ This means the same EOF-while-reading-64-bytes failure happened once in the dire
 | --- | --- | --- |
 | `enabled` | `bool` | Hardswap feature toggle. |
 | `pending` | `bool` | `true` when pending generation is non-zero. |
+| `pending_writers_current` | `usize` | Authoritative warm writers owned by the pending generation. |
+| `pending_writer_deficit` | `usize` | Writers still required to satisfy the pending generation floor. |
+| `pending_missing_dc_groups` | `usize` | Desired DC-family groups below the pending generation floor. |
+| `pending_map_current` | `bool?` | Whether the pending generation targets the current endpoint map; serialized as `null` when no comparison is available. |
+| `orphan_warm_writers_current` | `usize` | Warm writers not owned by the pending generation. |
+| `replacement_preparing_current` | `usize` | Writer replacements preparing a successor. |
+| `replacement_retiring_current` | `usize` | Writer replacements retiring a predecessor. |
+
+With no pending generation, `pending_map_current` is `null`. When it is `false`, the pending writer, deficit, and missing-group coverage fields are intentionally zero rather than computed against stale ownership. `orphan_warm_writers_current` counts non-draining Warm writers not owned by a current-map pending generation, so every Warm writer is orphaned when pending ownership is absent or stale. Replacement counts are independent of pending state.
 
 #### `RuntimeMePoolStateWriterData`
 | Field | Type | Description |
@@ -950,7 +926,7 @@ This means the same EOF-while-reading-64-bytes failure happened once in the dire
 | `kdf` | `RuntimeMeSelftestKdfData` | KDF EWMA health state. |
 | `timeskew` | `RuntimeMeSelftestTimeskewData` | Date-header skew health state. |
 | `ip` | `RuntimeMeSelftestIpData` | Interface IP family classification. |
-| `pid` | `RuntimeMeSelftestPidData` | Process PID marker (`one|non-one`). |
+| `pid` | `RuntimeMeSelftestPidData` | Process PID marker (`one` or `non-one`). |
 | `bnd` | `RuntimeMeSelftestBndData` | SOCKS BND.ADDR/BND.PORT health state. |
 
 #### `RuntimeMeSelftestKdfData`
@@ -1039,7 +1015,7 @@ This means the same EOF-while-reading-64-bytes failure happened once in the dire
 | Field | Type | Description |
 | --- | --- | --- |
 | `username` | `string` | Username. |
-| `current_connections` | `u64` | Current live connections for user. |
+| `current_connections` | `u64` | Authoritative process-scoped live connections for the user across runtime generations. |
 | `total_octets` | `u64` | Cumulative (`client->proxy + proxy->client`) octets. |
 
 #### `RuntimeEdgeConnectionTelemetryData`
@@ -1126,18 +1102,21 @@ JA3 follows the Salesforce ClientHello field order. JA4 follows the FoxIO TLS-cl
 | `connections_bad_total` | `u64` | Failed/invalid connections. |
 | `connections_bad_by_class` | `ClassCount[]` | Failed/invalid connections grouped by class. |
 | `handshake_failures_by_class` | `ClassCount[]` | Handshake failures grouped by class. |
-| `handshake_failures_by_stage` | `StageCount[]` | Handshake failures grouped by state-machine stage. |
 | `handshake_timeouts_total` | `u64` | Handshake timeouts. |
 | `accept_permit_timeout_total` | `u64` | Listener admission permit acquisition timeouts. |
 | `configured_users` | `usize` | Configured user count. |
 | `telemetry_core_enabled` | `bool` | Core telemetry toggle. |
 | `telemetry_user_enabled` | `bool` | User telemetry toggle. |
-| `telemetry_me_level` | `string` | ME telemetry level (`off|normal|verbose`). |
+| `telemetry_me_level` | `string` | ME telemetry level (`silent`, `normal`, or `debug`). |
 | `conntrack_control_enabled` | `bool` | Whether conntrack control is enabled by policy. |
 | `conntrack_control_available` | `bool` | Whether conntrack control backend is currently available. |
 | `conntrack_pressure_active` | `bool` | Current conntrack pressure flag. |
 | `conntrack_event_queue_depth` | `u64` | Current conntrack close-event queue depth. |
 | `conntrack_rule_apply_ok` | `bool` | Last conntrack rule application state. |
+| `conntrack_rule_reconcile_success_total` | `u64` | Successful process-owned firewall reconciliations. |
+| `conntrack_rule_reconcile_error_total` | `u64` | Failed process-owned firewall reconciliations. |
+| `conntrack_rule_rollback_success_total` | `u64` | Successful rollback attempts after partial firewall application. |
+| `conntrack_rule_rollback_error_total` | `u64` | Failed rollback attempts after partial firewall application. |
 | `conntrack_delete_attempt_total` | `u64` | Conntrack delete attempts. |
 | `conntrack_delete_success_total` | `u64` | Successful conntrack deletes. |
 | `conntrack_delete_not_found_total` | `u64` | Conntrack delete misses. |
@@ -1222,6 +1201,7 @@ JA3 follows the Salesforce ClientHello field order. JA4 follows the FoxIO TLS-cl
 | `reconnect_success_total` | `u64` | Successful reconnects. |
 | `handshake_reject_total` | `u64` | ME handshake rejects. |
 | `handshake_error_codes` | `ZeroCodeCount[]` | Handshake rejects grouped by code. |
+| `handshake_error_code_overflow_total` | `u64` | Handshake rejects whose new error code exceeded the bounded 64-code breakdown. |
 | `reader_eof_total` | `u64` | ME reader EOF events. |
 | `idle_close_by_peer_total` | `u64` | Idle closes initiated by peer. |
 | `route_drop_no_conn_total` | `u64` | Route drops due to missing bound connection. |
@@ -1479,7 +1459,7 @@ JA3 follows the Salesforce ClientHello field order. JA4 follows the FoxIO TLS-cl
 | `rate_limit_up_bps` | `u64?` | Optional upload rate limit in bits per second. |
 | `rate_limit_down_bps` | `u64?` | Optional download rate limit in bits per second. |
 | `max_unique_ips` | `usize?` | Optional unique IP limit. |
-| `current_connections` | `u64` | Current live connections. |
+| `current_connections` | `u64` | Authoritative process-scoped live connections for this user across runtime generations; independent of optional per-user telemetry. |
 | `active_unique_ips` | `usize` | Current active unique source IPs. |
 | `active_unique_ips_list` | `ip[]` | Current active unique source IP list. |
 | `recent_unique_ips` | `usize` | Unique source IP count inside the configured recent window. |
@@ -1494,6 +1474,9 @@ JA3 follows the Salesforce ClientHello field order. JA4 follows the FoxIO TLS-cl
 | `active_ips` | `ip[]` | Active source IPs for this user. |
 
 #### `UserLinks`
+
+`UserLinks` contains only native MTProxy links. It never contains a WEB `tg://webproxy` link; WEB links use a separate startup-only derivation contract based on `web.vhosts[].host`, `base_path`, and profile secret mode.
+
 | Field | Type | Description |
 | --- | --- | --- |
 | `classic` | `string[]` | Active `tg://proxy` links for classic mode. |
@@ -1546,16 +1529,19 @@ Returns the current editable config sections as TOML-shaped JSON, plus the curre
 
 **Auth:** requires `Authorization` header when `auth_header` is configured (same as all other endpoints).
 
-**Success `200` response body** (`data` field of the standard envelope):
+**Abridged success `200` response body:**
 ```json
 {
-  "revision": "<sha256-hex>",
-  "censorship": {"tls_domain": "front.example.com"},
-  "general": {"log_level": "normal"}
+  "ok": true,
+  "data": {
+    "censorship": {"tls_domain": "front.example.com"},
+    "general": {"log_level": "normal"}
+  },
+  "revision": "<sha256-hex>"
 }
 ```
 
-The response is built from the validated, include-expanded configuration and may therefore contain normalized defaults or synthesized listeners that are absent from the root file. Only `GET` and `PATCH` are accepted; any other method returns `405 Method Not Allowed` with `Allow: GET, PATCH`.
+The real `data` object contains every fully defaulted editable section; the example omits most fields for readability. The response is built from the validated, include-expanded configuration and may therefore contain normalized defaults or synthesized listeners that are absent from the root file. Only `GET` and `PATCH` are accepted; any other method returns `405 Method Not Allowed` with `Allow: GET, PATCH`.
 
 ---
 
@@ -1571,20 +1557,20 @@ Applies a sparse patch to the editable config sections. The merged config is ful
 | --- | --- | --- |
 | `Authorization` | when configured | Same token as all other endpoints. |
 | `Content-Type: application/json` | recommended | Not enforced, but body must be valid JSON. |
-| `If-Match: <revision>` | no | Optimistic concurrency. `<revision>` is the `revision` value from `GET /v1/config` or `config_hash` from `GET /v1/system/info`. It covers the complete recursive include graph. If supplied and it does not match the current source manifest, returns `409 revision_conflict`. If omitted, the patch applies unconditionally. |
+| `If-Match: <revision>` | no | Optimistic concurrency. `<revision>` is the `revision` value from `GET /v1/config` or `config_hash` from `GET /v1/system/info`. It covers the complete recursive include graph. If supplied and it does not match the current source manifest, returns `409 revision_conflict`. Omitting it removes the caller precondition, but the internal graph/owner race fence can still return the same conflict. |
 
-**Editable sections:** `general`, `timeouts`, `censorship`, `upstreams`, `dc_overrides`, plus partially editable `server` (only nested `listeners`).
+**Editable sections:** `general`, `timeouts`, `censorship`, `upstreams`, `dc_overrides`, `web`, plus partially editable `server` (only nested `listeners`).
 
 **Rejected keys and their error codes:**
 
 | Key | HTTP | `error.code` |
 | --- | --- | --- |
 | `access` | `400` | `access_not_editable` |
-| `network`, `web`, or any unknown top-level key | `400` | `section_not_editable` |
+| `network` or any unknown top-level key | `400` | `section_not_editable` |
 | `server` with keys other than `listeners` | `400` | `field_not_editable` |
 | Object with no editable key | `400` | `bad_request` |
 
-**Merge semantics:** tables are deep-merged field-by-field; arrays and scalar values replace the existing value wholesale. A mutation is written to the single source file that owns every touched semantic section. File comments, the root file when it is not the owner, and all other include files are preserved. A target split across sources, a patch spanning multiple owners, or an include directive nested inside a TOML table returns `409 config_patch_not_atomic` without writing any file.
+**Merge semantics:** tables are deep-merged field-by-field; arrays and scalar values replace the existing value wholesale. In particular, `web.vhosts` is an array: changing one vhost `base_path` requires sending the complete vhost array, including every retained vhost and each required `host`, `public_addr`, `decoy`, and profile field. A mutation is written to the single source file that owns every touched semantic section. Untouched table bodies, the root file when it is not the owner, and all other include files remain byte-identical; touched TOML table bodies are reserialized and may lose their internal formatting or comments. A target split across sources, a patch spanning multiple owners, or an include directive nested inside a TOML table returns `409 config_patch_not_atomic` without writing any file.
 
 **Validation:** the merged config is deserialized into the full `ProxyConfig` type and validated before writing. Failures return `400` with a descriptive message; the file is not modified.
 
@@ -1623,10 +1609,28 @@ Without a `reload` query parameter, the endpoint writes the patch and the file w
 
 - `revision` — SHA-256 hex of the canonical source manifest after the write, including every recursive include path and its raw bytes.
 - `restart_required` — legacy file-watcher classification retained for compatibility.
-- `runtime_reload_required` — reports whether a full Maestro generation reload is needed for runtime effect.
-- `process_restart_required` and `deferred_process_fields` — report process-owned sockets, paths, capacities, or policies that remain unchanged by an in-process reload, including `web.decoy_fasttrack_mode`. A pure listener endpoint move is reloadable only when every retained endpoint keeps identical bind policy and neither the active nor desired listener set uses SYN limiting; same-address MSS, PROXY protocol, backlog, reuse, or SYN-limit changes remain deferred.
+- `runtime_reload_required` — reports that effective runtime-owned state differs and needs activation. With an explicit reload query Telemt enqueues the immutable snapshot; otherwise the watcher may apply supported hot fields.
+- `process_restart_required` and `deferred_process_fields` — report process-owned sockets, paths, capacities, or policies that remain unchanged by an in-process reload, including `web.decoy_fasttrack_mode`. A native-listener endpoint-only move is reloadable only when the complete WEB listener plan remains identical, every retained endpoint keeps identical bind policy, and neither the active nor desired listener set uses SYN limiting; same-address MSS, PROXY protocol, backlog, reuse, or SYN-limit changes remain deferred.
 - `changed` — list of top-level section names that differed.
 - `reload` — accepted operation metadata; omitted without a reload query and for process-only patches that cannot change the active generation.
+
+Example — replace the complete vhost array while changing one `base_path`:
+
+```json
+{
+  "web": {
+    "vhosts": [{
+      "host": "proxy.example.com",
+      "base_path": "telegram/web",
+      "public_addr": "203.0.113.10:443",
+      "decoy": {"mode": "http_upstream", "upstream": "http://127.0.0.1:18081"},
+      "profiles": [{"user": "web-user", "secret_mode": "dd"}]
+    }]
+  }
+}
+```
+
+A valid base-path-only change reports `restart_required=false`, `runtime_reload_required=true`, `process_restart_required=false`, `deferred_process_fields=[]`, and `changed=["web"]`. An invalid path returns `400 bad_request`; no source file or active runtime state changes.
 
 **Status codes:**
 
@@ -1641,7 +1645,7 @@ Without a `reload` query parameter, the endpoint writes the patch and the file w
 | `401` | `unauthorized` | Missing or invalid `Authorization` header. |
 | `403` | `read_only` | API is in read-only mode. |
 | `405` | `method_not_allowed` | Method other than `GET` or `PATCH` used on `/v1/config`. |
-| `409` | `revision_conflict` | `If-Match` header supplied but does not match current revision. |
+| `409` | `revision_conflict` | `If-Match` does not match, or the source graph/owner changes during the fenced write. |
 | `409` | `reload_in_progress` | Another runtime reload is active; the patch is not written. |
 | `409` | `config_patch_not_atomic` | Touched semantic sections have multiple source owners or cannot be mutated as one source-file transaction. |
 | `500` | `internal_error` | I/O or serialization failure. |
@@ -1690,19 +1694,22 @@ The API exposes WEB desired configuration through the common config resource, pr
 
 | Operation | Current contract |
 | --- | --- |
-| Read or patch `[web]`, vhosts, profiles, decoys, timeouts, or limits | Supported through `GET` and `PATCH /v1/config`; `web.runtime` is derived and excluded. Tables deep-merge, arrays replace wholesale; `web.limits` and `web.decoy_fasttrack_mode` remain process-deferred. |
-| Persist `server.listeners` | Supported through `PATCH /v1/config`. Arrays replace wholesale. A changed WEB listener is process-owned and remains deferred until process restart. |
+| Read or patch `[web]`, vhosts, profiles, decoys, timeouts, or limits | Supported through `GET` and `PATCH /v1/config`; `web.runtime` is derived and excluded. Tables deep-merge, arrays replace wholesale; changing one `web.vhosts[].base_path` therefore requires the complete vhost array. `web.limits` and `web.decoy_fasttrack_mode` remain process-deferred. |
+| Persist `server.listeners` | Supported through `PATCH /v1/config`; arrays replace wholesale. A native endpoint-only change may rebind in-process under the constraints above. Any WEB listener-plan change and unsupported native policy change remain deferred until process restart. |
 | Apply an externally edited WEB config | Update the owning TOML source, call `POST /v1/system/reload`, then poll `GET /v1/system/reload/{id}`. |
-| Inspect restart requirements | Read `deferred_process_fields` from reload status. `server.listeners`, `web.limits`, and `web.decoy_fasttrack_mode` require process restart. |
+| Inspect restart requirements | Read `deferred_process_fields` from reload status. Unsupported `server.listeners` changes, `web.limits`, and `web.decoy_fasttrack_mode` require process restart. |
 | Inspect WEB lifecycle, capacity, sessions, operations, learning, and debug state | Use the authenticated `GET /v1/runtime/web/*` routes documented above. |
+| Pause, drain, or resume new WEB work | Use `POST /v1/runtime/web/lifecycle/pause`, `/drain`, or `/resume` with the current `runtime_instance`. |
 | Close selected or all point-in-time sessions | Use `POST /v1/runtime/web/sessions/close`; close-all first requires effective issuance to be disabled. |
 | Clear debug records or reset carrier learning | Use `POST /v1/runtime/web/debug/clear` or `/carrier-learning/reset` with the current `runtime_instance`. |
 | Manage access users | Use `/v1/users`. Creating a user does not add it to `web.vhosts.profiles`; add profile membership through the `web` config patch. |
 | Disable one user | `POST /v1/users/{username}/disable` updates admission immediately and cancels the user's active sessions. |
-| Rotate a profiled user's secret | Use `/v1/users/{username}/rotate-secret`; the config watcher rebuilds WEB capabilities from the new access snapshot. The API returns the secret, not a `tg://webproxy` link. |
+| Rotate a profiled user's secret | Use `/v1/users/{username}/rotate-secret`; the durable credential identity is staged immediately and active owners for the old identity are cancelled. The config watcher rebuilds WEB capabilities from the new access snapshot. The API returns the raw secret, not a `tg://webproxy` link. |
 | Read WEB-specific runtime diagnostics | Use authenticated `GET /web-status`; filters cover client IP, process session ID, User-Agent, and non-secret key fingerprint, with optional grouping, expandable HTTP request-to-response details, and WebSocket handshake/message/frame rows. |
 
 `web.enabled`, `web.carrier`, `web.debug`, `web.timeouts`, vhosts, profiles, and decoy snapshots are runtime-generation fields. A changed carrier applies only to newly issued bridge sessions; existing sessions and issued bootstrap chains retain their issuance-time policy. `web.enabled=false` stops new issuance but never closes live sessions implicitly. WEB listener inventory and trust policy, plus all `[web.limits]`, are process-owned. A successful reload can therefore activate the runtime-owned subset while reporting the process-owned subset as deferred.
+
+`base_path` scopes only the WEB data listener. It never prefixes Control API `/v1/*`, `/web-status`, or `/metrics`. `GET /v1/config` shows the desired path but does not prove runtime activation because WEB status intentionally exposes no host, path, or capability. Confirm a terminal reload, the expected `runtime.generation_id`, and external probes of the new and old exact routes. Paths and base paths are never Prometheus labels.
 
 Before deleting a user referenced by a WEB profile, remove and apply the profile first. User mutations validate the complete resulting configuration, so a dangling WEB profile is rejected rather than persisted.
 
@@ -1717,19 +1724,24 @@ Deployment, TLS-terminator examples, links, and WEB-specific verification are do
 | Endpoint | Notes |
 | --- | --- |
 | `PATCH /v1/config` | Deep-merges and validates the patch, writes touched sections via atomic `tmp + rename`, and optionally submits the exact written revision for an in-process Maestro reload. |
-| `POST /v1/users` | Creates user, validates config, then atomically updates only affected `access.*` TOML tables (`access.users` always, plus optional per-user tables present in request). |
-| `PATCH /v1/users/{username}` | Partial update of provided fields only. Missing fields remain unchanged; explicit `null` removes optional per-user entries. The write path updates only affected `access.*` TOML tables. |
-| `POST /v1/users/{username}/rotate-secret` | Replaces the user's secret with a provided valid 32-hex value or a generated value, then returns the effective secret in `CreateUserResponse`. |
+| `POST /v1/users` | Creates and validates a user, atomically updates only affected `access.*` TOML tables, then stages the credential and enabled state in process-wide admission after the durable write. |
+| `PATCH /v1/users/{username}` | Partial update of provided fields only. Missing fields remain unchanged; explicit `null` removes optional entries. Admission is staged only when `secret` or `enabled` changes; an identity change or disable cancels current owners, while a metadata-only patch does not. |
+| `POST /v1/users/{username}/rotate-secret` | Replaces the user's secret with a provided valid 32-hex value or a generated value, stages the new process-wide admission identity, cancels owners of the old identity, then returns the effective secret in `CreateUserResponse`. |
 | `POST /v1/users/{username}/enable` | Enables the user idempotently by removing the `access.user_enabled[username]` override and updating the runtime admission state immediately. |
 | `POST /v1/users/{username}/disable` | Disables the user idempotently by writing `access.user_enabled[username] = false`, updating runtime admission immediately, and cancelling active sessions for that username. |
 | `POST /v1/users/{username}/reset-quota` | Resets the runtime quota counter for the route username, persists quota state to `general.quota_state_path`, and does not modify user config. |
-| `DELETE /v1/users/{username}` | Deletes only specified user, removes this user from related optional `access.user_*` maps, blocks last-user deletion, and atomically updates only related `access.*` TOML tables. |
+| `DELETE /v1/users/{username}` | Deletes only the specified user, removes it from API-managed optional `access.user_*` maps, blocks last-user deletion, stages a deletion tombstone that cancels active owners, and atomically updates only related API-managed `access.*` TOML tables. It leaves `access.user_source_deny` untouched; manage that table manually in TOML. |
 
-All mutating endpoints:
+All accepted durable config, user, and quota mutations:
 - Respect `read_only` mode.
 - Accept optional `If-Match` for optimistic concurrency.
 - Return new `revision` after successful write.
-- Use process-local mutation lock + atomic write (`tmp + rename`) for config persistence.
+- Continue to completion after the server has accepted the mutation even if the requesting client disconnects or cancels the HTTP request.
+- Serialize through one process-local async mutation lock.
+- Publish mandatory process-wide admission state only after the durable write; a stale runtime generation cannot overwrite a newer user mutation.
+- Keep the mutation admission override authoritative until the matching active config-source value arrives; publications from older or non-active generations are rejected.
+
+For Unix config and user source writes, Telemt additionally takes an advisory `flock` on the root source's sibling `.lock` file, rechecks the complete source-graph revision and owner contents, and replaces the owning source through a same-directory atomic rename. Every source involved must be a non-symlink regular file with one directory entry, at most 8 MiB, and unchanged while read. The replacement preserves the existing UID, GID, and mode, syncs the temporary file before rename, and attempts to sync the parent directory afterward. Rename is the commit boundary; a later directory-sync failure is logged as a durability warning and does not roll back the already committed mutation. External writers coordinate only if they honor the same sidecar lock. Quota-state persistence does not use this config-source rename path.
 
 Docker deployment note:
 - Mutating endpoints require `config.toml` to live inside a writable mounted directory.
@@ -1776,6 +1788,18 @@ When `general.use_middle_proxy=true` and `general.me2dc_fallback=true`:
   direct startup fallback before first-ever readiness is observed,
   `6s` after readiness has been observed at least once (runtime failover timeout).
 - While fallback is active, new sessions are routed via Direct-DC; when ME becomes ready, routing returns to Middle mode. Direct sessions affected by the cutover are closed with the existing staggered delay so clients reconnect through the current route.
+
+## Additional Runtime Metrics
+
+The current runtime exports these additional bounded-cardinality families. All use closed labels except the explicitly capped per-user family described below:
+
+- `telemt_me_hardswap_pending`, `telemt_me_hardswap_pending_age_seconds`, `telemt_me_hardswap_pending_writers_current`, `telemt_me_hardswap_pending_writer_deficit`, `telemt_me_hardswap_pending_missing_dc_groups`, `telemt_me_hardswap_pending_map_current`, and `telemt_me_hardswap_orphan_warm_writers_current` describe the authoritative pending generation. They render zero when ME telemetry is `silent` or the active ME snapshot is unavailable. Prometheus `pending_map_current=0` represents both no pending generation and a stale pending map, so pair it with `telemt_me_hardswap_pending`; the API distinguishes no pending generation with `null`.
+- `telemt_me_hardswap_pending_reuse_total` is emitted at debug ME telemetry and counts reuse of matching pending ownership; `telemt_me_hardswap_pending_ttl_expired_total` is emitted at normal telemetry and counts 1800-second pending expiry.
+- `telemt_me_writer_replacement_current{state="preparing"|"retiring"}` describes transactional writer replacement phases.
+- `telemt_conntrack_rule_reconcile_total{result="success"|"error"}` and `telemt_conntrack_rule_rollback_total{result="success"|"error"}` describe process-owned firewall reconcile and best-effort rollback attempts.
+- The conntrack reconcile/rollback counters and rate-limiter CAS samples render zero while core telemetry is disabled; conntrack control-state gauges continue to report their effective state.
+- `telemt_rate_limiter_cas_retry_exhausted_total{scope,direction,operation}` uses the closed labels `scope=user|cidr`, `direction=up|down`, and `operation=reserve|refund`. Reserve exhaustion returns a zero grant without classifying it as configured throttling; refund exhaustion retains the charge. Neither outcome is a connection-drop counter.
+- `telemt_user_connections_current{user}` uses the same authoritative process-scoped admission count as API `current_connections`; it does not reset at a runtime generation boundary. Its Prometheus samples are emitted only when user telemetry is enabled and remain bounded to 4096 tracked telemetry users; `/v1/users` rows and their process-scoped counts are independent of that optional telemetry.
 
 ## Serialization Rules
 
