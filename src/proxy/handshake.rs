@@ -74,9 +74,10 @@ pub(crate) use self::auth_probe::{
     auth_probe_saturation_is_throttled_at_for_testing_in_shared,
     auth_probe_saturation_is_throttled_for_testing_in_shared,
     auth_probe_saturation_state_for_testing_in_shared,
-    auth_probe_saturation_state_lock_for_testing_in_shared, auth_probe_state_for_testing_in_shared,
-    clear_auth_probe_state_for_testing_in_shared,
+    auth_probe_saturation_state_lock_for_testing_in_shared, auth_probe_slots_for_testing_in_shared,
+    auth_probe_state_for_testing_in_shared, clear_auth_probe_state_for_testing_in_shared,
     clear_unknown_sni_warn_state_for_testing_in_shared, clear_warned_secrets_for_testing_in_shared,
+    insert_auth_probe_state_for_testing_in_shared,
     should_emit_unknown_sni_warn_for_testing_in_shared, warned_secrets_for_testing_in_shared,
 };
 
@@ -89,13 +90,16 @@ const WARNED_SECRET_MAX_ENTRIES: usize = 1_024;
 
 const AUTH_PROBE_TRACK_RETENTION_SECS: u64 = 10 * 60;
 #[cfg(test)]
-const AUTH_PROBE_TRACK_MAX_ENTRIES: usize = 256;
+pub(super) const AUTH_PROBE_TRACK_MAX_ENTRIES: usize = 256;
 #[cfg(not(test))]
-const AUTH_PROBE_TRACK_MAX_ENTRIES: usize = 65_536;
+pub(super) const AUTH_PROBE_TRACK_MAX_ENTRIES: usize = 65_536;
 const AUTH_PROBE_PRUNE_SCAN_LIMIT: usize = 1_024;
 const AUTH_PROBE_BACKOFF_START_FAILS: u32 = 4;
 const AUTH_PROBE_SATURATION_GRACE_FAILS: u32 = 2;
-const STICKY_HINT_MAX_ENTRIES: usize = 65_536;
+#[cfg(test)]
+pub(super) const STICKY_HINT_MAX_ENTRIES: usize = 256;
+#[cfg(not(test))]
+pub(super) const STICKY_HINT_MAX_ENTRIES: usize = 65_536;
 const CANDIDATE_HINT_TRACK_CAP: usize = 64;
 const OVERLOAD_CANDIDATE_BUDGET_HINTED: usize = 16;
 const OVERLOAD_CANDIDATE_BUDGET_UNHINTED: usize = 8;

@@ -314,9 +314,7 @@ async fn recompute_connections_payload(
     let mut active_users = 0usize;
     for entry in shared.stats.iter_user_stats() {
         let user_stats = entry.value();
-        let current_connections = user_stats
-            .curr_connects
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let current_connections = shared.stats.get_process_user_curr_connects(entry.key());
         let total_octets = user_stats
             .octets_from_client
             .load(std::sync::atomic::Ordering::Relaxed)

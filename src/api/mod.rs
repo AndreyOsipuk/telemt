@@ -17,7 +17,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, RwLock, Semaphore, watch};
+use tokio::sync::{Mutex, RwLock, Semaphore, oneshot, watch};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
@@ -59,7 +59,7 @@ mod web_runtime;
 mod web_status;
 
 use config_store::{
-    current_revision, ensure_expected_revision, load_config_for_reload, load_config_from_disk,
+    current_revision, load_config_for_mutation, load_config_for_reload, load_config_from_disk,
     parse_if_match,
 };
 use events::ApiEventStore;
@@ -70,7 +70,6 @@ use model::{
     PatchUserRequest, ResetUserQuotaResponse, RotateSecretRequest, SummaryData, UserActiveIps,
     is_valid_username,
 };
-use patch::Patch;
 use runtime_edge::{
     EdgeConnectionsCacheEntry, build_runtime_connections_summary_data,
     build_runtime_events_recent_data, build_runtime_tls_fingerprints_data,
@@ -135,6 +134,7 @@ pub(super) struct ApiShared {
     pub(super) active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
     pub(super) web_trace: Arc<WebTraceStore>,
     pub(super) web_runtime_rx: watch::Receiver<WebRuntimePublication>,
+    pub(super) control_plane: ProcessControlPlane,
 }
 
 impl ApiShared {
@@ -170,7 +170,31 @@ impl ApiShared {
             active_runtime: self.active_runtime.clone(),
             web_trace: self.web_trace.clone(),
             web_runtime_rx: self.web_runtime_rx.clone(),
+            control_plane: self.control_plane.clone(),
         }
+    }
+
+    /// Keeps an accepted mutation alive until persistence and mandatory publication finish.
+    async fn run_mutation_completion<T, F>(&self, future: F) -> Result<T, ApiFailure>
+    where
+        T: Send + 'static,
+        F: std::future::Future<Output = Result<T, ApiFailure>> + Send + 'static,
+    {
+        let (result_tx, result_rx) = oneshot::channel();
+        self.control_plane
+            .spawn_completion(async move {
+                let _ = result_tx.send(future.await);
+            })
+            .map_err(|_| {
+                ApiFailure::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "control_plane_shutting_down",
+                    "Control plane is shutting down",
+                )
+            })?;
+        result_rx.await.map_err(|_| {
+            ApiFailure::internal("accepted config mutation did not report completion")
+        })?
     }
 }
 
@@ -365,6 +389,7 @@ pub(crate) async fn serve(
         active_runtime,
         web_trace,
         web_runtime_rx,
+        control_plane: control_plane.clone(),
     });
 
     spawn_runtime_watchers(

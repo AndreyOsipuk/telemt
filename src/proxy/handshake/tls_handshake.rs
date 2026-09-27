@@ -257,14 +257,15 @@ where
         secret: validated_secret,
         user_id: validated_user_id,
     } = validation;
-    // Reject known replay digests before expensive cache/domain/ALPN policy work.
+    // Reserve the replay digest before any asynchronous policy work so a concurrent
+    // duplicate cannot pass the check-to-commit window.
     let digest_half = &validation_digest[..tls::TLS_DIGEST_HALF_LEN];
-    if replay_checker.check_tls_digest(digest_half) {
+    let Some(replay_claim) = replay_checker.claim_tls_digest(digest_half) else {
         auth_probe_record_failure_in(shared, peer.ip(), Instant::now());
         maybe_apply_server_hello_delay(config).await;
         warn!(peer = %peer, "TLS replay attack detected (duplicate digest)");
         return HandshakeResult::BadClient { reader, writer };
-    }
+    };
 
     let selected_tls_domain = matched_tls_domain.unwrap_or(config.censorship.tls_domain.as_str());
     let cached_entry = if config.censorship.tls_emulation {
@@ -337,8 +338,12 @@ where
         None
     };
 
-    // Add replay digest only for policy-valid handshakes.
-    replay_checker.add_tls_digest(digest_half);
+    // Commit only policy-valid handshakes; early returns release the pending claim.
+    if !replay_claim.commit() {
+        auth_probe_record_failure_in(shared, peer.ip(), Instant::now());
+        warn!(peer = %peer, "TLS replay claim lost before commit");
+        return HandshakeResult::BadClient { reader, writer };
+    }
 
     let validation_session_id_slice = &validation_session_id[..validation_session_id_len];
 
@@ -391,8 +396,13 @@ where
     auth_probe_record_success_in(shared, peer.ip());
 
     if let Some(user_id) = validated_user_id {
-        sticky_hint_record_success_in(shared, peer.ip(), user_id, client_sni.as_deref());
-        record_recent_user_success_in(shared, user_id);
+        if let Some(entry) = config
+            .runtime_user_auth()
+            .and_then(|snapshot| snapshot.entry_by_id(user_id))
+        {
+            sticky_hint_record_success_in(shared, peer.ip(), entry.hint_key, client_sni.as_deref());
+            record_recent_user_success_in(shared, entry.hint_key);
+        }
     }
 
     HandshakeResult::Success((

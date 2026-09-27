@@ -67,6 +67,11 @@ pub(super) async fn render(
     push_filter_form(&mut html, &query);
     html.push_str("<section><h2>Store</h2><table><tbody>");
     summary_row(&mut html, "debug enabled", yes_no(status.policy.enabled));
+    summary_row(
+        &mut html,
+        "sideband",
+        yes_no(status.policy.bridge_diagnostics_enabled()),
+    );
     summary_row(&mut html, "body capture", body_mode(&status.policy));
     summary_row(&mut html, "window seconds", &query.window_secs.to_string());
     summary_row(

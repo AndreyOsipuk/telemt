@@ -9,6 +9,7 @@ use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::crypto::sha256;
 use crate::error::{ProxyError, Result};
 
 use super::defaults::*;
@@ -35,7 +36,9 @@ mod validate_server;
 mod validate_web;
 mod validation;
 
-use self::includes::{hash_rendered_snapshot, normalize_config_path, preprocess_includes};
+use self::includes::{
+    hash_rendered_snapshot, normalize_config_path, preprocess_includes, read_config_source,
+};
 use self::normalize::{
     is_valid_ad_tag, is_valid_tls_domain_name, normalize_domain_to_ascii,
     normalize_exclusive_mask_target, normalize_mask_host_to_ascii, parse_exclusive_mask_target,
@@ -63,9 +66,9 @@ const MAX_API_REQUEST_BODY_LIMIT_BYTES: usize = 1024 * 1024;
 pub(crate) struct LoadedConfig {
     /// Validated and normalized effective configuration.
     pub(crate) config: ProxyConfig,
-    /// Canonical paths participating in the recursive include graph.
+    /// Normalized absolute paths participating in the recursive include graph.
     pub(crate) source_files: Vec<PathBuf>,
-    /// Raw source bytes keyed by canonical source path.
+    /// Raw source bytes keyed by normalized absolute source path.
     pub(crate) source_contents: BTreeMap<PathBuf, String>,
     /// Legacy hash of the include-expanded rendered snapshot.
     pub(crate) rendered_hash: u64,
@@ -74,7 +77,7 @@ pub(crate) struct LoadedConfig {
 /// Raw recursive source graph captured before typed deserialization.
 #[derive(Debug, Clone)]
 pub(crate) struct ConfigSourceGraph {
-    /// Raw source bytes keyed by canonical source path.
+    /// Raw source bytes keyed by normalized absolute source path.
     pub(crate) source_contents: BTreeMap<PathBuf, String>,
     /// Include-expanded TOML used for typed deserialization.
     pub(crate) rendered: String,
@@ -174,21 +177,42 @@ impl ProxyConfig {
         source_overrides: &BTreeMap<PathBuf, String>,
     ) -> Result<ConfigSourceGraph> {
         let path = path.as_ref();
-        let normalized_path = normalize_config_path(path);
+        let mut previous = Self::capture_source_graph(path, source_overrides)?;
+        for _ in 0..2 {
+            let current = Self::capture_source_graph(path, source_overrides)?;
+            if current.source_contents == previous.source_contents
+                && current.rendered == previous.rendered
+            {
+                return Ok(current);
+            }
+            previous = current;
+        }
+        Err(ProxyError::Config(
+            "config source graph changed repeatedly while it was read".to_string(),
+        ))
+    }
+
+    fn capture_source_graph(
+        path: &Path,
+        source_overrides: &BTreeMap<PathBuf, String>,
+    ) -> Result<ConfigSourceGraph> {
+        let path = path.as_ref();
+        let (normalized_path, disk_content) = read_config_source(path)?;
         let content = source_overrides
             .get(&normalized_path)
             .cloned()
-            .map(Ok)
-            .unwrap_or_else(|| std::fs::read_to_string(path))
-            .map_err(|e| ProxyError::Config(e.to_string()))?;
-        let base_dir = path.parent().unwrap_or(Path::new("."));
+            .unwrap_or(disk_content);
+        let base_dir = normalized_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
         let mut source_files = BTreeSet::new();
         source_files.insert(normalized_path.clone());
         let mut source_contents = BTreeMap::new();
         source_contents.insert(normalized_path, content.clone());
         let processed = preprocess_includes(
             &content,
-            base_dir,
+            &base_dir,
             0,
             &mut source_files,
             &mut source_contents,
@@ -228,6 +252,25 @@ impl ProxyConfig {
 
     pub(crate) fn runtime_user_auth(&self) -> Option<&UserAuthSnapshot> {
         self.runtime_user_auth.as_deref()
+    }
+
+    /// Returns the credential identity frozen into this runtime snapshot.
+    pub(crate) fn runtime_user_credential_id(&self, user: &str) -> Option<[u8; 16]> {
+        self.runtime_user_auth()
+            .and_then(|snapshot| snapshot.credential_id_by_name(user))
+            .or_else(|| {
+                self.access
+                    .users
+                    .get(user)
+                    .and_then(|secret| hex::decode(secret).ok())
+                    .and_then(|secret| <[u8; 16]>::try_from(secret).ok())
+                    .map(|secret| {
+                        let digest = sha256(&secret);
+                        let mut credential_id = [0; 16];
+                        credential_id.copy_from_slice(&digest[..16]);
+                        credential_id
+                    })
+            })
     }
 
     /// Validates cross-field configuration invariants after deserialization.

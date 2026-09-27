@@ -5,16 +5,20 @@ use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use hmac::{Hmac, Mac};
 use parking_lot::Mutex;
+use sha2::Sha256;
+use subtle::ConstantTimeEq;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+use zeroize::Zeroizing;
 
 use crate::config::{WebCarrier, WebLimitsConfig};
+use crate::crypto::SecureRandom;
 use crate::maestro::generation::RuntimeGeneration;
 use crate::web::telemetry::{WebRejectionReason, WebTelemetry};
 use crate::web::trace::WebTraceStore;
-
 // Credential maps, quotas, and token-bucket helpers remain private to the manager.
 mod state;
 // Carrier attempt metadata remains explicit and independent from HTTP parsing.
@@ -24,6 +28,9 @@ mod negotiation;
 mod learning;
 // Bootstrap credentials and idempotent session creation are isolated from queue accounting.
 mod credentials;
+// Authenticated bridge diagnostics remain isolated from session and carrier state.
+mod diagnostic;
+pub(crate) use diagnostic::BridgeDiagnosticEvent;
 // First-session admission and bounded carrier replacement share one state machine.
 mod session_creation;
 // Session admission remains separate from stream tuple ownership.
@@ -54,8 +61,8 @@ mod observability;
 pub(crate) use observability::{WebCapacityResourceStatus, WebCapacitySnapshot};
 // Asynchronous bounded close operations isolate mutation lifecycle from HTTP requests.
 mod control;
+use budget::WebDataBudget;
 pub(crate) use budget::WebSocketBudgetLease;
-use budget::{WebDataBudget, WebSocketBudgetClass};
 pub(crate) use control::{CloseOperationSelector, ControlError};
 pub(crate) use negotiation::{
     CarrierCapabilities, CarrierClientClass, CarrierFailure, CarrierLearningContext, CarrierRequest,
@@ -65,6 +72,57 @@ pub(crate) use websocket::{WebSocketConnection, WebSocketKind};
 
 const TOKEN_BYTES: usize = 32;
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
+const TOKEN_NONCE_BYTES: usize = 16;
+const BOOTSTRAP_TOKEN_CONTEXT: &[u8] = b"telemt-web-bootstrap-token-v1\0";
+const SESSION_TOKEN_CONTEXT: &[u8] = b"telemt-web-session-token-v1\0";
+
+/// Distinguishes process-authenticated WEB credential domains.
+#[derive(Clone, Copy)]
+enum TokenKind {
+    Bootstrap,
+    Session,
+}
+
+struct TokenAuthenticator {
+    key: Zeroizing<[u8; 32]>,
+}
+
+impl TokenAuthenticator {
+    fn new(rng: &SecureRandom) -> Self {
+        let mut key = Zeroizing::new([0; 32]);
+        rng.fill(key.as_mut());
+        Self { key }
+    }
+
+    fn issue(&self, kind: TokenKind, nonce: [u8; TOKEN_NONCE_BYTES]) -> [u8; TOKEN_BYTES] {
+        let mut token = [0; TOKEN_BYTES];
+        token[..TOKEN_NONCE_BYTES].copy_from_slice(&nonce);
+        let tag = self.tag(kind, &nonce);
+        token[TOKEN_NONCE_BYTES..].copy_from_slice(&tag[..TOKEN_NONCE_BYTES]);
+        token
+    }
+
+    fn authentic(&self, token: &[u8; TOKEN_BYTES]) -> bool {
+        let nonce = &token[..TOKEN_NONCE_BYTES];
+        let tag = &token[TOKEN_NONCE_BYTES..];
+        let bootstrap = self.tag(TokenKind::Bootstrap, nonce);
+        let session = self.tag(TokenKind::Session, nonce);
+        bool::from(
+            bootstrap[..TOKEN_NONCE_BYTES].ct_eq(tag) | session[..TOKEN_NONCE_BYTES].ct_eq(tag),
+        )
+    }
+
+    fn tag(&self, kind: TokenKind, nonce: &[u8]) -> [u8; 32] {
+        let mut mac = Hmac::<Sha256>::new_from_slice(self.key.as_ref())
+            .expect("HMAC accepts every WEB token key length");
+        mac.update(match kind {
+            TokenKind::Bootstrap => BOOTSTRAP_TOKEN_CONTEXT,
+            TokenKind::Session => SESSION_TOKEN_CONTEXT,
+        });
+        mac.update(nonce);
+        mac.finalize().into_bytes().into()
+    }
+}
 
 /// Stable hash key used for bootstrap and session credentials.
 pub(crate) type TokenHash = [u8; TOKEN_BYTES];
@@ -160,6 +218,7 @@ pub(crate) struct WebProcessRuntime {
     runtime_instance: Arc<str>,
     active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
     trace: Arc<WebTraceStore>,
+    token_authenticator: TokenAuthenticator,
     limits: WebLimitsConfig,
     state: Mutex<ManagerState>,
     stream_admission: Mutex<StreamAdmissionState>,
@@ -203,6 +262,7 @@ impl WebProcessRuntime {
     ) -> Arc<Self> {
         let initial_generation = active_runtime.load_full();
         let config = initial_generation.config();
+        let token_authenticator = TokenAuthenticator::new(&initial_generation.rng);
         trace.apply_policy(initial_generation.id, &config.web.debug);
         let limits = config.web.limits.clone();
         let learning_capacity = limits.max_carrier_learning_entries;
@@ -229,6 +289,7 @@ impl WebProcessRuntime {
             runtime_instance,
             active_runtime,
             trace,
+            token_authenticator,
             http_connections: Arc::new(Semaphore::new(limits.max_http_connections)),
             http_overload_connections: Arc::new(Semaphore::new(
                 limits.max_http_overload_connections,
@@ -298,6 +359,11 @@ impl WebProcessRuntime {
     /// Returns the process-owned operational telemetry handle.
     pub(crate) fn telemetry(&self) -> &Arc<WebTelemetry> {
         &self.telemetry
+    }
+
+    /// Returns whether one canonical raw credential was minted by this process.
+    pub(crate) fn authentic_token(&self, token: &[u8; TOKEN_BYTES]) -> bool {
+        self.token_authenticator.authentic(token)
     }
 
     /// Returns whether terminal process shutdown has started.
@@ -403,106 +469,6 @@ impl WebProcessRuntime {
         drop(tokio::spawn(tracked));
     }
 
-    /// Reserves one body reader and its declared bounded body allocation.
-    pub(crate) fn try_body_budget(
-        &self,
-        bytes: usize,
-    ) -> Option<(OwnedSemaphorePermit, OwnedSemaphorePermit)> {
-        let Some(bytes) = u32::try_from(bytes).ok() else {
-            self.record_limit_hit();
-            self.telemetry
-                .record_rejection(WebRejectionReason::BodyBytesCapacity);
-            return None;
-        };
-        let Some(reader) = Arc::clone(&self.body_readers).try_acquire_owned().ok() else {
-            self.record_limit_hit();
-            self.telemetry
-                .record_rejection(WebRejectionReason::BodyReaderCapacity);
-            return None;
-        };
-        let Some(body) = Arc::clone(&self.body_bytes)
-            .try_acquire_many_owned(bytes)
-            .ok()
-        else {
-            self.record_limit_hit();
-            self.telemetry
-                .record_rejection(WebRejectionReason::BodyBytesCapacity);
-            return None;
-        };
-        Some((reader, body))
-    }
-
-    /// Reserves transient bytes while one downlink batch replaces queued frames.
-    pub(crate) fn try_downlink_staging_budget(&self, bytes: usize) -> Option<OwnedSemaphorePermit> {
-        let bytes = u32::try_from(bytes).ok()?;
-        let permit = Arc::clone(&self.body_bytes)
-            .try_acquire_many_owned(bytes)
-            .ok();
-        if permit.is_none() {
-            self.record_limit_hit();
-            self.telemetry
-                .record_rejection(WebRejectionReason::BodyBytesCapacity);
-        }
-        permit
-    }
-
-    /// Reserves bounded process-wide queue capacity for data or control traffic.
-    pub(crate) fn try_reserve_pending(
-        &self,
-        owner: ProfileKey,
-        bytes: usize,
-        items: usize,
-        control: bool,
-        downlink: bool,
-    ) -> bool {
-        if !self
-            .data_budget
-            .try_reserve_queue(owner, bytes, items, control, downlink)
-        {
-            self.record_limit_hit();
-            self.telemetry
-                .record_rejection(WebRejectionReason::QueueGlobalCapacity);
-            return false;
-        }
-        true
-    }
-
-    /// Releases process-wide queue capacity and wakes blocked relay writers.
-    pub(crate) fn release_pending(
-        &self,
-        owner: ProfileKey,
-        bytes: usize,
-        items: usize,
-        control: bool,
-    ) {
-        self.data_budget.release_queue(owner, bytes, items, control);
-    }
-
-    /// Returns the shared notification source for global queue capacity changes.
-    pub(crate) fn budget_notify(&self) -> Arc<Notify> {
-        self.data_budget.notify()
-    }
-
-    /// Reserves fixed WebSocket driver memory below the admission watermark.
-    pub(crate) fn try_websocket_base_budget(
-        &self,
-        owner: ProfileKey,
-        bytes: usize,
-    ) -> Option<WebSocketBudgetLease> {
-        self.data_budget
-            .try_reserve_websocket(owner, bytes, WebSocketBudgetClass::Base)
-    }
-
-    /// Reserves one transient WebSocket message below the eviction watermark.
-    pub(crate) fn try_websocket_data_budget(
-        &self,
-        owner: ProfileKey,
-        bytes: usize,
-    ) -> Option<WebSocketBudgetLease> {
-        self.data_budget
-            .try_reserve_websocket(owner, bytes, WebSocketBudgetClass::Data)
-    }
-
     /// Admits one WebSocket with dead-first, then owner-local bounded replacement.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn admit_websocket(
@@ -546,3 +512,7 @@ impl WebProcessRuntime {
         self.telemetry.record_limit_hit();
     }
 }
+
+#[cfg(test)]
+#[path = "manager/token_authenticator_tests.rs"]
+mod token_authenticator_tests;

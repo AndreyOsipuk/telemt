@@ -261,6 +261,104 @@ async fn access_mutation_writes_only_the_single_included_owner() {
 }
 
 #[tokio::test]
+async fn access_mutation_rejects_source_graph_change_after_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("config.toml");
+    let included = dir.path().join("users.toml");
+    let root_body = "include = \"users.toml\"\n[censorship]\ntls_domain = \"one.example\"\n";
+    let external_root = "include = \"users.toml\"\n[censorship]\ntls_domain = \"two.example\"\n";
+    let included_body = "[access.users]\nalice = \"00000000000000000000000000000000\"\n";
+    tokio::fs::write(&root, root_body).await.unwrap();
+    tokio::fs::write(&included, included_body).await.unwrap();
+    let (mut cfg, revision) = load_config_for_mutation(&root, None).await.unwrap();
+    cfg.access.users.insert(
+        "bob".to_string(),
+        "11111111111111111111111111111111".to_string(),
+    );
+    tokio::fs::write(&root, external_root).await.unwrap();
+
+    let error = save_access_sections_to_disk_if_revision(
+        &root,
+        &cfg,
+        &[AccessSection::Users],
+        Some(&revision),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, "revision_conflict");
+    assert_eq!(
+        tokio::fs::read_to_string(&root).await.unwrap(),
+        external_root
+    );
+    assert_eq!(
+        tokio::fs::read_to_string(&included).await.unwrap(),
+        included_body
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn atomic_write_preserves_existing_file_mode() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    tokio::fs::write(&path, "old").await.unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let before = std::fs::metadata(&path).unwrap();
+
+    write_atomic(path.clone(), "new".to_string()).await.unwrap();
+
+    let after = std::fs::metadata(&path).unwrap();
+    assert_eq!(after.mode() & 0o7777, 0o640);
+    assert_eq!(after.uid(), before.uid());
+    assert_eq!(after.gid(), before.gid());
+}
+
+#[tokio::test]
+async fn config_sidecar_lock_serializes_competing_revision_writers() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let original = concat!(
+        "[censorship]\n",
+        "tls_domain = \"original.example\"\n",
+        "[access.users]\n",
+        "alice = \"00000000000000000000000000000000\"\n"
+    );
+    tokio::fs::write(&path, original).await.unwrap();
+    let graph = ProxyConfig::read_source_graph(&path).unwrap();
+    let revision = compute_source_revision(&graph);
+
+    let first = tokio::spawn(write_atomic_if_unchanged(
+        path.clone(),
+        revision.clone(),
+        path.clone(),
+        original.to_string(),
+        original.replace("original.example", "first.example"),
+    ));
+    let second = tokio::spawn(write_atomic_if_unchanged(
+        path.clone(),
+        revision,
+        path.clone(),
+        original.to_string(),
+        original.replace("original.example", "second.example"),
+    ));
+    let first = first.await.unwrap();
+    let second = second.await.unwrap();
+
+    assert_ne!(first.is_ok(), second.is_ok());
+    let (winner_revision, conflict) = match (first, second) {
+        (Ok(revision), Err(error)) | (Err(error), Ok(revision)) => (revision, error),
+        _ => unreachable!("exactly one cooperative writer must commit"),
+    };
+    assert_eq!(conflict.code, "revision_conflict");
+    assert_eq!(winner_revision, current_revision(&path).await.unwrap());
+    let persisted = tokio::fs::read_to_string(&path).await.unwrap();
+    assert!(persisted.contains("first.example") || persisted.contains("second.example"));
+}
+
+#[tokio::test]
 async fn access_mutation_rejects_sections_with_different_source_owners() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("config.toml");
@@ -306,4 +404,18 @@ fn render_user_rate_limits_section() {
 
     assert!(rendered.starts_with("[access.user_rate_limits]\n"));
     assert!(rendered.contains("alice = { up_bps = 1024, down_bps = 2048 }"));
+}
+
+#[cfg(unix)]
+#[test]
+fn source_owner_normalization_preserves_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real.toml");
+    let linked = dir.path().join("linked.toml");
+    std::fs::write(&real, "").unwrap();
+    symlink(&real, &linked).unwrap();
+
+    assert_eq!(normalize_source_path(&linked), linked);
 }

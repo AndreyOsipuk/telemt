@@ -1,5 +1,32 @@
 use super::*;
 
+/// Mirrors one live connection into optional per-user telemetry.
+#[must_use = "the observation must be retained for the connection lifetime"]
+pub(crate) struct UserConnectionObservation {
+    stats: Arc<UserStats>,
+}
+
+impl Drop for UserConnectionObservation {
+    fn drop(&mut self) {
+        decrement_current_connections(&self.stats.curr_connects);
+    }
+}
+
+fn decrement_current_connections(counter: &AtomicU64) {
+    let mut current = counter.load(Ordering::Relaxed);
+    while current != 0 {
+        match counter.compare_exchange_weak(
+            current,
+            current - 1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
 impl Stats {
     pub fn increment_user_connects(&self, user: &str) {
         if !self.telemetry_user_enabled() {
@@ -17,6 +44,25 @@ impl Stats {
         let stats = self.get_or_create_user_stats_handle(user);
         self.touch_user_stats(stats.as_ref());
         stats.curr_connects.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Starts an optional telemetry observation without owning admission policy.
+    pub(crate) fn observe_user_current_connection(
+        &self,
+        user: &str,
+    ) -> Option<UserConnectionObservation> {
+        if !self.telemetry_user_enabled() {
+            return None;
+        }
+        let stats = self.get_or_create_user_stats_handle(user);
+        self.touch_user_stats(stats.as_ref());
+        stats.curr_connects.fetch_add(1, Ordering::Relaxed);
+        Some(UserConnectionObservation { stats })
+    }
+
+    /// Returns the process-scoped count used by connection admission.
+    pub(crate) fn get_process_user_curr_connects(&self, user: &str) -> u64 {
+        self.connection_authority.active(user)
     }
 
     pub fn try_acquire_user_curr_connects(&self, user: &str, limit: Option<u64>) -> bool {
@@ -50,22 +96,7 @@ impl Stats {
     pub fn decrement_user_curr_connects(&self, user: &str) {
         if let Some(stats) = self.user_stats.get(user) {
             self.touch_user_stats(stats.value().as_ref());
-            let counter = &stats.curr_connects;
-            let mut current = counter.load(Ordering::Relaxed);
-            loop {
-                if current == 0 {
-                    break;
-                }
-                match counter.compare_exchange_weak(
-                    current,
-                    current - 1,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => break,
-                    Err(actual) => current = actual,
-                }
-            }
+            decrement_current_connections(&stats.curr_connects);
         }
     }
 
@@ -120,6 +151,27 @@ impl Stats {
 
     pub fn get_user_quota_used(&self, user: &str) -> u64 {
         self.quota_store.used(user)
+    }
+
+    /// Returns quota ownership for the exact authenticated user incarnation.
+    pub(crate) fn quota_handle_for_incarnation(
+        &self,
+        user: &str,
+        incarnation: crate::proxy::user_admission::UserIncarnation,
+    ) -> Option<UserQuotaHandle> {
+        if let Some(handle) = self.quota_store.handle_exact(user, incarnation) {
+            return Some(handle);
+        }
+        if incarnation != 0 {
+            return None;
+        }
+        let handle = self.quota_store.current_or_legacy_handle(user);
+        (handle.incarnation() == incarnation).then_some(handle)
+    }
+
+    /// Returns the currently published quota owner for compatibility relay entrypoints.
+    pub(crate) fn current_user_quota_handle(&self, user: &str) -> UserQuotaHandle {
+        self.quota_store.current_or_legacy_handle(user)
     }
 
     pub fn load_user_quota_state(&self, user: &str, used_bytes: u64, last_reset_epoch_secs: u64) {

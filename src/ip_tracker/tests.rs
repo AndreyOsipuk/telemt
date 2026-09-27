@@ -3,6 +3,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
+mod cleanup_invariants;
+
 fn test_ipv4(oct1: u8, oct2: u8, oct3: u8, oct4: u8) -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(oct1, oct2, oct3, oct4))
 }
@@ -190,6 +192,37 @@ async fn test_clear_user_ips() {
 }
 
 #[tokio::test]
+async fn stale_incarnation_cleanup_cannot_release_recreated_user_ip() {
+    let tracker = UserIpTracker::new();
+    tracker.set_user_limit("test_user", 1).await;
+    let old_ip = test_ipv4(192, 168, 2, 1);
+    let current_ip = test_ipv4(192, 168, 2, 2);
+    let rejected_ip = test_ipv4(192, 168, 2, 3);
+
+    tracker
+        .check_and_add_for_incarnation("test_user", 1, old_ip)
+        .await
+        .unwrap();
+    tracker.clear_user_ips_if_not_newer("test_user", 2).await;
+    tracker
+        .check_and_add_for_incarnation("test_user", 3, current_ip)
+        .await
+        .unwrap();
+
+    tracker
+        .remove_ip_for_incarnation("test_user", 1, old_ip)
+        .await;
+
+    assert!(tracker.is_ip_active("test_user", current_ip).await);
+    assert!(
+        tracker
+            .check_and_add_for_incarnation("test_user", 3, rejected_ip)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn test_is_ip_active() {
     let tracker = UserIpTracker::new();
     let ip1 = test_ipv4(192, 168, 1, 1);
@@ -231,6 +264,64 @@ async fn test_load_limits_replaces_previous_map() {
 
     assert_eq!(tracker.get_user_limit("user1").await, None);
     assert_eq!(tracker.get_user_limit("user2").await, Some(5));
+}
+
+#[tokio::test]
+async fn stale_runtime_cannot_overwrite_newer_ip_policy() {
+    let tracker = UserIpTracker::new();
+    let mut newer = HashMap::new();
+    newer.insert("alice".to_string(), 5);
+    assert!(
+        tracker
+            .apply_policy_from_source(2, 7, &newer, UserMaxUniqueIpsMode::Combined, 90,)
+            .await
+    );
+
+    let mut stale = HashMap::new();
+    stale.insert("alice".to_string(), 1);
+    assert!(
+        !tracker
+            .apply_policy_from_source(1, 1, &stale, UserMaxUniqueIpsMode::ActiveWindow, 1,)
+            .await
+    );
+
+    let policy = tracker.limit_policy.load_full();
+    assert_eq!(policy.source_generation, 2);
+    assert_eq!(policy.default_max_ips, 7);
+    assert_eq!(policy.max_ips["alice"], 5);
+    assert_eq!(policy.mode, UserMaxUniqueIpsMode::Combined);
+    assert_eq!(policy.window_secs, 90);
+}
+
+#[tokio::test]
+async fn active_runtime_can_publish_coherent_same_generation_ip_policy() {
+    let tracker = UserIpTracker::new();
+    assert!(
+        tracker
+            .apply_policy_from_source(
+                3,
+                1,
+                &HashMap::new(),
+                UserMaxUniqueIpsMode::ActiveWindow,
+                10,
+            )
+            .await
+    );
+    let mut limits = HashMap::new();
+    limits.insert("alice".to_string(), 4);
+
+    assert!(
+        tracker
+            .apply_policy_from_source(3, 6, &limits, UserMaxUniqueIpsMode::TimeWindow, 30,)
+            .await
+    );
+
+    let policy = tracker.limit_policy.load_full();
+    assert_eq!(policy.source_generation, 3);
+    assert_eq!(policy.default_max_ips, 6);
+    assert_eq!(policy.max_ips["alice"], 4);
+    assert_eq!(policy.mode, UserMaxUniqueIpsMode::TimeWindow);
+    assert_eq!(policy.window_secs, 30);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -404,10 +495,7 @@ async fn test_compact_prunes_stale_recent_entries() {
     }
 
     tracker.last_compact_epoch_secs.store(0, Ordering::Relaxed);
-    tracker
-        .check_and_add("trigger-user", test_ipv4(10, 3, 0, 2))
-        .await
-        .unwrap();
+    tracker.maybe_compact_empty_users().await;
 
     let shard_idx = UserIpTracker::shard_idx(&stale_user);
     let shard = tracker.shards[shard_idx].read().await;

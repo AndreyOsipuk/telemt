@@ -5,6 +5,20 @@ pub(in crate::api) async fn create_user(
     expected_revision: Option<String>,
     shared: &ApiShared,
 ) -> Result<(CreateUserResponse, String), ApiFailure> {
+    let shared = shared.clone();
+    shared
+        .clone()
+        .run_mutation_completion(async move {
+            create_user_to_completion(body, expected_revision, &shared).await
+        })
+        .await
+}
+
+async fn create_user_to_completion(
+    body: CreateUserRequest,
+    expected_revision: Option<String>,
+    shared: &ApiShared,
+) -> Result<(CreateUserResponse, String), ApiFailure> {
     let touches_user_ad_tags = body.user_ad_tag.is_some();
     let touches_user_max_tcp_conns = body.max_tcp_conns.is_some();
     let touches_user_expirations = body.expiration_rfc3339.is_some();
@@ -41,9 +55,11 @@ pub(in crate::api) async fn create_user(
     }
 
     let expiration = parse_optional_expiration(body.expiration_rfc3339.as_deref())?;
+    let credential_id = credential_id_from_hex(&secret)
+        .ok_or_else(|| ApiFailure::internal("validated user secret could not be decoded"))?;
     let _guard = shared.mutation_lock.lock().await;
-    let mut cfg = load_config_from_disk(&shared.config_path).await?;
-    ensure_expected_revision(&shared.config_path, expected_revision.as_deref()).await?;
+    let (mut cfg, base_revision) =
+        load_config_for_mutation(&shared.config_path, expected_revision.as_deref()).await?;
 
     if cfg.access.users.contains_key(&body.username) {
         return Err(ApiFailure::new(
@@ -122,9 +138,18 @@ pub(in crate::api) async fn create_user(
         touched_sections.push(AccessSection::UserEnabled);
     }
 
-    let revision =
-        save_access_sections_to_disk(&shared.config_path, &cfg, &touched_sections).await?;
-    drop(_guard);
+    let revision = save_access_sections_to_disk_if_revision(
+        &shared.config_path,
+        &cfg,
+        &touched_sections,
+        Some(&base_revision),
+    )
+    .await?;
+    shared.proxy_shared.stage_user_credential(
+        &body.username,
+        credential_id,
+        cfg.access.is_user_enabled(&body.username),
+    );
 
     if let Some(limit) = updated_limit {
         shared
@@ -132,6 +157,7 @@ pub(in crate::api) async fn create_user(
             .set_user_limit(&body.username, limit)
             .await;
     }
+    drop(_guard);
     let (detected_ip_v4, detected_ip_v6) = shared.detected_link_ips();
 
     let users = users_from_config(

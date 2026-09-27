@@ -71,7 +71,7 @@ pub(in crate::api) async fn users_from_config(
                 .filter(|limit| *limit > 0)
                 .or((cfg.access.user_max_unique_ips_global_each > 0)
                     .then_some(cfg.access.user_max_unique_ips_global_each)),
-            current_connections: stats.get_user_curr_connects(&username),
+            current_connections: stats.get_process_user_curr_connects(&username),
             active_unique_ips: active_ip_list.len(),
             active_unique_ips_list: active_ip_list,
             recent_unique_ips: recent_ip_list.len(),

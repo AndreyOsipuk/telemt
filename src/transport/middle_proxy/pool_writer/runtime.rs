@@ -54,23 +54,45 @@ impl MePool {
         contour: WriterContour,
         writer_dc: i32,
     ) -> Result<()> {
-        self.connect_one_with_generation_contour_for_dc_with_cap_policy(
-            addr, rng, generation, contour, writer_dc, false,
+        self.connect_one_with_generation_contour_for_dc_with_intent(
+            addr,
+            rng,
+            generation,
+            contour,
+            writer_dc,
+            WriterOpenIntent::Normal,
         )
         .await
     }
 
-    pub(in crate::transport::middle_proxy) async fn connect_one_with_generation_contour_for_dc_with_cap_policy(
+    /// Connects and publishes one writer under an explicit capacity intent.
+    pub(in crate::transport::middle_proxy) async fn connect_one_with_generation_contour_for_dc_with_intent(
         self: &Arc<Self>,
         addr: SocketAddr,
         rng: &SecureRandom,
         generation: u64,
         contour: WriterContour,
         writer_dc: i32,
-        allow_coverage_override: bool,
+        intent: WriterOpenIntent,
     ) -> Result<()> {
-        let Some(_writer_open_reservation) = self
-            .reserve_writer_open(contour, allow_coverage_override, writer_dc)
+        let prepared = self
+            .prepare_writer_with_intent(addr, rng, generation, contour, writer_dc, intent)
+            .await?;
+        self.publish_connected_writer(prepared).await
+    }
+
+    /// Completes all cancellable connection work without publishing pool visibility.
+    pub(super) async fn prepare_writer_with_intent<'a>(
+        self: &'a Arc<Self>,
+        addr: SocketAddr,
+        rng: &SecureRandom,
+        generation: u64,
+        contour: WriterContour,
+        writer_dc: i32,
+        intent: WriterOpenIntent,
+    ) -> Result<PreparedWriter<'a>> {
+        let Some(writer_open_reservation) = self
+            .reserve_writer_open(contour, intent, writer_dc, addr)
             .await
         else {
             return Err(ProxyError::Proxy(format!(
@@ -132,16 +154,6 @@ impl MePool {
             drain_deadline_epoch_secs: drain_deadline_epoch_secs.clone(),
             allow_drain_fallback: allow_drain_fallback.clone(),
         };
-        self.writers
-            .update(|writers| writers.push(writer.clone()))
-            .await;
-        self.registry
-            .register_writer(writer_id, tx.clone(), byte_budget)
-            .await;
-        self.registry.mark_writer_idle(writer_id).await;
-        self.conn_count.fetch_add(1, Ordering::Relaxed);
-        self.notify_writer_epoch();
-
         let reg = self.registry.clone();
         let writers_arc = self.writers_arc();
         let ping_tracker = Arc::new(tokio::sync::Mutex::new(HashMap::<i64, Instant>::new()));
@@ -177,8 +189,10 @@ impl MePool {
         let route_fairshare_enabled = self.transport_policy.me_route_fairshare_enabled.clone();
         let reader_route_data_wait_ms = self.transport_policy.me_reader_route_data_wait_ms.clone();
 
-        self.lifecycle
-            .spawn_registered_writer(task_registration, async move {
+        let writer_task = {
+            // Keep transport ownership behind a stable-size pointer while publication waits for
+            // locks.
+            Box::pin(async move {
                 // Reader MUST be the first branch in biased select! to avoid read starvation.
                 let exit = tokio::select! {
                     biased;
@@ -269,9 +283,18 @@ impl MePool {
 
                 let remaining = writers_arc.read().await.len();
                 debug!(writer_id, remaining, "ME writer lifecycle task finished");
-            });
+            })
+        };
 
-        Ok(())
+        Ok(PreparedWriter {
+            writer,
+            tx,
+            byte_budget,
+            task_registration,
+            writer_task,
+            intent,
+            _open_reservation: writer_open_reservation,
+        })
     }
 
     pub(crate) async fn remove_writer_and_close_clients(self: &Arc<Self>, writer_id: u64) {
@@ -309,7 +332,7 @@ impl MePool {
     ) -> bool {
         let mut close_tx: Option<mpsc::Sender<WriterCommand>> = None;
         let mut removed_addr: Option<SocketAddr> = None;
-        let mut removed_dc: Option<i32> = None;
+        let mut removed_role: Option<WriterRole> = None;
         let mut removed_uptime: Option<Duration> = None;
         let mut trigger_refill = false;
         let mut removed = false;
@@ -330,14 +353,19 @@ impl MePool {
                 self.stats.increment_me_writer_removed_total();
                 w.cancel.cancel();
                 removed_addr = Some(w.addr);
-                removed_dc = Some(w.writer_dc);
+                removed_role = Some(WriterRole::from_writer(&w));
                 removed_uptime = Some(w.created_at.elapsed());
                 trigger_refill = !was_draining;
                 if trigger_refill {
                     self.stats.increment_me_writer_removed_unexpected_total();
                 }
                 close_tx = Some(w.tx.clone());
-                self.conn_count.fetch_sub(1, Ordering::Relaxed);
+                // Teardown remains idempotent if the advisory count was already reconciled.
+                let _ =
+                    self.conn_count
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                            count.checked_sub(1)
+                        });
                 removed = true;
             }
         }
@@ -370,8 +398,8 @@ impl MePool {
                     );
                 }
             }
-            if trigger_refill && let Some(writer_dc) = removed_dc {
-                self.trigger_immediate_refill_for_dc(addr, writer_dc);
+            if trigger_refill && let Some(role) = removed_role {
+                self.trigger_immediate_refill_for_role(addr, role);
             }
         }
         if removed {
@@ -388,26 +416,13 @@ impl MePool {
     ) {
         let timeout = timeout.filter(|d| !d.is_zero());
         let found = {
-            let mut ws = self.writers.write().await;
-            if let Some(w) = ws.iter_mut().find(|w| w.id == writer_id) {
-                let already_draining = w.draining.swap(true, Ordering::Relaxed);
-                w.allow_drain_fallback
-                    .store(allow_drain_fallback, Ordering::Relaxed);
-                let now_epoch_secs = Self::now_epoch_secs();
-                w.draining_started_at_epoch_secs
-                    .store(now_epoch_secs, Ordering::Relaxed);
-                let drain_deadline_epoch_secs = timeout
-                    .map(|duration| now_epoch_secs.saturating_add(duration.as_secs()))
-                    .unwrap_or(0);
-                w.drain_deadline_epoch_secs
-                    .store(drain_deadline_epoch_secs, Ordering::Relaxed);
-                if !already_draining {
-                    self.stats.increment_pool_drain_active();
-                    self.increment_draining_active_runtime();
+            let ws = self.writers.write().await;
+            let mut registry_registration = self.registry.prepare_writer_registration().await;
+            if let Some(w) = ws.iter().find(|w| w.id == writer_id) {
+                if !allow_drain_fallback {
+                    registry_registration.retire(writer_id);
                 }
-                w.contour
-                    .store(WriterContour::Draining.as_u8(), Ordering::Relaxed);
-                w.draining.store(true, Ordering::Relaxed);
+                self.apply_writer_draining_state(w, timeout, allow_drain_fallback);
                 true
             } else {
                 false
@@ -425,6 +440,39 @@ impl MePool {
         );
     }
 
+    /// Publishes drain metadata before the release-store that makes draining observable.
+    pub(in crate::transport::middle_proxy) fn apply_writer_draining_state(
+        &self,
+        writer: &MeWriter,
+        timeout: Option<Duration>,
+        allow_drain_fallback: bool,
+    ) -> bool {
+        let timeout = timeout.filter(|duration| !duration.is_zero());
+        let already_draining = writer.draining.load(Ordering::Acquire);
+        writer
+            .allow_drain_fallback
+            .store(allow_drain_fallback, Ordering::Release);
+        let now_epoch_secs = Self::now_epoch_secs();
+        writer
+            .draining_started_at_epoch_secs
+            .store(now_epoch_secs, Ordering::Release);
+        let drain_deadline_epoch_secs = timeout
+            .map(|duration| now_epoch_secs.saturating_add(duration.as_secs()))
+            .unwrap_or(0);
+        writer
+            .drain_deadline_epoch_secs
+            .store(drain_deadline_epoch_secs, Ordering::Release);
+        writer
+            .contour
+            .store(WriterContour::Draining.as_u8(), Ordering::Release);
+        writer.draining.store(true, Ordering::Release);
+        if !already_draining {
+            self.stats.increment_pool_drain_active();
+            self.increment_draining_active_runtime();
+        }
+        !already_draining
+    }
+
     pub(crate) async fn mark_writer_draining(self: &Arc<Self>, writer_id: u64) {
         self.mark_writer_draining_with_timeout(writer_id, Some(Duration::from_secs(300)), false)
             .await;
@@ -434,7 +482,7 @@ impl MePool {
         &self,
         writer: &MeWriter,
     ) -> bool {
-        if !writer.draining.load(Ordering::Relaxed) {
+        if !writer.draining.load(Ordering::Acquire) {
             return true;
         }
         if !writer.allow_drain_fallback.load(Ordering::Relaxed) {

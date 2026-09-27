@@ -329,13 +329,14 @@ mod tests {
 pub async fn run_me_ping(pool: &Arc<MePool>, rng: &SecureRandom) -> Vec<MePingReport> {
     let mut reports = Vec::new();
 
+    let endpoint_snapshot = pool.endpoint_snapshot.load_full();
     let v4_map = if pool.decision.ipv4_me {
-        pool.proxy_map_v4.read().await.clone()
+        endpoint_snapshot.map_v4.clone()
     } else {
         HashMap::new()
     };
     let v6_map = if pool.decision.ipv6_me {
-        pool.proxy_map_v6.read().await.clone()
+        endpoint_snapshot.map_v6.clone()
     } else {
         HashMap::new()
     };

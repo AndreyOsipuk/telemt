@@ -9,6 +9,10 @@ pub(super) fn validate_vhosts(config: &mut ProxyConfig) -> Result<()> {
     let mut profile_count = 0usize;
     for (vhost_idx, vhost) in config.web.vhosts.iter_mut().enumerate() {
         vhost.host = normalize_web_host(&vhost.host, &format!("web.vhosts[{vhost_idx}].host"))?;
+        validate_web_base_path(
+            &vhost.base_path,
+            &format!("web.vhosts[{vhost_idx}].base_path"),
+        )?;
         if !hosts.insert(vhost.host.clone()) {
             return config_error(&format!("duplicate WEB vhost host `{}`", vhost.host));
         }
@@ -73,6 +77,25 @@ pub(super) fn validate_vhosts(config: &mut ProxyConfig) -> Result<()> {
         return config_error("WEB profiles exceed web.limits.max_profiles");
     }
     Ok(())
+}
+
+fn validate_web_base_path(value: &str, field: &str) -> Result<()> {
+    let valid = value.len() <= 128
+        && !value.starts_with('/')
+        && !value.ends_with('/')
+        && value.split('/').all(|segment| {
+            let mut bytes = segment.bytes();
+            bytes
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphanumeric())
+                && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        });
+    if value.is_empty() || valid {
+        return Ok(());
+    }
+    config_error(&format!(
+        "{field} must be empty or contain at most 128 ASCII bytes in slash-separated [A-Za-z0-9][A-Za-z0-9_-]* segments"
+    ))
 }
 
 pub(super) fn normalize_web_host(value: &str, field: &str) -> Result<String> {

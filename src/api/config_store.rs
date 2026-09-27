@@ -10,12 +10,15 @@ use super::model::ApiFailure;
 
 // Source-preserving TOML rendering and atomic persistence helpers.
 mod persistence;
+// Compare-and-replace file persistence and metadata preservation.
+mod atomic;
 
+pub(in crate::api) use atomic::{write_atomic, write_atomic_if_unchanged};
 #[cfg(test)]
 use persistence::{find_toml_table_bounds, render_access_section, save_sections_to_disk};
 pub(in crate::api) use persistence::{
     render_server_listeners, render_top_level_section, save_access_sections_to_disk,
-    upsert_toml_table, write_atomic,
+    save_access_sections_to_disk_if_revision, upsert_toml_table,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,22 +57,21 @@ pub(super) fn parse_if_match(headers: &hyper::HeaderMap) -> Option<String> {
         .map(|value| value.trim_matches('"').to_string())
 }
 
-pub(super) async fn ensure_expected_revision(
+/// Loads one mutation base and validates its revision from the same source snapshot.
+pub(super) async fn load_config_for_mutation(
     config_path: &Path,
     expected_revision: Option<&str>,
-) -> Result<(), ApiFailure> {
-    let Some(expected) = expected_revision else {
-        return Ok(());
-    };
-    let current = current_revision(config_path).await?;
-    if current != expected {
+) -> Result<(ProxyConfig, String), ApiFailure> {
+    let loaded = load_config_snapshot(config_path, false).await?;
+    let revision = compute_snapshot_revision(&loaded);
+    if expected_revision.is_some_and(|expected| expected != revision) {
         return Err(ApiFailure::new(
             hyper::StatusCode::CONFLICT,
             "revision_conflict",
             "Config revision mismatch",
         ));
     }
-    Ok(())
+    Ok((loaded.config, revision))
 }
 
 pub(super) async fn current_revision(config_path: &Path) -> Result<String, ApiFailure> {
@@ -243,15 +245,24 @@ pub(super) async fn load_candidate_snapshot(
 }
 
 fn normalize_source_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(path))
-                .unwrap_or_else(|_| path.to_path_buf())
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
         }
-    })
+    }
+    normalized
 }
 
 pub(super) async fn load_config_from_disk(config_path: &Path) -> Result<ProxyConfig, ApiFailure> {

@@ -135,6 +135,38 @@ impl Stats {
             .store(ok, Ordering::Relaxed);
     }
 
+    /// Records one successful process-owned firewall reconciliation.
+    pub fn increment_conntrack_rule_reconcile_success_total(&self) {
+        if self.telemetry_core_enabled() {
+            self.conntrack_rule_reconcile_success_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Records one failed process-owned firewall reconciliation.
+    pub fn increment_conntrack_rule_reconcile_error_total(&self) {
+        if self.telemetry_core_enabled() {
+            self.conntrack_rule_reconcile_error_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Records one successful firewall transaction rollback.
+    pub fn increment_conntrack_rule_rollback_success_total(&self) {
+        if self.telemetry_core_enabled() {
+            self.conntrack_rule_rollback_success_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Records one rollback failure that leaves applied firewall state unknown.
+    pub fn increment_conntrack_rule_rollback_error_total(&self) {
+        if self.telemetry_core_enabled() {
+            self.conntrack_rule_rollback_error_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     pub fn increment_conntrack_delete_attempt_total(&self) {
         if self.telemetry_core_enabled() {
             self.conntrack_delete_attempt_total

@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -15,82 +14,6 @@ pub(super) struct SecurityWhitelistData {
     pub(super) enabled: bool,
     pub(super) entries_total: usize,
     pub(super) entries: Vec<String>,
-}
-
-#[derive(Serialize)]
-pub(super) struct RuntimeMePoolStateGenerationData {
-    pub(super) active_generation: u64,
-    pub(super) warm_generation: u64,
-    pub(super) warm_generations: Vec<u64>,
-    pub(super) pending_hardswap_generation: u64,
-    pub(super) pending_hardswap_age_secs: Option<u64>,
-    pub(super) reinit_inflight: usize,
-    pub(super) reinit_max_concurrency_effective: usize,
-    pub(super) draining_generations: Vec<u64>,
-}
-
-#[derive(Serialize)]
-pub(super) struct RuntimeMePoolStateHardswapData {
-    pub(super) enabled: bool,
-    pub(super) pending: bool,
-}
-
-#[derive(Serialize)]
-pub(super) struct RuntimeMePoolStateWriterContourData {
-    pub(super) warm: usize,
-    pub(super) active: usize,
-    pub(super) draining: usize,
-}
-
-#[derive(Serialize)]
-pub(super) struct RuntimeMePoolStateWriterHealthData {
-    pub(super) healthy: usize,
-    pub(super) degraded: usize,
-    pub(super) draining: usize,
-}
-
-#[derive(Serialize)]
-pub(super) struct RuntimeMePoolStateWriterData {
-    pub(super) total: usize,
-    pub(super) alive_non_draining: usize,
-    pub(super) draining: usize,
-    pub(super) degraded: usize,
-    pub(super) contour: RuntimeMePoolStateWriterContourData,
-    pub(super) health: RuntimeMePoolStateWriterHealthData,
-}
-
-#[derive(Serialize)]
-pub(super) struct RuntimeMePoolStateRefillDcData {
-    pub(super) dc: i16,
-    pub(super) family: &'static str,
-    pub(super) inflight: usize,
-}
-
-#[derive(Serialize)]
-pub(super) struct RuntimeMePoolStateRefillData {
-    pub(super) inflight_endpoints_total: usize,
-    pub(super) inflight_dc_total: usize,
-    pub(super) running_dc_total: usize,
-    pub(super) pending_dc_total: usize,
-    pub(super) by_dc: Vec<RuntimeMePoolStateRefillDcData>,
-}
-
-#[derive(Serialize)]
-pub(super) struct RuntimeMePoolStatePayload {
-    pub(super) generations: RuntimeMePoolStateGenerationData,
-    pub(super) hardswap: RuntimeMePoolStateHardswapData,
-    pub(super) writers: RuntimeMePoolStateWriterData,
-    pub(super) refill: RuntimeMePoolStateRefillData,
-}
-
-#[derive(Serialize)]
-pub(super) struct RuntimeMePoolStateData {
-    pub(super) enabled: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) reason: Option<&'static str>,
-    pub(super) generated_at_epoch_secs: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) data: Option<RuntimeMePoolStatePayload>,
 }
 
 #[derive(Serialize)]
@@ -285,100 +208,6 @@ pub(super) fn build_security_whitelist_data(cfg: &ProxyConfig) -> SecurityWhitel
     }
 }
 
-pub(super) async fn build_runtime_me_pool_state_data(shared: &ApiShared) -> RuntimeMePoolStateData {
-    let now_epoch_secs = now_epoch_secs();
-    let Some(pool) = shared.me_pool.read().await.clone() else {
-        return RuntimeMePoolStateData {
-            enabled: false,
-            reason: Some(SOURCE_UNAVAILABLE_REASON),
-            generated_at_epoch_secs: now_epoch_secs,
-            data: None,
-        };
-    };
-
-    let (status, runtime) = pool.api_coherent_snapshots().await;
-    let refill = pool.api_refill_snapshot().await;
-
-    let mut draining_generations = BTreeSet::<u64>::new();
-    let mut contour_warm = 0usize;
-    let mut contour_active = 0usize;
-    let mut contour_draining = 0usize;
-    let mut draining = 0usize;
-    let mut degraded = 0usize;
-    let mut healthy = 0usize;
-
-    for writer in &status.writers {
-        if writer.draining {
-            draining_generations.insert(writer.generation);
-            draining += 1;
-        }
-        if writer.degraded && !writer.draining {
-            degraded += 1;
-        }
-        if !writer.degraded && !writer.draining {
-            healthy += 1;
-        }
-        match writer.state {
-            "warm" => contour_warm += 1,
-            "active" => contour_active += 1,
-            _ => contour_draining += 1,
-        }
-    }
-
-    RuntimeMePoolStateData {
-        enabled: true,
-        reason: None,
-        generated_at_epoch_secs: status.generated_at_epoch_secs,
-        data: Some(RuntimeMePoolStatePayload {
-            generations: RuntimeMePoolStateGenerationData {
-                active_generation: runtime.active_generation,
-                warm_generation: runtime.warm_generation,
-                warm_generations: runtime.warm_generations,
-                pending_hardswap_generation: runtime.pending_hardswap_generation,
-                pending_hardswap_age_secs: runtime.pending_hardswap_age_secs,
-                reinit_inflight: runtime.reinit_inflight,
-                reinit_max_concurrency_effective: runtime.reinit_max_concurrency_effective,
-                draining_generations: draining_generations.into_iter().collect(),
-            },
-            hardswap: RuntimeMePoolStateHardswapData {
-                enabled: runtime.hardswap_enabled,
-                pending: runtime.pending_hardswap_generation != 0,
-            },
-            writers: RuntimeMePoolStateWriterData {
-                total: status.writers.len(),
-                alive_non_draining: status.writers.len().saturating_sub(draining),
-                draining,
-                degraded,
-                contour: RuntimeMePoolStateWriterContourData {
-                    warm: contour_warm,
-                    active: contour_active,
-                    draining: contour_draining,
-                },
-                health: RuntimeMePoolStateWriterHealthData {
-                    healthy,
-                    degraded,
-                    draining,
-                },
-            },
-            refill: RuntimeMePoolStateRefillData {
-                inflight_endpoints_total: refill.inflight_endpoints_total,
-                inflight_dc_total: refill.inflight_dc_total,
-                running_dc_total: refill.running_dc_total,
-                pending_dc_total: refill.pending_dc_total,
-                by_dc: refill
-                    .by_dc
-                    .into_iter()
-                    .map(|entry| RuntimeMePoolStateRefillDcData {
-                        dc: entry.dc,
-                        family: entry.family,
-                        inflight: entry.inflight,
-                    })
-                    .collect(),
-            },
-        }),
-    }
-}
-
 pub(super) async fn build_runtime_me_quality_data(shared: &ApiShared) -> RuntimeMeQualityData {
     let now_epoch_secs = now_epoch_secs();
     let Some(pool) = shared.me_pool.read().await.clone() else {
@@ -541,7 +370,10 @@ pub(super) async fn build_runtime_upstream_quality_data(
     }
 }
 
+// ME pool runtime-state projection.
+mod me_pool;
 // NAT/STUN runtime projection and timestamping.
 mod nat;
+pub(super) use me_pool::build_runtime_me_pool_state_data;
 pub(super) use nat::build_runtime_nat_stun_data;
 use nat::now_epoch_secs;

@@ -28,9 +28,15 @@ mod negotiation_tests;
 // Client failure diagnostics remain separate from negotiation state scenarios.
 #[path = "carrier_diagnostic_tests.rs"]
 mod carrier_diagnostic_tests;
+// Bridge sideband diagnostics remain separate from carrier negotiation reports.
+#[path = "diagnostic_tests.rs"]
+mod diagnostic_tests;
 // Reload-stability tests for session-owned timeout policy.
 #[path = "session_policy_tests.rs"]
 mod session_policy_tests;
+// Runtime-generation authority fences for WEB bootstrap publication.
+#[path = "generation_fence_tests.rs"]
+mod generation_fence_tests;
 // Runtime control integration stays separate from carrier protocol scenarios.
 #[path = "control_tests.rs"]
 mod control_tests;
@@ -43,11 +49,18 @@ mod recovery_tests;
 // Decoy fast-track routing and telemetry remain isolated from carrier protocol scenarios.
 #[path = "decoy_fasttrack_tests.rs"]
 mod decoy_fasttrack_tests;
+// Base-path routing and credential containment share reference-contract coverage.
+#[path = "base_path_tests.rs"]
+mod base_path_tests;
 // Raw response parsing helpers are shared by the HTTP integration test modules.
 #[path = "response_test_support.rs"]
 mod response_test_support;
+// Alternate runtime fixtures remain separate from the main integration scenarios.
+#[path = "runtime_test_support.rs"]
+mod runtime_test_support;
 
 pub(super) use response_test_support::{response_header, split_response};
+pub(super) use runtime_test_support::runtime_config_with_base;
 
 const TEST_CARRIER_DEADLINES_SECS: [u64; 4] = [3, 5, 8, 12];
 
@@ -80,6 +93,7 @@ fn runtime_config_with_carriers(
         carrier_learning,
         carriers,
         TEST_CARRIER_DEADLINES_SECS,
+        "/",
     )
 }
 
@@ -98,6 +112,7 @@ pub(super) fn negotiation_runtime_config_with_deadlines(
         carrier_learning,
         carriers,
         carrier_negotiation_deadlines_secs,
+        "/",
     )
 }
 
@@ -108,6 +123,7 @@ fn runtime_config_with_carriers_and_deadlines(
     carrier_learning: bool,
     carriers: Arc<[WebCarrier]>,
     carrier_negotiation_deadlines_secs: [u64; 4],
+    base: &str,
 ) -> ProxyConfig {
     let profile = Arc::new(WebRuntimeProfile {
         host: "proxy.example.com".to_string(),
@@ -120,6 +136,7 @@ fn runtime_config_with_carriers_and_deadlines(
         carriers: Arc::clone(&carriers),
         carrier_negotiation_deadlines_secs,
         capability,
+        credential_id: [0; 16],
         key_fingerprint: "0000000000000000".to_string(),
         max_sessions: 4,
         max_streams: 16,
@@ -140,6 +157,7 @@ fn runtime_config_with_carriers_and_deadlines(
     });
     let vhost = Arc::new(WebRuntimeVhost {
         host: "proxy.example.com".to_string(),
+        base: base.to_string(),
         decoy_fasttrack_mode: WebDecoyFastTrackMode::Off,
         decoy: WebRuntimeDecoy::StaticDirectory(Arc::clone(&site)),
         decoy_header_secs: 1,
@@ -152,6 +170,7 @@ fn runtime_config_with_carriers_and_deadlines(
         "other.example.com".to_string(),
         Arc::new(WebRuntimeVhost {
             host: "other.example.com".to_string(),
+            base: "/".to_string(),
             decoy_fasttrack_mode: WebDecoyFastTrackMode::Off,
             decoy: WebRuntimeDecoy::StaticDirectory(site),
             decoy_header_secs: 1,
@@ -174,6 +193,7 @@ fn runtime_config_with_carriers_and_deadlines(
     config.web.runtime = Some(Arc::new(WebRuntimeConfig {
         vhosts,
         profiles: vec![profile],
+        capabilities: vec![capability].into_boxed_slice(),
     }));
     config
 }
@@ -321,12 +341,12 @@ async fn rejected_bridge_bootstrap_falls_back_to_uncacheable_static_index() {
 
     let fallback_response = request(&listener, &runtime, bridge_request()).await;
     let (fallback_headers, fallback_body) = split_response(&fallback_response);
-    assert!(fallback_headers.starts_with(b"HTTP/1.1 200"));
+    assert!(fallback_headers.starts_with(b"HTTP/1.1 404"));
     assert_eq!(
         response_header(fallback_headers, "cache-control"),
         "no-store"
     );
-    assert_eq!(fallback_body, b"<!doctype html><title>decoy</title>");
+    assert_eq!(fallback_body, b"not found\n");
 
     runtime.shutdown().await;
     generation.stop_sessions().await;
@@ -405,26 +425,6 @@ async fn unused_bootstrap_survives_equivalent_runtime_generation_swap() {
     runtime.shutdown().await;
     generation.stop_sessions().await;
     generation.stop_background_tasks().await;
-    replacement.stop_sessions().await;
-    replacement.stop_background_tasks().await;
-}
-
-#[tokio::test]
-async fn bridge_bootstrap_uses_the_generation_that_selected_its_profile() {
-    let initial = test_runtime_generation(1, runtime_config([21; 32], WebCarrier::Https));
-    let active_runtime = Arc::new(ArcSwap::from(Arc::clone(&initial)));
-    let runtime = WebProcessRuntime::start(Arc::clone(&active_runtime));
-    let profile = initial.config().web.runtime.as_ref().unwrap().profiles[0].clone();
-    let replacement = test_runtime_generation(2, runtime_config([22; 32], WebCarrier::HttpsLanes));
-    active_runtime.store(Arc::clone(&replacement));
-
-    let result =
-        runtime.issue_bootstrap_for_generation(&initial, profile, "192.0.2.10".parse().unwrap());
-
-    assert!(result.is_ok());
-    runtime.shutdown().await;
-    initial.stop_sessions().await;
-    initial.stop_background_tasks().await;
     replacement.stop_sessions().await;
     replacement.stop_background_tasks().await;
 }

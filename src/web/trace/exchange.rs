@@ -1,6 +1,5 @@
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use parking_lot::Mutex;
@@ -29,6 +28,8 @@ struct BodyCapture {
 }
 
 struct ExchangeState {
+    phase: ExchangePhase,
+    reserved: usize,
     method: String,
     path: String,
     route: TraceRoute,
@@ -47,6 +48,12 @@ struct ExchangeState {
     body_capture_blocked: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExchangePhase {
+    Open,
+    Committed,
+}
+
 /// One in-flight request-to-response capture with process-wide byte leases.
 pub(crate) struct HttpTraceExchange {
     store: Arc<WebTraceStore>,
@@ -55,8 +62,6 @@ pub(crate) struct HttpTraceExchange {
     started: Instant,
     started_epoch_millis: u64,
     state: Mutex<ExchangeState>,
-    reserved: AtomicUsize,
-    committed: AtomicBool,
 }
 
 impl HttpTraceExchange {
@@ -104,6 +109,8 @@ impl HttpTraceExchange {
             started,
             started_epoch_millis,
             state: Mutex::new(ExchangeState {
+                phase: ExchangePhase::Open,
+                reserved: base_reservation + if dynamic_reserved { dynamic } else { 0 },
                 method,
                 path,
                 route: TraceRoute::Unknown,
@@ -121,21 +128,23 @@ impl HttpTraceExchange {
                 redactions,
                 body_capture_blocked: !dynamic_reserved,
             }),
-            reserved: AtomicUsize::new(
-                base_reservation + if dynamic_reserved { dynamic } else { 0 },
-            ),
-            committed: AtomicBool::new(false),
         })
     }
 
     /// Sets the final request route before body polling or decoy forwarding.
     pub(crate) fn set_route(&self, route: TraceRoute) {
-        self.state.lock().route = route;
+        let mut state = self.state.lock();
+        if state.phase == ExchangePhase::Open {
+            state.route = route;
+        }
     }
 
     /// Sets the trusted effective client address after proxy-header validation.
     pub(crate) fn set_effective_ip(&self, client_ip: IpAddr) {
-        self.state.lock().effective_ip = Some(client_ip);
+        let mut state = self.state.lock();
+        if state.phase == ExchangePhase::Open {
+            state.effective_ip = Some(client_ip);
+        }
     }
 
     /// Binds non-secret profile and process session identity.
@@ -145,8 +154,11 @@ impl HttpTraceExchange {
             .len()
             .saturating_add(profile.key_fingerprint.len());
         let mut state = self.state.lock();
+        if state.phase != ExchangePhase::Open {
+            return;
+        }
         state.identity.session_id = Some(session_id);
-        if self.reserve(dynamic) {
+        if self.reserve_locked(&mut state, dynamic) {
             state.identity.user = Some(profile.user.clone());
             state.identity.key_fingerprint = Some(profile.key_fingerprint.clone());
         }
@@ -160,8 +172,11 @@ impl HttpTraceExchange {
             .map_or(0, String::len)
             .saturating_add(identity.key_fingerprint.as_ref().map_or(0, String::len));
         let mut state = self.state.lock();
+        if state.phase != ExchangePhase::Open {
+            return;
+        }
         state.identity.session_id = identity.session_id;
-        if self.reserve(dynamic) {
+        if self.reserve_locked(&mut state, dynamic) {
             state.identity.user = identity.user;
             state.identity.key_fingerprint = identity.key_fingerprint;
         }
@@ -172,21 +187,25 @@ impl HttpTraceExchange {
         if value.is_empty() {
             return;
         }
-        if !self.reserve(value.len()) {
-            self.block_body_capture();
+        let mut state = self.state.lock();
+        if state.phase != ExchangePhase::Open {
             return;
         }
-        self.state
-            .lock()
-            .redactions
-            .push(Zeroizing::new(value.to_vec()));
+        if !self.reserve_locked(&mut state, value.len()) {
+            Self::block_body_capture_locked(&mut state);
+            return;
+        }
+        state.redactions.push(Zeroizing::new(value.to_vec()));
     }
 
     /// Captures response status and sanitized headers at handler completion.
     pub(crate) fn response_ready<B>(&self, response: &hyper::Response<B>) {
         let dynamic = response_dynamic_bytes(response, &self.policy);
-        let reserved = self.reserve(dynamic);
         let mut state = self.state.lock();
+        if state.phase != ExchangePhase::Open {
+            return;
+        }
+        let reserved = self.reserve_locked(&mut state, dynamic);
         state.status = Some(response.status().as_u16());
         if self.policy.capture_headers && reserved {
             state.response_headers = sanitized_headers(response.headers());
@@ -210,19 +229,22 @@ impl HttpTraceExchange {
     /// Appends one body data frame without changing the proxied bytes.
     pub(crate) fn body_data(&self, direction: TraceDirection, data: &[u8]) {
         let mut state = self.state.lock();
+        if state.phase != ExchangePhase::Open {
+            return;
+        }
         let route = state.route;
         let body_capture_blocked = state.body_capture_blocked;
-        let body = match direction {
-            TraceDirection::Request => &mut state.request_body,
-            TraceDirection::Response => &mut state.response_body,
-        };
-        body.observed_bytes = body
-            .observed_bytes
-            .saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX));
+        {
+            let body = selected_body(&mut state, direction);
+            body.observed_bytes = body
+                .observed_bytes
+                .saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX));
+        }
         if data.is_empty() {
             return;
         }
         if body_capture_blocked {
+            let body = selected_body(&mut state, direction);
             body.truncated |= !data.is_empty();
             return;
         }
@@ -230,6 +252,7 @@ impl HttpTraceExchange {
         else {
             return;
         };
+        let body = selected_body(&mut state, direction);
         if body.captured.len() >= limit {
             if !data.is_empty() && !body.truncated {
                 self.store.record_truncation();
@@ -237,13 +260,17 @@ impl HttpTraceExchange {
             body.truncated |= !data.is_empty();
             return;
         }
-        if body.captured.capacity() == 0 {
-            if !self.reserve(limit) {
+        let needs_reservation = body.captured.capacity() == 0;
+        if needs_reservation {
+            if !self.reserve_locked(&mut state, limit) {
+                let body = selected_body(&mut state, direction);
                 body.truncated = true;
                 return;
             }
+            let body = selected_body(&mut state, direction);
             body.captured = Vec::with_capacity(limit);
         }
+        let body = selected_body(&mut state, direction);
         let take = data.len().min(limit - body.captured.len());
         body.captured.extend_from_slice(&data[..take]);
         if take < data.len() {
@@ -257,6 +284,9 @@ impl HttpTraceExchange {
     /// Marks one request or response body terminal state.
     pub(crate) fn body_finished(&self, direction: TraceDirection, terminal: TraceBodyState) {
         let mut state = self.state.lock();
+        if state.phase != ExchangePhase::Open {
+            return;
+        }
         let body = match direction {
             TraceDirection::Request => &mut state.request_body,
             TraceDirection::Response => &mut state.response_body,
@@ -293,7 +323,8 @@ impl HttpTraceExchange {
             .div_ceil(frame::HEADER_BYTES)
             .clamp(1, limits.max_frames_per_body);
         let reservation = estimated_frames.saturating_mul(std::mem::size_of::<TraceFrame>());
-        if !self.reserve(reservation) {
+        let mut state = self.state.lock();
+        if state.phase != ExchangePhase::Open || !self.reserve_locked(&mut state, reservation) {
             return;
         }
         let frames = match frame::parse_all(body, limits) {
@@ -319,35 +350,38 @@ impl HttpTraceExchange {
                 parse_error: Some(frame_error_name(error)),
             }],
         };
-        self.state.lock().frames.extend(frames);
+        state.frames.extend(frames);
     }
 
     /// Commits once after response body consumption or drop.
     pub(crate) fn commit(&self) {
-        if self.committed.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let reserved = self.reserved.load(Ordering::Acquire);
-        let record = self.build_record();
+        let (record, reserved) = {
+            let mut state = self.state.lock();
+            if state.phase != ExchangePhase::Open {
+                return;
+            }
+            state.phase = ExchangePhase::Committed;
+            let reserved = state.reserved;
+            (self.build_record_locked(&mut state), reserved)
+        };
         if !self.store.try_commit(record, reserved, self.epoch) {
             self.store.release(reserved);
         }
     }
 
-    fn reserve(&self, bytes: usize) -> bool {
+    fn reserve_locked(&self, state: &mut ExchangeState, bytes: usize) -> bool {
         if bytes == 0 {
             return true;
         }
         if self.store.try_reserve(bytes) {
-            self.reserved.fetch_add(bytes, Ordering::AcqRel);
+            state.reserved = state.reserved.saturating_add(bytes);
             true
         } else {
             false
         }
     }
 
-    fn block_body_capture(&self) {
-        let mut state = self.state.lock();
+    fn block_body_capture_locked(state: &mut ExchangeState) {
         state.body_capture_blocked = true;
         state.request_body.captured.clear();
         state.response_body.captured.clear();
@@ -355,8 +389,7 @@ impl HttpTraceExchange {
         state.response_body.truncated = true;
     }
 
-    fn build_record(&self) -> TraceRecord {
-        let mut state = self.state.lock();
+    fn build_record_locked(&self, state: &mut ExchangeState) -> TraceRecord {
         let redactions = std::mem::take(&mut state.redactions);
         scrub_body(&mut state.request_body.captured, &redactions);
         scrub_body(&mut state.response_body.captured, &redactions);
@@ -394,7 +427,7 @@ impl HttpTraceExchange {
 
 impl Drop for HttpTraceExchange {
     fn drop(&mut self) {
-        if !self.committed.load(Ordering::Acquire) {
+        if self.state.get_mut().phase == ExchangePhase::Open {
             self.body_finished(TraceDirection::Request, TraceBodyState::Aborted);
             self.body_finished(TraceDirection::Response, TraceBodyState::Aborted);
         }
@@ -410,83 +443,12 @@ fn body_snapshot(policy: &WebDebugConfig, body: &mut BodyCapture) -> Option<Trac
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn request_response_capture_redacts_credentials_and_omits_query() {
-        let request_token = "request-token-0123456789";
-        let capability = "capability-0123456789";
-        let response_token = "response-token-0123456789";
-        let request = hyper::Request::builder()
-            .uri(format!("/?bridge={capability}"))
-            .header("authorization", format!("Bearer {request_token}"))
-            .body(())
-            .unwrap();
-        let policy = WebDebugConfig {
-            enabled: true,
-            body_capture: WebDebugBodyCapture::Prefix,
-            body_prefix_bytes: 256,
-            ..Default::default()
-        };
-        let limits = WebLimitsConfig {
-            debug_records_capacity: 4,
-            debug_bytes_global: 16 * 1024,
-            ..Default::default()
-        };
-        let store = WebTraceStore::new(policy, &limits);
-        let exchange = store
-            .begin_http(&request, "192.0.2.30".parse().unwrap())
-            .unwrap();
-        exchange.set_route(TraceRoute::Bridge);
-        exchange.body_data(
-            TraceDirection::Request,
-            format!("{request_token}:{capability}").as_bytes(),
-        );
-        exchange.body_finished(TraceDirection::Request, TraceBodyState::Complete);
-
-        let response = hyper::Response::builder()
-            .status(hyper::StatusCode::OK)
-            .header("x-session-token", response_token)
-            .body(())
-            .unwrap();
-        exchange.response_ready(&response);
-        exchange.body_data(TraceDirection::Response, response_token.as_bytes());
-        exchange.body_finished(TraceDirection::Response, TraceBodyState::Complete);
-
-        let records = store.snapshot_matching(|_| true);
-        assert_eq!(records.len(), 1);
-        let TraceRecordKind::Http(http) = &records[0].record.kind else {
-            panic!("expected HTTP debug record");
-        };
-        assert_eq!(http.path, "/");
-        assert_eq!(http.route, TraceRoute::Bridge);
-        assert!(
-            http.request_headers
-                .iter()
-                .any(|header| header.name == "authorization" && header.value.is_none())
-        );
-        assert!(
-            http.response_headers
-                .iter()
-                .any(|header| header.name == "x-session-token" && header.value.is_none())
-        );
-        let request_body = http.request_body.as_ref().unwrap();
-        let response_body = http.response_body.as_ref().unwrap();
-        for secret in [request_token.as_bytes(), capability.as_bytes()] {
-            assert!(
-                !request_body
-                    .captured
-                    .windows(secret.len())
-                    .any(|value| value == secret)
-            );
-        }
-        assert!(
-            !response_body
-                .captured
-                .windows(response_token.len())
-                .any(|value| value == response_token.as_bytes())
-        );
+fn selected_body(state: &mut ExchangeState, direction: TraceDirection) -> &mut BodyCapture {
+    match direction {
+        TraceDirection::Request => &mut state.request_body,
+        TraceDirection::Response => &mut state.response_body,
     }
 }
+
+#[cfg(test)]
+mod tests;

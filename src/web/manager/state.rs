@@ -7,9 +7,10 @@ use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use super::{CarrierRequest, ProfileKey, TOKEN_BYTES, TokenHash};
+use super::{CarrierRequest, ProfileKey, TokenAuthenticator, TokenHash, TokenKind};
 use crate::config::{WebCarrier, WebRuntimeConfig, WebRuntimeProfile, WebTimeoutsConfig};
 use crate::maestro::generation::RuntimeGeneration;
+use crate::proxy::user_admission::UserSessionRegistration;
 use crate::web::session::WebSession;
 use crate::web::telemetry::WebCarrierSelectionDisposition;
 
@@ -34,6 +35,8 @@ impl CarrierChainPhase {
 
 /// One issued bootstrap and optional idempotent session-creation replay state.
 pub(super) struct Bootstrap {
+    /// User authority ownership retained for the credential lifetime.
+    pub(super) user_registration: UserSessionRegistration,
     /// Credential and replay-state expiry deadline.
     pub(super) expires_at: Instant,
     /// Stable ordering point used for bounded eviction.
@@ -46,6 +49,10 @@ pub(super) struct Bootstrap {
     pub(super) timeouts: WebTimeoutsConfig,
     /// Process-unique non-secret identifier shared by bootstrap and session traces.
     pub(super) trace_session_id: u64,
+    /// Whether this bridge was issued with the diagnostic sideband enabled.
+    pub(super) bridge_diagnostics_enabled: bool,
+    /// Fixed event slots already claimed by this bootstrap chain.
+    pub(super) bridge_diagnostic_events: u16,
     /// Bounded display form of the issuing User-Agent.
     pub(super) user_agent: Option<Arc<str>>,
     /// Opaque non-secret identifier used for exact User-Agent filtering.
@@ -226,10 +233,13 @@ impl Default for ManagerState {
 pub(super) fn new_unique_token(
     generation: &RuntimeGeneration,
     state: &ManagerState,
+    authenticator: &TokenAuthenticator,
+    kind: TokenKind,
 ) -> Option<(String, TokenHash)> {
     for _ in 0..8 {
-        let mut raw = [0u8; TOKEN_BYTES];
-        generation.rng.fill(&mut raw);
+        let mut nonce = [0u8; 16];
+        generation.rng.fill(&mut nonce);
+        let raw = authenticator.issue(kind, nonce);
         let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
         let hash = Sha256::digest(raw).into();
         if !state.bootstraps.contains_key(&hash)
@@ -269,6 +279,7 @@ pub(super) fn matching_profile(
             profile.host == expected.host
                 && profile.public_addr == expected.public_addr
                 && profile.user == expected.user
+                && profile.credential_id == expected.credential_id
                 && profile.secret_mode == expected.secret_mode
                 && profile.carrier == expected.carrier
                 && profile.carrier_negotiation_enabled == expected.carrier_negotiation_enabled
@@ -299,8 +310,8 @@ pub(super) fn allow_rate(state: &mut RateState, now: Instant, per_minute: u32, b
     true
 }
 
-/// Evicts the oldest unused bootstrap while preserving used retry state.
-pub(super) fn evict_oldest_unused_bootstrap(state: &mut ManagerState) -> bool {
+/// Detaches the oldest unused bootstrap while preserving used retry state.
+pub(super) fn evict_oldest_unused_bootstrap(state: &mut ManagerState) -> Option<Bootstrap> {
     let Some(hash) = state
         .bootstraps
         .iter()
@@ -308,10 +319,11 @@ pub(super) fn evict_oldest_unused_bootstrap(state: &mut ManagerState) -> bool {
         .min_by_key(|(_, bootstrap)| bootstrap.issued_at)
         .map(|(hash, _)| *hash)
     else {
-        return false;
+        return None;
     };
-    remove_bootstrap_locked(state, hash);
-    true
+    let bootstrap = state.bootstraps.remove(&hash)?;
+    decrement_map(&mut state.bootstraps_per_ip, &bootstrap.issuance_ip);
+    Some(bootstrap)
 }
 
 /// Removes expired bootstrap and closed-token entries while the manager lock is held.

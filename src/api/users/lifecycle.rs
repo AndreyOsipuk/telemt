@@ -7,16 +7,34 @@ pub(in crate::api) async fn rotate_secret(
     expected_revision: Option<String>,
     shared: &ApiShared,
 ) -> Result<(CreateUserResponse, String), ApiFailure> {
+    let shared = shared.clone();
+    let user = user.to_string();
+    shared
+        .clone()
+        .run_mutation_completion(async move {
+            rotate_secret_to_completion(&user, body, expected_revision, &shared).await
+        })
+        .await
+}
+
+async fn rotate_secret_to_completion(
+    user: &str,
+    body: RotateSecretRequest,
+    expected_revision: Option<String>,
+    shared: &ApiShared,
+) -> Result<(CreateUserResponse, String), ApiFailure> {
     let secret = body.secret.unwrap_or_else(random_user_secret);
     if !is_valid_user_secret(&secret) {
         return Err(ApiFailure::bad_request(
             "secret must be exactly 32 hex characters",
         ));
     }
+    let credential_id = credential_id_from_hex(&secret)
+        .ok_or_else(|| ApiFailure::internal("validated user secret could not be decoded"))?;
 
     let _guard = shared.mutation_lock.lock().await;
-    let mut cfg = load_config_from_disk(&shared.config_path).await?;
-    ensure_expected_revision(&shared.config_path, expected_revision.as_deref()).await?;
+    let (mut cfg, base_revision) =
+        load_config_for_mutation(&shared.config_path, expected_revision.as_deref()).await?;
 
     if !cfg.access.users.contains_key(user) {
         return Err(ApiFailure::new(
@@ -29,8 +47,18 @@ pub(in crate::api) async fn rotate_secret(
     cfg.access.users.insert(user.to_string(), secret.clone());
     cfg.validate()
         .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {}", e)))?;
-    let revision =
-        save_access_sections_to_disk(&shared.config_path, &cfg, &[AccessSection::Users]).await?;
+    let revision = save_access_sections_to_disk_if_revision(
+        &shared.config_path,
+        &cfg,
+        &[AccessSection::Users],
+        Some(&base_revision),
+    )
+    .await?;
+    shared.proxy_shared.stage_user_credential(
+        user,
+        credential_id,
+        cfg.access.is_user_enabled(user),
+    );
     drop(_guard);
 
     let (detected_ip_v4, detected_ip_v6) = shared.detected_link_ips();
@@ -62,9 +90,24 @@ pub(in crate::api) async fn delete_user(
     expected_revision: Option<String>,
     shared: &ApiShared,
 ) -> Result<(String, String), ApiFailure> {
+    let shared = shared.clone();
+    let user = user.to_string();
+    shared
+        .clone()
+        .run_mutation_completion(async move {
+            delete_user_to_completion(&user, expected_revision, &shared).await
+        })
+        .await
+}
+
+async fn delete_user_to_completion(
+    user: &str,
+    expected_revision: Option<String>,
+    shared: &ApiShared,
+) -> Result<(String, String), ApiFailure> {
     let _guard = shared.mutation_lock.lock().await;
-    let mut cfg = load_config_from_disk(&shared.config_path).await?;
-    ensure_expected_revision(&shared.config_path, expected_revision.as_deref()).await?;
+    let (mut cfg, base_revision) =
+        load_config_for_mutation(&shared.config_path, expected_revision.as_deref()).await?;
 
     if !cfg.access.users.contains_key(user) {
         return Err(ApiFailure::new(
@@ -107,8 +150,14 @@ pub(in crate::api) async fn delete_user(
 
     cfg.validate()
         .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {}", e)))?;
-    let revision =
-        save_access_sections_to_disk(&shared.config_path, &cfg, &touched_sections).await?;
+    let revision = save_access_sections_to_disk_if_revision(
+        &shared.config_path,
+        &cfg,
+        &touched_sections,
+        Some(&base_revision),
+    )
+    .await?;
+    let deleted_incarnation = shared.proxy_shared.delete_user(user).incarnation;
     let configured_users = cfg.access.users.keys().cloned().collect();
     if let Err(error) = shared
         .quota_state
@@ -121,9 +170,12 @@ pub(in crate::api) async fn delete_user(
             "Deleted user quota checkpoint cleanup will be reconciled on restart"
         );
     }
-    drop(_guard);
     shared.ip_tracker.remove_user_limit(user).await;
-    shared.ip_tracker.clear_user_ips(user).await;
+    shared
+        .ip_tracker
+        .clear_user_ips_if_not_newer(user, deleted_incarnation)
+        .await;
+    drop(_guard);
 
     Ok((user.to_string(), revision))
 }

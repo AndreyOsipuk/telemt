@@ -107,14 +107,24 @@ async fn read_managed_config_exposes_web_without_runtime_or_access_secrets() {
 #[tokio::test]
 async fn patch_web_debug_is_hot_and_limits_are_process_deferred() {
     let (path, _directory) = temp_config("[web]\nenabled = false\n");
+    let active = ProxyConfig::load(&path).unwrap();
     let debug_patch: Json = serde_json::json!({
-        "web": {"debug": {"enabled": true, "capture_headers": false}}
+        "web": {"debug": {
+            "enabled": true,
+            "sideband": true,
+            "capture_headers": false
+        }}
     });
-    let debug = apply_patch_to_path(&path, &debug_patch, None)
+    let mut debug = apply_patch_to_path(&path, &debug_patch, None)
         .await
         .unwrap();
+    let desired = ProxyConfig::load(&path).unwrap();
+    reconcile_runtime_effect(&mut debug, &active, &desired).unwrap();
+    assert!(!debug.restart_required);
+    assert!(debug.runtime_reload_required);
     assert!(!debug.process_restart_required);
     assert!(debug.changed.iter().any(|section| section == "web"));
+    assert!(desired.web.debug.sideband);
 
     let limits_patch: Json = serde_json::json!({
         "web": {"limits": {"max_http_connections": 2049}}
@@ -311,6 +321,30 @@ async fn patch_writes_the_included_section_owner_only() {
             .await
             .unwrap()
     );
+}
+
+#[tokio::test]
+async fn prepared_patch_rejects_external_edit_before_commit() {
+    let (path, _directory) = temp_config("[censorship]\ntls_domain = \"old.example\"\n");
+    let patch: Json = serde_json::json!({
+        "censorship": {"tls_domain": "api.example"}
+    });
+    let prepared = prepare_patch_to_path(&path, &patch, None).await.unwrap();
+    let external = "[censorship]\ntls_domain = \"external.example\"\n";
+    tokio::fs::write(&path, external).await.unwrap();
+
+    let error = write_atomic_if_unchanged(
+        prepared.config_path,
+        prepared.expected_revision,
+        prepared.owner_path,
+        prepared.expected_owner_contents,
+        prepared.owner_contents,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, "revision_conflict");
+    assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), external);
 }
 
 #[tokio::test]

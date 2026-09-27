@@ -14,6 +14,33 @@ fn test_stats_shared_counters() {
 }
 
 #[test]
+fn runtime_stats_share_process_connection_admission_authority() {
+    let quota_store = Arc::new(QuotaStore::default());
+    let authority = Arc::new(UserConnectionAuthority::default());
+    let first = Stats::with_process_authorities(Arc::clone(&quota_store), Arc::clone(&authority));
+    let second = Stats::with_process_authorities(quota_store, authority);
+
+    let permit = first
+        .connection_authority()
+        .try_acquire("alice", Some(1))
+        .unwrap();
+    assert!(
+        second
+            .connection_authority()
+            .try_acquire("alice", Some(1))
+            .is_none()
+    );
+
+    drop(permit);
+    assert!(
+        second
+            .connection_authority()
+            .try_acquire("alice", Some(1))
+            .is_some()
+    );
+}
+
+#[test]
 fn test_telemetry_policy_disables_core_and_user_counters() {
     let stats = Stats::new();
     stats.apply_telemetry_policy(TelemetryPolicy {
@@ -287,6 +314,20 @@ fn test_quota_used_is_authoritative_and_independent_from_octets_telemetry() {
     stats.quota_charge_post_write(&user_stats, 7);
     assert_eq!(stats.get_user_total_octets(user), 5);
     assert_eq!(stats.get_user_quota_used(user), 7);
+}
+
+#[test]
+fn old_quota_reservation_refund_does_not_reduce_post_reset_usage() {
+    let stats = Stats::new();
+    let user = "quota-reset-generation-user";
+    let user_stats = stats.get_or_create_user_stats_handle(user);
+    let reservation = user_stats.quota_reserve(80, 100).unwrap();
+
+    stats.reset_user_quota(user);
+    stats.quota_charge_post_write(user_stats.as_ref(), 40);
+    drop(reservation);
+
+    assert_eq!(stats.get_user_quota_used(user), 40);
 }
 
 #[test]

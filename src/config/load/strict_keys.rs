@@ -326,6 +326,7 @@ const WEB_LIMITS_CONFIG_KEYS: &[&str] = &[
 
 const WEB_DEBUG_CONFIG_KEYS: &[&str] = &[
     "enabled",
+    "sideband",
     "capture_lifecycle",
     "capture_headers",
     "capture_timings",
@@ -364,7 +365,7 @@ const WEB_TIMEOUTS_CONFIG_KEYS: &[&str] = &[
     "decoy_header_secs",
 ];
 
-const WEB_VHOST_CONFIG_KEYS: &[&str] = &["host", "public_addr", "decoy", "profiles"];
+const WEB_VHOST_CONFIG_KEYS: &[&str] = &["host", "base_path", "public_addr", "decoy", "profiles"];
 const WEB_DECOY_CONFIG_KEYS: &[&str] = &["mode", "upstream", "directory", "index"];
 const WEB_PROFILE_CONFIG_KEYS: &[&str] = &[
     "user",

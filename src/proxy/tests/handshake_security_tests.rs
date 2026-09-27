@@ -1115,7 +1115,8 @@ async fn tls_unknown_sni_reject_handshake_policy_emits_unrecognized_name_alert()
     // Drain what the server wrote. We expect exactly one TLS alert record:
     //   0x15 0x03 0x03 0x00 0x02 0x02 0x70
     // (ContentType.alert, TLS 1.2, length=2, fatal, unrecognized_name)
-    drop(result); // drops the server-side writer so peer_side sees EOF
+    // Drop the server-side writer so `peer_side` observes EOF.
+    drop(result);
     let mut buf = Vec::new();
     peer_side.read_to_end(&mut buf).await.unwrap();
     assert_eq!(
@@ -1241,7 +1242,10 @@ async fn tls_runtime_snapshot_updates_sticky_and_recent_hints() {
             .sticky_user_by_ip
             .get(&peer.ip())
             .map(|entry| *entry),
-        Some(0),
+        config
+            .runtime_user_auth()
+            .and_then(|snapshot| snapshot.entry_by_id(0))
+            .map(|entry| entry.hint_key),
         "successful runtime-snapshot auth must seed sticky ip cache"
     );
     assert_eq!(
@@ -3047,7 +3051,8 @@ async fn valid_tls_is_blocked_by_per_ip_preauth_throttle_without_saturation() {
     let rng = SecureRandom::new();
     let peer: SocketAddr = "198.51.100.103:45103".parse().unwrap();
 
-    auth_probe_state_for_testing_in_shared(shared.as_ref()).insert(
+    insert_auth_probe_state_for_testing_in_shared(
+        shared.as_ref(),
         normalize_auth_probe_ip(peer.ip()),
         AuthProbeState {
             fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
@@ -3085,7 +3090,8 @@ async fn saturation_allows_valid_tls_even_when_peer_ip_is_currently_throttled() 
     let peer: SocketAddr = "198.51.100.104:45104".parse().unwrap();
     let now = Instant::now();
 
-    auth_probe_state_for_testing_in_shared(shared.as_ref()).insert(
+    insert_auth_probe_state_for_testing_in_shared(
+        shared.as_ref(),
         normalize_auth_probe_ip(peer.ip()),
         AuthProbeState {
             fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
@@ -3181,7 +3187,8 @@ async fn saturation_grace_exhaustion_preauth_throttles_repeated_invalid_tls_prob
     let rng = SecureRandom::new();
     let peer: SocketAddr = "198.51.100.205:45205".parse().unwrap();
     let now = Instant::now();
-    auth_probe_state_for_testing_in_shared(shared.as_ref()).insert(
+    insert_auth_probe_state_for_testing_in_shared(
+        shared.as_ref(),
         normalize_auth_probe_ip(peer.ip()),
         AuthProbeState {
             fail_streak: AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS,
@@ -3235,7 +3242,8 @@ async fn saturation_allows_valid_mtproto_even_when_peer_ip_is_currently_throttle
     let peer: SocketAddr = "198.51.100.106:45106".parse().unwrap();
     let now = Instant::now();
 
-    auth_probe_state_for_testing_in_shared(shared.as_ref()).insert(
+    insert_auth_probe_state_for_testing_in_shared(
+        shared.as_ref(),
         normalize_auth_probe_ip(peer.ip()),
         AuthProbeState {
             fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
@@ -3328,7 +3336,8 @@ async fn saturation_grace_exhaustion_preauth_throttles_repeated_invalid_mtproto_
     let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
     let peer: SocketAddr = "198.51.100.206:45206".parse().unwrap();
     let now = Instant::now();
-    auth_probe_state_for_testing_in_shared(shared.as_ref()).insert(
+    insert_auth_probe_state_for_testing_in_shared(
+        shared.as_ref(),
         normalize_auth_probe_ip(peer.ip()),
         AuthProbeState {
             fail_streak: AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS,
@@ -3378,7 +3387,8 @@ async fn saturation_grace_progression_tls_reaches_cap_then_stops_incrementing() 
     let rng = SecureRandom::new();
     let peer: SocketAddr = "198.51.100.207:45207".parse().unwrap();
     let now = Instant::now();
-    auth_probe_state_for_testing_in_shared(shared.as_ref()).insert(
+    insert_auth_probe_state_for_testing_in_shared(
+        shared.as_ref(),
         normalize_auth_probe_ip(peer.ip()),
         AuthProbeState {
             fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
@@ -3461,7 +3471,8 @@ async fn saturation_grace_progression_mtproto_reaches_cap_then_stops_incrementin
     let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
     let peer: SocketAddr = "198.51.100.208:45208".parse().unwrap();
     let now = Instant::now();
-    auth_probe_state_for_testing_in_shared(shared.as_ref()).insert(
+    insert_auth_probe_state_for_testing_in_shared(
+        shared.as_ref(),
         normalize_auth_probe_ip(peer.ip()),
         AuthProbeState {
             fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
@@ -3545,7 +3556,8 @@ async fn saturation_grace_boundary_still_admits_valid_tls_before_exhaustion() {
     let rng = SecureRandom::new();
     let peer: SocketAddr = "198.51.100.209:45209".parse().unwrap();
     let now = Instant::now();
-    auth_probe_state_for_testing_in_shared(shared.as_ref()).insert(
+    insert_auth_probe_state_for_testing_in_shared(
+        shared.as_ref(),
         normalize_auth_probe_ip(peer.ip()),
         AuthProbeState {
             fail_streak: AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS - 1,
@@ -3599,7 +3611,8 @@ async fn saturation_grace_exhaustion_blocks_valid_tls_until_backoff_expires() {
     let rng = SecureRandom::new();
     let peer: SocketAddr = "198.51.100.210:45210".parse().unwrap();
     let now = Instant::now();
-    auth_probe_state_for_testing_in_shared(shared.as_ref()).insert(
+    insert_auth_probe_state_for_testing_in_shared(
+        shared.as_ref(),
         normalize_auth_probe_ip(peer.ip()),
         AuthProbeState {
             fail_streak: AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS,
@@ -3667,7 +3680,8 @@ async fn saturation_grace_exhaustion_is_shared_across_tls_and_mtproto_for_same_p
     let rng = SecureRandom::new();
     let peer: SocketAddr = "198.51.100.211:45211".parse().unwrap();
     let now = Instant::now();
-    auth_probe_state_for_testing_in_shared(shared.as_ref()).insert(
+    insert_auth_probe_state_for_testing_in_shared(
+        shared.as_ref(),
         normalize_auth_probe_ip(peer.ip()),
         AuthProbeState {
             fail_streak: AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS,
@@ -3735,7 +3749,8 @@ async fn adversarial_same_peer_invalid_tls_storm_does_not_bypass_saturation_grac
     let rng = Arc::new(SecureRandom::new());
     let peer: SocketAddr = "198.51.100.212:45212".parse().unwrap();
     let now = Instant::now();
-    auth_probe_state_for_testing_in_shared(shared.as_ref()).insert(
+    insert_auth_probe_state_for_testing_in_shared(
+        shared.as_ref(),
         normalize_auth_probe_ip(peer.ip()),
         AuthProbeState {
             fail_streak: AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS,
@@ -3801,7 +3816,8 @@ async fn light_fuzz_saturation_grace_tls_invalid_inputs_never_authenticate_or_pa
     let rng = SecureRandom::new();
     let peer: SocketAddr = "198.51.100.213:45213".parse().unwrap();
     let now = Instant::now();
-    auth_probe_state_for_testing_in_shared(shared.as_ref()).insert(
+    insert_auth_probe_state_for_testing_in_shared(
+        shared.as_ref(),
         normalize_auth_probe_ip(peer.ip()),
         AuthProbeState {
             fail_streak: AUTH_PROBE_BACKOFF_START_FAILS + AUTH_PROBE_SATURATION_GRACE_FAILS,
@@ -3986,7 +4002,8 @@ async fn expired_saturation_keeps_per_ip_throttle_enforced_for_valid_tls() {
     let peer: SocketAddr = "198.51.100.110:45110".parse().unwrap();
     let now = Instant::now();
 
-    auth_probe_state_for_testing_in_shared(shared.as_ref()).insert(
+    insert_auth_probe_state_for_testing_in_shared(
+        shared.as_ref(),
         normalize_auth_probe_ip(peer.ip()),
         AuthProbeState {
             fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,

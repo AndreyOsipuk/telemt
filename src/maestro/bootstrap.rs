@@ -74,26 +74,7 @@ pub(super) async fn bootstrap(
         data_path.as_deref(),
     );
 
-    if !runtime_base_dir.exists()
-        && let Err(e) = std::fs::create_dir_all(&runtime_base_dir)
-    {
-        eprintln!(
-            "[telemt] Can't create runtime directory {}: {}",
-            runtime_base_dir.display(),
-            e
-        );
-        std::process::exit(1);
-    }
-
-    if !runtime_base_dir.is_dir() {
-        eprintln!(
-            "[telemt] Runtime path exists but is not a directory: {}",
-            runtime_base_dir.display()
-        );
-        std::process::exit(1);
-    }
-
-    if let Err(e) = std::env::set_current_dir(&runtime_base_dir) {
+    if let Err(e) = enter_runtime_directory(&runtime_base_dir) {
         eprintln!(
             "[telemt] Can't use runtime directory {}: {}",
             runtime_base_dir.display(),
@@ -125,7 +106,7 @@ pub(super) async fn bootstrap(
 
                 if config_path_explicit {
                     if let Some(serialized) = serialized.as_ref() {
-                        if let Err(write_error) = std::fs::write(&config_path, serialized) {
+                        if let Err(write_error) = write_private_file(&config_path, serialized) {
                             eprintln!(
                                 "[telemt] Error: failed to create explicit config at {}: {}",
                                 config_path.display(),
@@ -149,7 +130,7 @@ pub(super) async fn bootstrap(
 
                     if let Some(serialized) = serialized.as_ref() {
                         match std::fs::create_dir_all(&runtime_base_dir) {
-                            Ok(()) => match std::fs::write(&runtime_config_path, serialized) {
+                            Ok(()) => match write_private_file(&runtime_config_path, serialized) {
                                 Ok(()) => {
                                     config_path = runtime_config_path;
                                     eprintln!(
@@ -176,7 +157,7 @@ pub(super) async fn bootstrap(
                         }
 
                         if !persisted {
-                            match std::fs::write(&fallback_config_path, serialized) {
+                            match write_private_file(&fallback_config_path, serialized) {
                                 Ok(()) => {
                                     config_path = fallback_config_path;
                                     eprintln!(
@@ -226,24 +207,7 @@ pub(super) async fn bootstrap(
             std::process::exit(1);
         }
 
-        if data_path.exists() {
-            if !data_path.is_dir() {
-                eprintln!(
-                    "[telemt] data_path exists but is not a directory: {}",
-                    data_path.display()
-                );
-                std::process::exit(1);
-            }
-        } else if let Err(e) = std::fs::create_dir_all(data_path) {
-            eprintln!(
-                "[telemt] Can't create data_path {}: {}",
-                data_path.display(),
-                e
-            );
-            std::process::exit(1);
-        }
-
-        if let Err(e) = std::env::set_current_dir(data_path) {
+        if let Err(e) = enter_runtime_directory(data_path) {
             eprintln!(
                 "[telemt] Can't use data_path {}: {}",
                 data_path.display(),
@@ -375,4 +339,27 @@ pub(super) async fn bootstrap(
         runtime_log_filter,
         logging_guard,
     })
+}
+
+fn enter_runtime_directory(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        crate::util::secure_fs::chdir_nofollow_or_create(path, 0o750)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path)?;
+        std::env::set_current_dir(path)
+    }
+}
+
+fn write_private_file(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        crate::util::secure_fs::atomic_replace(path, contents.as_bytes(), 0o600)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)
+    }
 }

@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use super::WebSession;
+use super::{DeferredSessionEffects, WebSession};
 
 /// Stable terminal cause assigned by the first session-close winner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,6 +25,8 @@ pub(crate) enum SessionCloseReason {
     WebSocketEnded,
     /// An authenticated control-plane request selected this session.
     ApiClose,
+    /// Process user authority revoked or replaced the authenticated credential.
+    UserDisabled,
     /// A graceful operator drain reached its force-close deadline.
     OperatorForce,
     /// Terminal process shutdown closed all remaining sessions.
@@ -33,7 +35,7 @@ pub(crate) enum SessionCloseReason {
 
 impl SessionCloseReason {
     /// Complete fixed reason set in stable API and metric order.
-    pub(crate) const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 12] = [
         Self::ClientDelete,
         Self::BridgeRecovery,
         Self::PeerIdle,
@@ -43,6 +45,7 @@ impl SessionCloseReason {
         Self::Backpressure,
         Self::WebSocketEnded,
         Self::ApiClose,
+        Self::UserDisabled,
         Self::OperatorForce,
         Self::RuntimeShutdown,
     ];
@@ -59,6 +62,7 @@ impl SessionCloseReason {
             Self::Backpressure => "backpressure",
             Self::WebSocketEnded => "websocket_ended",
             Self::ApiClose => "api_close",
+            Self::UserDisabled => "user_disabled",
             Self::OperatorForce => "operator_force",
             Self::RuntimeShutdown => "runtime_shutdown",
         }
@@ -100,6 +104,7 @@ struct ReleasedQueues {
     recovery_closed_before_commit: bool,
     reason: SessionCloseReason,
     peer_gap: Duration,
+    effects: DeferredSessionEffects,
 }
 
 /// Deferred queue release after manager publication linearizes a supersede.
@@ -117,8 +122,18 @@ impl CarrierSupersedeCompletion<'_> {
 }
 
 impl WebSession {
+    /// Closes a bearer as soon as its process-owned user registration is revoked.
+    pub(crate) fn close_if_cancelled(&self) -> bool {
+        if !self.cancel.is_cancelled() {
+            return false;
+        }
+        self.close(SessionCloseReason::UserDisabled);
+        true
+    }
+
     /// Closes carrier state while relay tasks retain their admission until exit.
     pub(crate) fn close(&self, reason: SessionCloseReason) -> SessionCloseOutcome {
+        let effects = DeferredSessionEffects::new();
         let mut state = self.state.lock();
         if state.closed || state.close_requested.is_some() {
             return SessionCloseOutcome::AlreadyClosing;
@@ -127,7 +142,7 @@ impl WebSession {
             state.close_requested = Some(reason);
             return SessionCloseOutcome::Deferred;
         }
-        let released = self.release_on_close_locked(&mut state, reason);
+        let released = self.release_on_close_locked(&mut state, reason, effects);
         drop(state);
         self.finish_close(released);
         SessionCloseOutcome::Closed
@@ -152,23 +167,22 @@ impl WebSession {
 
     /// Restores an uncommitted attempt after successor admission failed.
     pub(crate) fn cancel_carrier_supersede(&self) {
-        let released = {
-            let mut state = self.state.lock();
-            if !state.closed && state.negotiation_phase == SessionNegotiationPhase::Replacing {
-                state.negotiation_phase = SessionNegotiationPhase::Uncommitted;
-            }
-            state
-                .close_requested
-                .filter(|_| !state.closed)
-                .map(|reason| self.release_on_close_locked(&mut state, reason))
-        };
-        if let Some(released) = released {
-            self.finish_close(released);
+        let effects = DeferredSessionEffects::new();
+        let mut state = self.state.lock();
+        if !state.closed && state.negotiation_phase == SessionNegotiationPhase::Replacing {
+            state.negotiation_phase = SessionNegotiationPhase::Uncommitted;
         }
+        let Some(reason) = state.close_requested.filter(|_| !state.closed) else {
+            return;
+        };
+        let released = self.release_on_close_locked(&mut state, reason, effects);
+        drop(state);
+        self.finish_close(released);
     }
 
     /// Linearizes manager publication against close requests on the old token.
     pub(crate) fn prepare_carrier_supersede(&self) -> Option<CarrierSupersedeCompletion<'_>> {
+        let effects = DeferredSessionEffects::new();
         let mut state = self.state.lock();
         if state.closed
             || state.negotiation_phase != SessionNegotiationPhase::Replacing
@@ -176,8 +190,11 @@ impl WebSession {
         {
             return None;
         }
-        let released =
-            self.release_on_close_locked(&mut state, SessionCloseReason::CarrierSuperseded);
+        let released = self.release_on_close_locked(
+            &mut state,
+            SessionCloseReason::CarrierSuperseded,
+            effects,
+        );
         Some(CarrierSupersedeCompletion {
             session: self,
             released,
@@ -217,6 +234,9 @@ impl WebSession {
 
     /// Atomically closes a session only when reconnect grace is still due.
     pub(crate) fn close_if_due(&self, now: Instant) -> bool {
+        if self.close_if_cancelled() {
+            return true;
+        }
         let healthy = {
             let mut state = self.state.lock();
             self.carrier_health_ready_locked(&mut state, now)
@@ -232,6 +252,7 @@ impl WebSession {
     }
 
     fn begin_idle_close(&self, now: Instant) -> Option<ReleasedQueues> {
+        let effects = DeferredSessionEffects::new();
         let mut state = self.state.lock();
         if state.closed || state.close_requested.is_some() {
             return None;
@@ -242,13 +263,14 @@ impl WebSession {
         {
             return None;
         }
-        Some(self.release_on_close_locked(&mut state, SessionCloseReason::PeerIdle))
+        Some(self.release_on_close_locked(&mut state, SessionCloseReason::PeerIdle, effects))
     }
 
     fn release_on_close_locked(
         &self,
         state: &mut super::SessionState,
         reason: SessionCloseReason,
+        mut effects: DeferredSessionEffects,
     ) -> ReleasedQueues {
         let peer_gap = state.activity.peer_idle(Instant::now());
         let closed_before_health = self.automatic_carrier
@@ -262,10 +284,10 @@ impl WebSession {
         }
         for stream in state.streams.values_mut() {
             if let Some(waker) = stream.read_waker.take() {
-                waker.wake();
+                effects.wake(waker);
             }
             if let Some(waker) = stream.write_waker.take() {
-                waker.wake();
+                effects.wake(waker);
             }
         }
         state.streams.clear();
@@ -275,19 +297,21 @@ impl WebSession {
             batch.lease.detach();
             self.release_local_locked(state, batch.data_bytes, batch.data_items, false);
             self.release_local_locked(state, batch.control_bytes, batch.control_items, true);
+            effects.retain_batch(batch);
         }
         let mut lane_data_bytes = 0usize;
         let mut lane_data_items = 0usize;
         let mut lane_control_bytes = 0usize;
         let mut lane_control_items = 0usize;
         for lane in state.carrier_lanes.values_mut() {
-            lane.notify.notify_waiters();
+            effects.notify(std::sync::Arc::clone(&lane.notify));
             if let Some(batch) = lane.unacked.take() {
                 batch.lease.detach();
                 lane_data_bytes = lane_data_bytes.saturating_add(batch.data_bytes);
                 lane_data_items = lane_data_items.saturating_add(batch.data_items);
                 lane_control_bytes = lane_control_bytes.saturating_add(batch.control_bytes);
                 lane_control_items = lane_control_items.saturating_add(batch.control_items);
+                effects.retain_batch(batch);
             }
         }
         self.release_local_locked(state, lane_data_bytes, lane_data_items, false);
@@ -310,17 +334,11 @@ impl WebSession {
             recovery_closed_before_commit,
             reason,
             peer_gap,
+            effects,
         }
     }
 
-    fn finish_close(&self, released: ReleasedQueues) {
-        self.cancel.cancel();
-        if self.carrier().is_multiplexed() {
-            self.down_notify.notify_waiters();
-        }
-        if self.carrier().uses_lanes() {
-            self.lane_open_notify.notify_waiters();
-        }
+    fn finish_close(&self, mut released: ReleasedQueues) {
         let manager = self.manager.upgrade();
         if let Some(manager) = &manager {
             if released.closed_before_health {
@@ -334,18 +352,26 @@ impl WebSession {
                     crate::web::telemetry::WebBridgeRecoveryEvent::ClosedBeforeCommit,
                 );
             }
-            manager.release_pending(
+            released.effects.notify(manager.release_pending_quiet(
                 self.profile_key,
                 released.data_bytes,
                 released.data_items,
                 false,
-            );
-            manager.release_pending(
+            ));
+            released.effects.notify(manager.release_pending_quiet(
                 self.profile_key,
                 released.control_bytes,
                 released.control_items,
                 true,
-            );
+            ));
+        }
+        released.effects.finish();
+        self.cancel.cancel();
+        if self.carrier().is_multiplexed() {
+            self.down_notify.notify_waiters();
+        }
+        if self.carrier().uses_lanes() {
+            self.lane_open_notify.notify_waiters();
         }
         if !self.finished.swap(true, Ordering::AcqRel) {
             if let Some(manager) = &manager {

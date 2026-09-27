@@ -40,11 +40,17 @@ pub(super) async fn validate_tls_client(
         };
 
         let sticky_ip_hint = sticky_hint_get_by_ip(shared, peer.ip());
+        let sticky_ip_candidates =
+            sticky_ip_hint.and_then(|hint_key| snapshot.candidate_ids_by_hint_key(hint_key));
         let preferred_user_id = preferred_user_hint.and_then(|user| snapshot.user_id_by_name(user));
         let sticky_sni_hint = client_sni
             .as_deref()
             .and_then(|sni| sticky_hint_get_by_sni(shared, sni));
+        let sticky_sni_candidates =
+            sticky_sni_hint.and_then(|hint_key| snapshot.candidate_ids_by_hint_key(hint_key));
         let sticky_prefix_hint = sticky_hint_get_by_ip_prefix(shared, peer.ip());
+        let sticky_prefix_candidates =
+            sticky_prefix_hint.and_then(|hint_key| snapshot.candidate_ids_by_hint_key(hint_key));
         let sni_candidates = client_sni
             .as_deref()
             .and_then(|sni| snapshot.sni_candidates(sni));
@@ -52,10 +58,10 @@ pub(super) async fn validate_tls_client(
             .as_deref()
             .and_then(|sni| snapshot.sni_initial_candidates(sni));
 
-        let has_hint = sticky_ip_hint.is_some()
+        let has_hint = sticky_ip_candidates.is_some_and(|ids| !ids.is_empty())
             || preferred_user_id.is_some()
-            || sticky_sni_hint.is_some()
-            || sticky_prefix_hint.is_some()
+            || sticky_sni_candidates.is_some_and(|ids| !ids.is_empty())
+            || sticky_prefix_candidates.is_some_and(|ids| !ids.is_empty())
             || sni_candidates.is_some_and(|ids| !ids.is_empty())
             || sni_initial_candidates.is_some_and(|ids| !ids.is_empty());
         let overload = auth_probe_saturation_is_throttled_in(shared, Instant::now());
@@ -95,20 +101,44 @@ pub(super) async fn validate_tls_client(
         }
 
         let mut matched = false;
-        if let Some(user_id) = sticky_ip_hint {
-            matched = try_user_id!(user_id);
+        if let Some(candidate_ids) = sticky_ip_candidates {
+            for &user_id in candidate_ids {
+                if try_user_id!(user_id) {
+                    matched = true;
+                    break;
+                }
+                if budget_exhausted {
+                    break;
+                }
+            }
         }
 
         if !matched && let Some(user_id) = preferred_user_id {
             matched = try_user_id!(user_id);
         }
 
-        if !matched && let Some(user_id) = sticky_sni_hint {
-            matched = try_user_id!(user_id);
+        if !matched && let Some(candidate_ids) = sticky_sni_candidates {
+            for &user_id in candidate_ids {
+                if try_user_id!(user_id) {
+                    matched = true;
+                    break;
+                }
+                if budget_exhausted {
+                    break;
+                }
+            }
         }
 
-        if !matched && let Some(user_id) = sticky_prefix_hint {
-            matched = try_user_id!(user_id);
+        if !matched && let Some(candidate_ids) = sticky_prefix_candidates {
+            for &user_id in candidate_ids {
+                if try_user_id!(user_id) {
+                    matched = true;
+                    break;
+                }
+                if budget_exhausted {
+                    break;
+                }
+            }
         }
 
         if !matched
@@ -149,18 +179,22 @@ pub(super) async fn validate_tls_client(
                     .recent_user_ring_seq
                     .load(Ordering::Relaxed);
                 let scan_limit = ring.len().min(RECENT_USER_RING_SCAN_LIMIT);
-                for offset in 0..scan_limit {
+                'recent_hints: for offset in 0..scan_limit {
                     let idx = (next_seq as usize + ring.len() - 1 - offset) % ring.len();
-                    let encoded_user_id = ring[idx].load(Ordering::Relaxed);
-                    if encoded_user_id == 0 {
+                    let hint_key = ring[idx].load(Ordering::Relaxed);
+                    if hint_key == 0 {
                         continue;
                     }
-                    if try_user_id!(encoded_user_id - 1) {
-                        matched = true;
-                        break;
-                    }
-                    if budget_exhausted {
-                        break;
+                    if let Some(candidate_ids) = snapshot.candidate_ids_by_hint_key(hint_key) {
+                        for &user_id in candidate_ids {
+                            if try_user_id!(user_id) {
+                                matched = true;
+                                break 'recent_hints;
+                            }
+                            if budget_exhausted {
+                                break 'recent_hints;
+                            }
+                        }
                     }
                 }
             }

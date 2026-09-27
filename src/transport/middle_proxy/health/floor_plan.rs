@@ -22,6 +22,7 @@ pub(super) async fn live_active_writers_for_dc_family(
     dc: i32,
     family: IpFamily,
 ) -> usize {
+    let active_generation = pool.current_generation();
     let writers = pool.writers.read().await;
     writers
         .iter()
@@ -30,6 +31,9 @@ pub(super) async fn live_active_writers_for_dc_family(
                 return false;
             }
             if writer.writer_dc != dc {
+                return false;
+            }
+            if writer.generation != active_generation {
                 return false;
             }
             if !matches!(

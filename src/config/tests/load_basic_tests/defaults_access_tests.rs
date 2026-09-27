@@ -289,6 +289,68 @@ fn cidr_rate_limits_reject_duplicate_normalized_auto_templates() {
 }
 
 #[test]
+fn rate_limits_accept_the_packed_counter_maximum() {
+    let cfg = load_config_from_temp_toml(
+        r#"
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+
+            [access.user_rate_limits]
+            user = { up_bps = 100000000000, down_bps = 0 }
+
+            [access.cidr_rate_limits]
+            "203.0.113.0/24" = { up_bps = 0, down_bps = 100000000000 }
+        "#,
+    );
+
+    assert_eq!(cfg.access.user_rate_limits["user"].up_bps, 100_000_000_000);
+    assert_eq!(
+        cfg.access.cidr_rate_limits[&CidrRateLimitKey::Network("203.0.113.0/24".parse().unwrap())]
+            .down_bps,
+        100_000_000_000
+    );
+}
+
+#[test]
+fn user_rate_limits_reject_values_above_the_packed_counter_maximum() {
+    let error = load_config_error_from_temp_toml(
+        r#"
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+
+            [access.user_rate_limits]
+            user = { up_bps = 100000000001, down_bps = 0 }
+        "#,
+    );
+
+    assert!(error.contains("access.user_rate_limits.user.up_bps must be within"));
+}
+
+#[test]
+fn cidr_rate_limits_reject_values_above_the_packed_counter_maximum() {
+    let error = load_config_error_from_temp_toml(
+        r#"
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+
+            [access.cidr_rate_limits]
+            "203.0.113.0/24" = { up_bps = 0, down_bps = 100000000001 }
+        "#,
+    );
+
+    assert!(error.contains("access.cidr_rate_limits.203.0.113.0/24.down_bps must be within"));
+}
+
+#[test]
 fn file_logging_requires_path() {
     let error = load_config_error_from_temp_toml(
         r#"

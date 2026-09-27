@@ -9,7 +9,7 @@ use super::state::{
     Bootstrap, CarrierChainPhase, allow_rate, evict_oldest_unused_bootstrap, matching_profile,
     new_unique_token, profile_key, remove_expired_locked,
 };
-use super::{BootstrapResult, ManagerError, TOKEN_BYTES, TokenHash, WebProcessRuntime};
+use super::{BootstrapResult, ManagerError, TOKEN_BYTES, TokenHash, TokenKind, WebProcessRuntime};
 use crate::config::WebRuntimeProfile;
 use crate::maestro::generation::RuntimeGeneration;
 use crate::web::session::{SessionCloseReason, WebSession};
@@ -89,11 +89,6 @@ impl WebProcessRuntime {
                 .record_rejection(WebRejectionReason::ConfigDisabled);
             return Err(ManagerError::Closed);
         }
-        if !generation.proxy_shared.is_user_enabled(&profile.user) {
-            self.telemetry
-                .record_rejection(WebRejectionReason::UserDisabled);
-            return Err(ManagerError::Closed);
-        }
         let _operator_admission = self.try_operator_admission()?;
         let now = Instant::now();
         let mut state = self.state.lock();
@@ -107,7 +102,7 @@ impl WebProcessRuntime {
             self.record_limit_hit();
             self.telemetry
                 .record_rejection(WebRejectionReason::RuntimeClosed);
-            return Err(ManagerError::Limit);
+            return Err(ManagerError::Closed);
         }
         if state
             .bootstraps_per_ip
@@ -121,6 +116,35 @@ impl WebProcessRuntime {
                 .record_rejection(WebRejectionReason::BootstrapCapacity);
             return Err(ManagerError::Limit);
         }
+        let global_capacity_full = state.bootstraps.len() >= self.limits.max_bootstraps_global;
+        if global_capacity_full && !state.bootstraps.values().any(|bootstrap| !bootstrap.used) {
+            self.record_limit_hit();
+            self.telemetry
+                .record_rejection(WebRejectionReason::BootstrapCapacity);
+            return Err(ManagerError::Limit);
+        }
+        let Some((token, hash)) = new_unique_token(
+            generation,
+            &state,
+            &self.token_authenticator,
+            TokenKind::Bootstrap,
+        ) else {
+            self.record_limit_hit();
+            self.telemetry
+                .record_rejection(WebRejectionReason::BootstrapCapacity);
+            return Err(ManagerError::Limit);
+        };
+        let Some(mut user_publication) = generation
+            .proxy_shared
+            .claim_authenticated_user(&profile.user, profile.credential_id)
+        else {
+            self.telemetry
+                .record_rejection(WebRejectionReason::UserDisabled);
+            return Err(ManagerError::Closed);
+        };
+        let Some(user_registration) = user_publication.take_registration() else {
+            return Err(ManagerError::Closed);
+        };
         if !allow_rate(
             &mut state.bootstrap_rate,
             now,
@@ -132,31 +156,28 @@ impl WebProcessRuntime {
                 .record_rejection(WebRejectionReason::BootstrapRate);
             return Err(ManagerError::Limit);
         }
-        if state.bootstraps.len() >= self.limits.max_bootstraps_global
-            && !evict_oldest_unused_bootstrap(&mut state)
-        {
-            self.record_limit_hit();
-            self.telemetry
-                .record_rejection(WebRejectionReason::BootstrapCapacity);
+        let evicted_bootstrap = global_capacity_full
+            .then(|| evict_oldest_unused_bootstrap(&mut state))
+            .flatten();
+        if global_capacity_full && evicted_bootstrap.is_none() {
             return Err(ManagerError::Limit);
         }
-        let Some((token, hash)) = new_unique_token(generation, &state) else {
-            self.record_limit_hit();
-            self.telemetry
-                .record_rejection(WebRejectionReason::BootstrapCapacity);
-            return Err(ManagerError::Limit);
-        };
         let trace_session_id = self.trace.next_session_id();
+        let bridge_diagnostics_enabled = config.web.debug.bridge_diagnostics_enabled();
         let (user_agent, user_agent_id) = bounded_user_agent(user_agent);
+        let issued_profile = Arc::clone(&profile);
         state.bootstraps.insert(
             hash,
             Bootstrap {
+                user_registration,
                 expires_at: now + Duration::from_secs(config.web.timeouts.bootstrap_lifetime_secs),
                 issued_at: now,
                 issuance_ip: client_ip,
                 profile,
                 timeouts: config.web.timeouts.clone(),
                 trace_session_id,
+                bridge_diagnostics_enabled,
+                bridge_diagnostic_events: 0,
                 user_agent,
                 user_agent_id,
                 body_digest: [0; TOKEN_BYTES],
@@ -183,12 +204,9 @@ impl WebProcessRuntime {
             },
         );
         *state.bootstraps_per_ip.entry(client_ip).or_insert(0) += 1;
-        let profile = state
-            .bootstraps
-            .get(&hash)
-            .map(|entry| Arc::clone(&entry.profile))
-            .ok_or(ManagerError::Closed)?;
+        user_publication.commit();
         drop(state);
+        drop(evicted_bootstrap);
         if recovery {
             self.telemetry
                 .record_bridge_recovery(WebBridgeRecoveryEvent::BootstrapIssued);
@@ -199,7 +217,7 @@ impl WebProcessRuntime {
                 Some(client_ip),
                 crate::web::trace::TraceIdentity::from_optional_profile(
                     Some(trace_session_id),
-                    &profile,
+                    &issued_profile,
                 ),
                 crate::web::trace::TraceLifecycleEvent::BridgeIssued,
                 None,
@@ -213,7 +231,7 @@ impl WebProcessRuntime {
             self.trace.record_profile_lifecycle(
                 client_ip,
                 Some(trace_session_id),
-                &profile,
+                &issued_profile,
                 crate::web::trace::TraceLifecycleEvent::BridgeIssued,
                 None,
                 None,
@@ -236,7 +254,11 @@ impl WebProcessRuntime {
             .lock()
             .bootstraps
             .get(&hash)
-            .filter(|entry| entry.profile.host == host && now <= entry.expires_at)
+            .filter(|entry| {
+                entry.profile.host == host
+                    && now <= entry.expires_at
+                    && !entry.user_registration.is_cancelled()
+            })
             .map(|entry| {
                 (
                     entry.trace_session_id,
@@ -256,20 +278,23 @@ impl WebProcessRuntime {
         host: &str,
     ) -> std::result::Result<Arc<WebSession>, ManagerError> {
         let state = self.state.lock();
-        if let Some(session) = state
+        let session = state
             .sessions
             .get(&hash)
             .cloned()
-            .filter(|session| session.matches_host(host))
-        {
-            return Ok(session);
-        }
+            .filter(|session| session.matches_host(host));
         let retired_carrier = state
             .closed_tokens
             .get(&hash)
             .filter(|closed| closed.host == host)
             .map(|closed| closed.carrier);
         drop(state);
+        if let Some(session) = session {
+            if session.close_if_cancelled() {
+                return Err(ManagerError::Closed);
+            }
+            return Ok(session);
+        }
         if let Some(carrier) = retired_carrier {
             self.telemetry.record_session_observation(
                 carrier,
@@ -287,14 +312,16 @@ impl WebProcessRuntime {
         profile: &WebRuntimeProfile,
     ) -> Option<Arc<WebSession>> {
         let expected_profile = profile_key(profile);
-        self.state
+        let session = self
+            .state
             .lock()
             .sessions
             .get(&hash)
             .filter(|session| {
                 session.matches_host(host) && session.profile_key() == expected_profile
             })
-            .cloned()
+            .cloned();
+        session.filter(|session| !session.close_if_cancelled())
     }
 
     /// Closes a live token and accepts bounded tombstone retries.

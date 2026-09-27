@@ -13,7 +13,7 @@ use super::state::{
     profile_key, remember_closed_token_locked, remove_expired_locked,
 };
 use super::{
-    CarrierLearningContext, CarrierRequest, CreateResult, ManagerError, TokenHash,
+    CarrierLearningContext, CarrierRequest, CreateResult, ManagerError, TokenHash, TokenKind,
     WebProcessRuntime,
 };
 use crate::config::{WebCarrier, WebRuntimeProfile};
@@ -69,7 +69,10 @@ impl WebProcessRuntime {
         let Some(entry) = state.bootstraps.get(&bootstrap_hash) else {
             return Err(ManagerError::Authentication);
         };
-        if entry.profile.host != host || now > entry.expires_at {
+        if entry.profile.host != host
+            || now > entry.expires_at
+            || entry.user_registration.is_cancelled()
+        {
             return Err(ManagerError::Authentication);
         }
         if entry.used {
@@ -301,10 +304,24 @@ impl WebProcessRuntime {
             return Err(ManagerError::Protocol);
         };
         let _operator_admission = self.try_operator_admission()?;
+        let Some(mut user_publication) = generation
+            .proxy_shared
+            .claim_authenticated_user(&profile.user, profile.credential_id)
+        else {
+            return Err(ManagerError::Closed);
+        };
+        let Some(user_registration) = user_publication.take_registration() else {
+            return Err(ManagerError::Closed);
+        };
         if !admit_initial(self, &mut state, now, client_ip, profile_key, &profile) {
             return Err(ManagerError::Limit);
         }
-        let Some((session_token, session_hash)) = new_unique_token(&generation, &state) else {
+        let Some((session_token, session_hash)) = new_unique_token(
+            &generation,
+            &state,
+            &self.token_authenticator,
+            TokenKind::Session,
+        ) else {
             self.record_limit_hit();
             self.telemetry
                 .record_rejection(crate::web::telemetry::WebRejectionReason::SessionCapacity);
@@ -338,6 +355,7 @@ impl WebProcessRuntime {
             recovery,
             self.limits.clone(),
             issued_timeouts.clone(),
+            Some(user_registration),
         );
         state.sessions.insert(session_hash, Arc::clone(&session));
         *state.sessions_per_ip.entry(client_ip).or_insert(0) += 1;
@@ -402,6 +420,7 @@ impl WebProcessRuntime {
                 user_agent_id,
             },
         );
+        user_publication.commit();
         drop(state);
         self.telemetry
             .record_carrier_selection(carrier, learning_disposition);

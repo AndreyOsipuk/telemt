@@ -1,5 +1,8 @@
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Wake, Waker};
 
 use arc_swap::ArcSwap;
 use bytes::BytesMut;
@@ -10,7 +13,21 @@ use crate::config::{
 };
 use crate::maestro::generation::test_runtime_generation;
 use crate::web::manager::WebProcessRuntime;
-use crate::web::session::{CarrierLane, insert_carrier_lane};
+use crate::web::session::{CarrierLane, StreamState, insert_carrier_lane};
+
+struct SessionLockProbe {
+    session: std::sync::Weak<WebSession>,
+    lock_was_free: Arc<AtomicBool>,
+}
+
+impl Wake for SessionLockProbe {
+    fn wake(self: Arc<Self>) {
+        if let Some(session) = self.session.upgrade() {
+            self.lock_was_free
+                .store(session.state.try_lock().is_some(), Ordering::Release);
+        }
+    }
+}
 
 fn session_with_limits(limits: WebLimitsConfig) -> Arc<WebSession> {
     new_session(limits, std::sync::Weak::new())
@@ -39,6 +56,7 @@ fn new_session_with_automatic(
         carriers: Arc::from([WebCarrier::HttpsLanes]),
         carrier_negotiation_deadlines_secs: [3, 5, 8, 12],
         capability: [0; 32],
+        credential_id: [0; 16],
         key_fingerprint: "0000000000000000".to_string(),
         max_sessions: 1,
         max_streams: 2,
@@ -65,6 +83,7 @@ fn new_session_with_automatic(
         false,
         limits,
         WebTimeoutsConfig::default(),
+        None,
     )
 }
 
@@ -94,12 +113,11 @@ async fn early_down_waits_without_creating_a_provisional_lane() {
         tokio::task::yield_now().await;
     }
     assert!(!session.state.lock().carrier_lanes.contains_key(&7));
-    {
-        let mut state = session.state.lock();
-        assert!(insert_carrier_lane(&mut state, 7).is_some());
+    session.with_state_effects(|state, effects| {
+        assert!(insert_carrier_lane(state, 7).is_some());
         state.closed_streams.insert(7);
-        assert!(session.queue_control_locked(&mut state, FrameType::Close, 7, &[]));
-    }
+        assert!(session.queue_control_locked(state, effects, FrameType::Close, 7, &[]));
+    });
     session.lane_open_notify.notify_waiters();
     let result = tokio::time::timeout(Duration::from_secs(1), poll)
         .await
@@ -215,12 +233,11 @@ fn cross_lane_frame_is_fatal_to_https_lane_session() {
 #[tokio::test]
 async fn drained_closed_lane_replays_then_signals_completion() {
     let (session, manager) = session_with_manager();
-    {
-        let mut state = session.state.lock();
+    session.with_state_effects(|state, effects| {
         state.carrier_lanes.insert(7, CarrierLane::new(7));
         state.closed_streams.insert(7);
-        assert!(session.queue_control_locked(&mut state, FrameType::Close, 7, &[]));
-    }
+        assert!(session.queue_control_locked(state, effects, FrameType::Close, 7, &[]));
+    });
     let first = session.poll_down_lane(7, 0).await.unwrap();
     let replay = session.poll_down_lane(7, 0).await.unwrap();
     assert_eq!(first.body, replay.body);
@@ -234,6 +251,56 @@ async fn drained_closed_lane_replays_then_signals_completion() {
     manager.shutdown().await;
 }
 
+#[tokio::test]
+async fn lane_ack_wakes_writer_only_after_releasing_session_lock() {
+    let (session, manager) = session_with_manager();
+    session.with_state_effects(|state, effects| {
+        state.carrier_lanes.insert(7, CarrierLane::new(7));
+        state.streams.insert(
+            7,
+            StreamState {
+                instance: 1,
+                inbound: VecDeque::new(),
+                receive_window: frame::INITIAL_STREAM_WINDOW,
+                send_credit: 0,
+                read_waker: None,
+                write_waker: None,
+            },
+        );
+        assert!(session.queue_control_locked(
+            state,
+            effects,
+            FrameType::Window,
+            7,
+            &frame::window_payload(1),
+        ));
+    });
+    let first = session.poll_down_lane(7, 0).await.unwrap();
+    let lock_was_free = Arc::new(AtomicBool::new(false));
+    let waker = Waker::from(Arc::new(SessionLockProbe {
+        session: Arc::downgrade(&session),
+        lock_was_free: Arc::clone(&lock_was_free),
+    }));
+    session.with_state_effects(|state, effects| {
+        state.streams.get_mut(&7).unwrap().write_waker = Some(waker);
+        assert!(session.queue_control_locked(
+            state,
+            effects,
+            FrameType::Window,
+            7,
+            &frame::window_payload(1),
+        ));
+    });
+
+    let second = session.poll_down_lane(7, first.next_cursor).await.unwrap();
+
+    assert!(lock_was_free.load(Ordering::Acquire));
+    drop(first);
+    drop(second);
+    session.close(super::super::SessionCloseReason::ApiClose);
+    manager.shutdown().await;
+}
+
 #[test]
 fn tombstone_eviction_releases_lane_budget_and_accepts_late_frames() {
     let limits = WebLimitsConfig {
@@ -241,8 +308,7 @@ fn tombstone_eviction_releases_lane_budget_and_accepts_late_frames() {
         ..WebLimitsConfig::default()
     };
     let session = session_with_limits(limits);
-    {
-        let mut state = session.state.lock();
+    session.with_state_effects(|state, effects| {
         state.carrier_lanes.insert(7, CarrierLane::new(7));
         let encoded = frame::encode(FrameType::Close, 7, &[]);
         let cost = encoded.len() + QUEUE_ITEM_COST;
@@ -262,13 +328,13 @@ fn tombstone_eviction_releases_lane_budget_and_accepts_late_frames() {
         state.pending_items = 1;
         state.pending_control_bytes = cost;
         state.pending_control_items = 1;
-        session.remember_closed_locked(&mut state, 7);
+        session.remember_closed_locked(state, effects, 7);
         state.carrier_lanes.insert(8, CarrierLane::new(8));
-        session.remember_closed_locked(&mut state, 8);
+        session.remember_closed_locked(state, effects, 8);
         assert!(!state.carrier_lanes.contains_key(&7));
         assert_eq!(state.pending_bytes, 0);
         assert_eq!(state.pending_items, 0);
-    }
+    });
     let late = frame::encode(FrameType::Data, 7, b"late");
     assert_eq!(session.process_up_lane(7, 7, &late), Ok(7));
     assert!(!session.state.lock().closed);

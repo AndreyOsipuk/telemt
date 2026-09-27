@@ -5,168 +5,17 @@ use sha2::{Digest, Sha256};
 
 use super::uplink::{AppliedProgress, inbound_reservation, validate_batch};
 use super::{
-    CarrierLaneIdentity, PendingClass, StreamIdentity, WebSession, WebSocketLaneClaim,
+    DeferredSessionEffects, PendingClass, StreamIdentity, WebSession, WebSocketLaneClaim,
     inbound_queue_cost, insert_carrier_lane,
 };
 use crate::config::WebCarrier;
 use crate::web::frame;
 use crate::web::manager::ManagerError;
 
-/// Pre-OPEN stream quota and synthetic tuple ownership for one WebSocket lane.
-pub(crate) struct WebSocketLaneReservation {
-    session: Arc<WebSession>,
-    claim: WebSocketLaneClaim,
-    stream: Option<StreamIdentity>,
-    phase: WebSocketLaneReservationPhase,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WebSocketLaneReservationPhase {
-    Reserved,
-    Bound,
-    Transferred,
-    StreamOwned,
-    Closing,
-    Released,
-}
-
-/// Session-wide ownership of the only automatic WebSocket carrier probe.
-pub(crate) struct WebSocketProbeReservation {
-    session: Arc<WebSession>,
-    owner: Option<u64>,
-}
-
-impl WebSocketProbeReservation {
-    /// Binds the admitted process connection to the future commit acknowledgement.
-    pub(crate) fn bind(&mut self, owner: u64) -> Result<(), ManagerError> {
-        let mut state = self.session.state.lock();
-        if state.closed
-            || !state.websocket_probe_claimed
-            || state.websocket_commit_ack_owner.is_some()
-        {
-            return Err(ManagerError::Closed);
-        }
-        state.websocket_commit_ack_owner = Some(owner);
-        self.owner = Some(owner);
-        Ok(())
-    }
-}
-
-impl Drop for WebSocketProbeReservation {
-    fn drop(&mut self) {
-        let mut state = self.session.state.lock();
-        state.websocket_probe_claimed = false;
-        if state.websocket_commit_ack_owner == self.owner {
-            state.websocket_commit_ack_owner = None;
-            if self.session.carrier_health_publication_state()
-                != super::CarrierHealthPublicationState::Published
-            {
-                state.websocket_commit_ack_written = false;
-                state.carrier_health_uplink = false;
-                state.carrier_health_activity_at = None;
-            }
-        }
-    }
-}
-
-impl WebSocketLaneReservation {
-    /// Returns the logical stream owned by this connection.
-    pub(crate) fn lane_id(&self) -> u32 {
-        self.claim.lane.lane_id
-    }
-
-    /// Returns the exact lane incarnation owned by this connection.
-    pub(crate) fn lane_identity(&self) -> CarrierLaneIdentity {
-        self.claim.lane
-    }
-
-    /// Binds this pre-upgrade reservation to one admitted process connection.
-    pub(crate) fn bind(&mut self, connection_id: u64) -> Result<(), ManagerError> {
-        if self.phase != WebSocketLaneReservationPhase::Reserved {
-            return Err(ManagerError::Concurrent);
-        }
-        let mut state = self.session.state.lock();
-        if state.closed
-            || state
-                .carrier_lanes
-                .get(&self.claim.lane.lane_id)
-                .is_none_or(|lane| lane.instance != self.claim.lane.instance)
-        {
-            return Err(ManagerError::Closed);
-        }
-        let Some(current) = state
-            .websocket_lane_reservations
-            .get_mut(&self.claim.lane.lane_id)
-            .filter(|current| **current == self.claim && current.connection_id.is_none())
-        else {
-            return Err(ManagerError::Closed);
-        };
-        current.connection_id = Some(connection_id);
-        self.claim.connection_id = Some(connection_id);
-        self.phase = WebSocketLaneReservationPhase::Bound;
-        Ok(())
-    }
-
-    fn transfer_to_stream(&mut self, stream: StreamIdentity) -> Result<(), ManagerError> {
-        if self.phase != WebSocketLaneReservationPhase::Bound
-            || stream.id != self.claim.lane.lane_id
-        {
-            return Err(ManagerError::Protocol);
-        }
-        let mut state = self.session.state.lock();
-        if state
-            .carrier_lanes
-            .get(&self.claim.lane.lane_id)
-            .is_none_or(|lane| lane.instance != self.claim.lane.instance)
-            || state
-                .streams
-                .get(&stream.id)
-                .is_none_or(|current| current.instance != stream.instance)
-            || state
-                .websocket_lane_reservations
-                .get(&self.claim.lane.lane_id)
-                != Some(&self.claim)
-        {
-            return Err(ManagerError::Closed);
-        }
-        state
-            .websocket_lane_reservations
-            .remove(&self.claim.lane.lane_id);
-        self.stream = Some(stream);
-        self.phase = WebSocketLaneReservationPhase::Transferred;
-        Ok(())
-    }
-
-    fn mark_stream_owned(&mut self, stream: StreamIdentity) -> Result<(), ManagerError> {
-        if self.phase != WebSocketLaneReservationPhase::Transferred || self.stream != Some(stream) {
-            return Err(ManagerError::Protocol);
-        }
-        self.phase = WebSocketLaneReservationPhase::StreamOwned;
-        Ok(())
-    }
-
-    fn retain_after_rejected_spawn(&mut self) {
-        debug_assert_eq!(self.phase, WebSocketLaneReservationPhase::StreamOwned);
-        self.phase = WebSocketLaneReservationPhase::Transferred;
-    }
-
-    fn release(&mut self) {
-        if self.phase == WebSocketLaneReservationPhase::Released {
-            return;
-        }
-        let stream_owned = self.phase == WebSocketLaneReservationPhase::StreamOwned;
-        self.phase = WebSocketLaneReservationPhase::Closing;
-        self.session
-            .release_websocket_lane_claim(self.claim, self.stream, stream_owned);
-        self.phase = WebSocketLaneReservationPhase::Released;
-    }
-}
-
-impl Drop for WebSocketLaneReservation {
-    fn drop(&mut self) {
-        self.release();
-    }
-}
+// Reservation ownership keeps pre-OPEN quota and exact lane identity transactional.
+mod reservation;
+use reservation::WebSocketLaneReservationPhase;
+pub(crate) use reservation::{WebSocketLaneReservation, WebSocketProbeReservation};
 
 impl WebSession {
     /// Reserves the only automatic WebSocket probe before any HTTP 101 response.
@@ -174,8 +23,11 @@ impl WebSession {
         self: &Arc<Self>,
         acknowledge_commit: bool,
     ) -> Result<Option<WebSocketProbeReservation>, ManagerError> {
+        if self.close_if_cancelled() {
+            return Err(ManagerError::Closed);
+        }
         let mut state = self.state.lock();
-        if state.closed {
+        if state.closed || self.cancel.is_cancelled() {
             return Err(ManagerError::Closed);
         }
         self.ensure_carrier_active_locked(&state)?;
@@ -216,8 +68,12 @@ impl WebSession {
         {
             return Err(ManagerError::Protocol);
         }
+        if self.close_if_cancelled() {
+            return Err(ManagerError::Closed);
+        }
+        let mut effects = DeferredSessionEffects::new();
         let mut state = self.state.lock();
-        if state.closed {
+        if state.closed || self.cancel.is_cancelled() {
             return Err(ManagerError::Closed);
         }
         if state.active_peer_ports.len() >= self.profile.max_streams_per_session
@@ -231,29 +87,48 @@ impl WebSession {
         let Some(manager) = self.manager.upgrade() else {
             return Err(ManagerError::Closed);
         };
-        let peer_port = manager.try_acquire_stream(
+        let (peer_port, notify) = manager.try_acquire_stream_quiet(
             self.profile_key,
             self.profile.max_streams,
             self.client_ip,
             self.profile.public_addr,
-        )?;
+        );
+        if let Some(notify) = notify {
+            effects.notify(notify);
+        }
+        let peer_port = match peer_port {
+            Ok(peer_port) => peer_port,
+            Err(error) => {
+                drop(state);
+                effects.finish();
+                return Err(error);
+            }
+        };
         if !state.active_peer_ports.insert(peer_port) {
-            manager.release_stream(
+            if let Some(notify) = manager.release_stream_quiet(
                 self.profile_key,
                 self.client_ip,
                 self.profile.public_addr,
                 peer_port,
-            );
+            ) {
+                effects.notify(notify);
+            }
+            drop(state);
+            effects.finish();
             return Err(ManagerError::Limit);
         }
         let Some(lane) = insert_carrier_lane(&mut state, lane_id) else {
             state.active_peer_ports.remove(&peer_port);
-            manager.release_stream(
+            if let Some(notify) = manager.release_stream_quiet(
                 self.profile_key,
                 self.client_ip,
                 self.profile.public_addr,
                 peer_port,
-            );
+            ) {
+                effects.notify(notify);
+            }
+            drop(state);
+            effects.finish();
             return Err(ManagerError::Protocol);
         };
         let claim = WebSocketLaneClaim {
@@ -269,18 +144,23 @@ impl WebSession {
             std::collections::hash_map::Entry::Occupied(_) => false,
         };
         if !inserted {
-            self.release_lane_locked(&mut state, lane_id);
+            self.release_lane_locked(&mut state, &mut effects, lane_id);
             state.active_peer_ports.remove(&peer_port);
-            manager.release_stream(
+            if let Some(notify) = manager.release_stream_quiet(
                 self.profile_key,
                 self.client_ip,
                 self.profile.public_addr,
                 peer_port,
-            );
+            ) {
+                effects.notify(notify);
+            }
+            drop(state);
+            effects.finish();
             return Err(ManagerError::Concurrent);
         }
+        effects.notify(Arc::clone(&self.lane_open_notify));
         drop(state);
-        self.lane_open_notify.notify_waiters();
+        effects.finish();
         Ok(WebSocketLaneReservation {
             session: Arc::clone(self),
             claim,
@@ -306,6 +186,9 @@ impl WebSession {
         {
             return Err(ManagerError::Protocol);
         }
+        if self.close_if_cancelled() {
+            return Err(ManagerError::Closed);
+        }
         let lane_id = reservation.lane_id();
         let frames = frame::parse_all(body, &self.limits).map_err(|_| ManagerError::Protocol)?;
         if frames
@@ -319,6 +202,7 @@ impl WebSession {
         let mut opened = Vec::new();
         let mut committed = false;
         let mut healthy = None;
+        let mut effects = DeferredSessionEffects::new();
         let result = {
             let mut state = self.state.lock();
             if state.closed {
@@ -377,13 +261,14 @@ impl WebSession {
             let applied = self.apply_batch_locked(
                 &mut state,
                 &frames,
+                &mut effects,
                 &mut opened,
                 &mut reserved_open,
                 &mut unused_bytes,
                 &mut unused_items,
                 &mut progress,
             );
-            self.release_locked(&mut state, unused_bytes, unused_items, false);
+            self.release_locked(&mut state, &mut effects, unused_bytes, unused_items, false);
             if let Some(lane) = state.carrier_lanes.get_mut(&lane_id) {
                 lane.up_active = false;
                 if applied {
@@ -403,6 +288,7 @@ impl WebSession {
                 .then_some(progress.any())
                 .ok_or(ManagerError::Protocol)
         };
+        effects.finish();
         let progressed = result?;
         if committed {
             self.finish_carrier_commit();
@@ -444,6 +330,7 @@ impl WebSession {
         stream: Option<StreamIdentity>,
         stream_owned: bool,
     ) {
+        let mut effects = DeferredSessionEffects::new();
         let release_port = {
             let mut state = self.state.lock();
             let lane_matches = state
@@ -469,12 +356,12 @@ impl WebSession {
                         .closing_streams
                         .insert(claim.lane.lane_id, stream.instance);
                     let (bytes, items) = inbound_queue_cost(&stream_state.inbound);
-                    self.release_locked(&mut state, bytes, items, false);
+                    self.release_locked(&mut state, &mut effects, bytes, items, false);
                     if let Some(waker) = stream_state.read_waker {
-                        waker.wake();
+                        effects.wake(waker);
                     }
                     if let Some(waker) = stream_state.write_waker {
-                        waker.wake();
+                        effects.wake(waker);
                     }
                     false
                 } else if stream_owned {
@@ -492,17 +379,18 @@ impl WebSession {
                 state.active_peer_ports.remove(&claim.peer_port)
             };
             if lane_matches {
-                self.remember_closed_locked(&mut state, claim.lane.lane_id);
+                self.remember_closed_locked(&mut state, &mut effects, claim.lane.lane_id);
                 if state
                     .carrier_lanes
                     .get(&claim.lane.lane_id)
                     .is_some_and(|lane| lane.instance == claim.lane.instance)
                 {
-                    self.release_lane_locked(&mut state, claim.lane.lane_id);
+                    self.release_lane_locked(&mut state, &mut effects, claim.lane.lane_id);
                 }
             }
             release_port
         };
+        effects.finish();
         if release_port && let Some(manager) = self.manager.upgrade() {
             manager.release_stream(
                 self.profile_key,

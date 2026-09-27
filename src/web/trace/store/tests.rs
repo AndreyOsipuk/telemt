@@ -84,6 +84,30 @@ fn stale_generation_cannot_restore_an_old_policy() {
 }
 
 #[test]
+fn bridge_diagnostic_policy_toggle_preserves_existing_records_and_epoch() {
+    let store = store(4, 8 * BASE_RECORD_RESERVATION);
+    store.record_lifecycle(
+        None,
+        Some("192.0.2.25".parse().unwrap()),
+        TraceIdentity::default(),
+        TraceLifecycleEvent::BridgeIssued,
+        None,
+        None,
+    );
+    let before = store.status();
+    let mut policy = before.policy.as_ref().clone();
+    policy.sideband = true;
+
+    store.apply_policy(2, &policy);
+
+    let after = store.status();
+    assert!(after.policy.sideband);
+    assert_eq!(after.policy_generation, 2);
+    assert_eq!(after.epoch, before.epoch);
+    assert_eq!(after.records, before.records);
+}
+
+#[test]
 fn explicit_clear_fences_inflight_commits_and_preserves_snapshot_leases() {
     let store = store(4, 8 * BASE_RECORD_RESERVATION);
     store.record_lifecycle(

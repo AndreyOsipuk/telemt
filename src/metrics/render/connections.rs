@@ -268,6 +268,53 @@ pub(super) fn render(
 
     let _ = writeln!(
         out,
+        "# HELP telemt_conntrack_rule_reconcile_total Conntrack firewall reconciliations by result"
+    );
+    let _ = writeln!(out, "# TYPE telemt_conntrack_rule_reconcile_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_conntrack_rule_reconcile_total{{result=\"success\"}} {}",
+        if core_enabled {
+            stats.get_conntrack_rule_reconcile_success_total()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "telemt_conntrack_rule_reconcile_total{{result=\"error\"}} {}",
+        if core_enabled {
+            stats.get_conntrack_rule_reconcile_error_total()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_conntrack_rule_rollback_total Conntrack firewall rollbacks by result"
+    );
+    let _ = writeln!(out, "# TYPE telemt_conntrack_rule_rollback_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_conntrack_rule_rollback_total{{result=\"success\"}} {}",
+        if core_enabled {
+            stats.get_conntrack_rule_rollback_success_total()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "telemt_conntrack_rule_rollback_total{{result=\"error\"}} {}",
+        if core_enabled {
+            stats.get_conntrack_rule_rollback_error_total()
+        } else {
+            0
+        }
+    );
+
+    let _ = writeln!(
+        out,
         "# HELP telemt_conntrack_event_queue_depth Pending close events in conntrack control queue"
     );
     let _ = writeln!(out, "# TYPE telemt_conntrack_event_queue_depth gauge");

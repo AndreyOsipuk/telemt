@@ -42,7 +42,7 @@ pub(super) fn ip_prefix_hint_key(peer_ip: IpAddr) -> u64 {
     }
 }
 
-pub(super) fn sticky_hint_get_by_ip(shared: &ProxySharedState, peer_ip: IpAddr) -> Option<u32> {
+pub(super) fn sticky_hint_get_by_ip(shared: &ProxySharedState, peer_ip: IpAddr) -> Option<u64> {
     shared
         .handshake
         .sticky_user_by_ip
@@ -53,7 +53,7 @@ pub(super) fn sticky_hint_get_by_ip(shared: &ProxySharedState, peer_ip: IpAddr) 
 pub(super) fn sticky_hint_get_by_ip_prefix(
     shared: &ProxySharedState,
     peer_ip: IpAddr,
-) -> Option<u32> {
+) -> Option<u64> {
     shared
         .handshake
         .sticky_user_by_ip_prefix
@@ -61,7 +61,7 @@ pub(super) fn sticky_hint_get_by_ip_prefix(
         .map(|entry| *entry)
 }
 
-pub(super) fn sticky_hint_get_by_sni(shared: &ProxySharedState, sni: &str) -> Option<u32> {
+pub(super) fn sticky_hint_get_by_sni(shared: &ProxySharedState, sni: &str) -> Option<u64> {
     let key = sni_hint_hash(sni);
     shared
         .handshake
@@ -73,34 +73,76 @@ pub(super) fn sticky_hint_get_by_sni(shared: &ProxySharedState, sni: &str) -> Op
 pub(super) fn sticky_hint_record_success_in(
     shared: &ProxySharedState,
     peer_ip: IpAddr,
-    user_id: u32,
+    hint_key: u64,
     sni: Option<&str>,
 ) {
-    if shared.handshake.sticky_user_by_ip.len() > STICKY_HINT_MAX_ENTRIES {
-        shared.handshake.sticky_user_by_ip.clear();
-    }
-    shared.handshake.sticky_user_by_ip.insert(peer_ip, user_id);
-
-    if shared.handshake.sticky_user_by_ip_prefix.len() > STICKY_HINT_MAX_ENTRIES {
-        shared.handshake.sticky_user_by_ip_prefix.clear();
-    }
-    shared
-        .handshake
-        .sticky_user_by_ip_prefix
-        .insert(ip_prefix_hint_key(peer_ip), user_id);
+    bounded_sticky_hint_upsert(
+        &shared.handshake.sticky_user_by_ip,
+        &shared.handshake.sticky_user_by_ip_slots,
+        peer_ip,
+        hint_key,
+    );
+    bounded_sticky_hint_upsert(
+        &shared.handshake.sticky_user_by_ip_prefix,
+        &shared.handshake.sticky_user_by_ip_prefix_slots,
+        ip_prefix_hint_key(peer_ip),
+        hint_key,
+    );
 
     if let Some(sni) = sni {
-        if shared.handshake.sticky_user_by_sni_hash.len() > STICKY_HINT_MAX_ENTRIES {
-            shared.handshake.sticky_user_by_sni_hash.clear();
-        }
-        shared
-            .handshake
-            .sticky_user_by_sni_hash
-            .insert(sni_hint_hash(sni), user_id);
+        bounded_sticky_hint_upsert(
+            &shared.handshake.sticky_user_by_sni_hash,
+            &shared.handshake.sticky_user_by_sni_hash_slots,
+            sni_hint_hash(sni),
+            hint_key,
+        );
     }
 }
 
-pub(super) fn record_recent_user_success_in(shared: &ProxySharedState, user_id: u32) {
+fn bounded_sticky_hint_upsert<K>(
+    entries: &DashMap<K, u64>,
+    slots: &crate::slot_budget::SlotBudget,
+    key: K,
+    hint_key: u64,
+) where
+    K: Clone + Eq + Hash,
+{
+    if let Some(mut existing) = entries.get_mut(&key) {
+        *existing = hint_key;
+        return;
+    }
+
+    for _ in 0..2 {
+        if let Some(slot) = slots.try_acquire() {
+            match entries.entry(key.clone()) {
+                Entry::Occupied(mut entry) => {
+                    entry.insert(hint_key);
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(hint_key);
+                    slot.commit();
+                }
+            }
+            return;
+        }
+
+        let Some((victim_key, victim_hint_key)) = entries
+            .iter()
+            .next()
+            .map(|entry| (entry.key().clone(), *entry.value()))
+        else {
+            return;
+        };
+        if entries
+            .remove_if(&victim_key, |_, current| *current == victim_hint_key)
+            .is_some()
+        {
+            slots.release();
+        }
+    }
+}
+
+pub(super) fn record_recent_user_success_in(shared: &ProxySharedState, hint_key: u64) {
     let ring = &shared.handshake.recent_user_ring;
     if ring.is_empty() {
         return;
@@ -110,7 +152,7 @@ pub(super) fn record_recent_user_success_in(shared: &ProxySharedState, user_id: 
         .recent_user_ring_seq
         .fetch_add(1, Ordering::Relaxed);
     let idx = (seq as usize) % ring.len();
-    ring[idx].store(user_id.saturating_add(1), Ordering::Relaxed);
+    ring[idx].store(hint_key, Ordering::Relaxed);
 }
 
 pub(super) fn mark_candidate_if_new(
@@ -340,6 +382,67 @@ mod web_mode_tests {
             false,
             MtprotoModePolicy::Web(WebSecretMode::Dd),
         ));
+    }
+}
+
+#[cfg(test)]
+mod bounded_registry_tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    #[test]
+    fn parallel_sticky_hints_never_exceed_their_hard_caps() {
+        const ATTEMPTS: usize = 10_000;
+
+        let shared = ProxySharedState::new();
+        std::thread::scope(|scope| {
+            for worker in 0..16 {
+                let shared = Arc::clone(&shared);
+                scope.spawn(move || {
+                    for index in (worker..ATTEMPTS).step_by(16) {
+                        let octets = (index as u32).to_be_bytes();
+                        let peer_ip = IpAddr::V4(std::net::Ipv4Addr::new(
+                            octets[1],
+                            octets[2],
+                            octets[3],
+                            worker as u8,
+                        ));
+                        sticky_hint_record_success_in(
+                            shared.as_ref(),
+                            peer_ip,
+                            index as u64 | 1,
+                            Some(&format!("host-{index}.example")),
+                        );
+                    }
+                });
+            }
+        });
+
+        assert_eq!(
+            shared.handshake.sticky_user_by_ip.len(),
+            STICKY_HINT_MAX_ENTRIES
+        );
+        assert_eq!(
+            shared.handshake.sticky_user_by_ip_prefix.len(),
+            STICKY_HINT_MAX_ENTRIES
+        );
+        assert_eq!(
+            shared.handshake.sticky_user_by_sni_hash.len(),
+            STICKY_HINT_MAX_ENTRIES
+        );
+        assert_eq!(
+            shared.handshake.sticky_user_by_ip_slots.used(),
+            shared.handshake.sticky_user_by_ip.len()
+        );
+        assert_eq!(
+            shared.handshake.sticky_user_by_ip_prefix_slots.used(),
+            shared.handshake.sticky_user_by_ip_prefix.len()
+        );
+        assert_eq!(
+            shared.handshake.sticky_user_by_sni_hash_slots.used(),
+            shared.handshake.sticky_user_by_sni_hash.len()
+        );
     }
 }
 

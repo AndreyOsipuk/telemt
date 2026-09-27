@@ -4,11 +4,88 @@ use std::sync::Arc;
 use bytes::Bytes;
 use tokio::sync::Semaphore;
 
-use super::{ConnMeta, ConnRegistry, RouteResult};
+use super::{ConnMeta, ConnRegistry, RouteResult, WriterBindOutcome};
 use crate::transport::middle_proxy::MeResponse;
 
 fn writer_byte_budget() -> Arc<Semaphore> {
     Arc::new(Semaphore::new(2049))
+}
+
+fn conn_meta() -> ConnMeta {
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+    ConnMeta {
+        target_dc: 2,
+        client_addr: addr,
+        our_addr: addr,
+        proto_flags: 0,
+    }
+}
+
+#[tokio::test]
+async fn preparing_replacement_allows_bind_and_idle_commit_revalidates() {
+    let registry = ConnRegistry::new();
+    let (writer_tx, _writer_rx) = tokio::sync::mpsc::channel(8);
+    registry
+        .register_writer(10, writer_tx, writer_byte_budget())
+        .await;
+    let reservation = registry
+        .try_reserve_writer_replacement(10)
+        .await
+        .expect("idle writer must be reservable");
+    let (conn_id, _rx) = registry.register().await;
+
+    assert_eq!(
+        registry
+            .bind_writer_with_outcome(conn_id, 10, conn_meta())
+            .await,
+        WriterBindOutcome::Bound
+    );
+    let mut registration = registry.prepare_writer_registration().await;
+    assert!(!registration.prepare_replacement_commit(&reservation));
+    drop(registration);
+}
+
+#[tokio::test]
+async fn retiring_replacement_rejects_new_bind() {
+    let registry = ConnRegistry::new();
+    let (writer_tx, _writer_rx) = tokio::sync::mpsc::channel(8);
+    registry
+        .register_writer(10, writer_tx, writer_byte_budget())
+        .await;
+    let mut reservation = registry
+        .try_reserve_writer_replacement(10)
+        .await
+        .expect("idle writer must be reservable");
+    let mut registration = registry.prepare_writer_registration().await;
+    assert!(registration.prepare_replacement_commit(&reservation));
+    drop(registration);
+    reservation.mark_committed();
+    let (conn_id, _rx) = registry.register().await;
+
+    assert_eq!(
+        registry
+            .bind_writer_with_outcome(conn_id, 10, conn_meta())
+            .await,
+        WriterBindOutcome::WriterRetiring
+    );
+}
+
+#[tokio::test]
+async fn dropped_preparing_reservation_restores_writer_admission() {
+    let registry = ConnRegistry::new();
+    let (writer_tx, _writer_rx) = tokio::sync::mpsc::channel(8);
+    registry
+        .register_writer(10, writer_tx, writer_byte_budget())
+        .await;
+    let reservation = registry
+        .try_reserve_writer_replacement(10)
+        .await
+        .expect("idle writer must be reservable");
+    assert!(registry.try_reserve_writer_replacement(10).await.is_none());
+
+    drop(reservation);
+
+    assert!(registry.try_reserve_writer_replacement(10).await.is_some());
 }
 
 #[tokio::test]

@@ -1,12 +1,14 @@
 use std::collections::BTreeMap;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::config::{ProxyConfig, RateLimitBps};
 
+#[cfg(test)]
+use super::atomic::write_atomic;
+use super::atomic::write_atomic_if_unchanged;
 #[cfg(test)]
 use super::compute_revision;
 use super::{
@@ -100,7 +102,21 @@ pub(in crate::api) async fn save_access_sections_to_disk(
     cfg: &ProxyConfig,
     sections: &[AccessSection],
 ) -> Result<String, ApiFailure> {
+    save_access_sections_to_disk_if_revision(config_path, cfg, sections, None).await
+}
+
+/// Persists access tables only while the complete source graph remains unchanged.
+pub(in crate::api) async fn save_access_sections_to_disk_if_revision(
+    config_path: &Path,
+    cfg: &ProxyConfig,
+    sections: &[AccessSection],
+    expected_revision: Option<&str>,
+) -> Result<String, ApiFailure> {
     let loaded = load_config_snapshot(config_path, false).await?;
+    let loaded_revision = compute_snapshot_revision(&loaded);
+    if expected_revision.is_some_and(|expected| expected != loaded_revision) {
+        return Err(revision_conflict());
+    }
     let mut applied = Vec::new();
     for section in sections {
         if applied.contains(section) {
@@ -117,7 +133,7 @@ pub(in crate::api) async fn save_access_sections_to_disk(
             })
     });
     if applied.is_empty() {
-        return Ok(compute_snapshot_revision(&loaded));
+        return Ok(loaded_revision);
     }
 
     let targets = applied
@@ -130,6 +146,7 @@ pub(in crate::api) async fn save_access_sections_to_disk(
         .get(&owner_path)
         .cloned()
         .ok_or_else(|| ApiFailure::internal("config source owner is missing from snapshot"))?;
+    let expected_owner_contents = owner_contents.clone();
     for section in applied {
         let rendered = render_access_section(cfg, section)?;
         owner_contents = upsert_toml_table(&owner_contents, section.table_name(), &rendered);
@@ -142,8 +159,15 @@ pub(in crate::api) async fn save_access_sections_to_disk(
         owner_contents.clone(),
     )
     .await?;
-    let revision = compute_snapshot_revision(&candidate);
-    write_atomic(owner_path, owner_contents).await?;
+    let _candidate_revision = compute_snapshot_revision(&candidate);
+    let revision = write_atomic_if_unchanged(
+        config_path.to_path_buf(),
+        loaded_revision,
+        owner_path,
+        expected_owner_contents,
+        owner_contents,
+    )
+    .await?;
     Ok(revision)
 }
 
@@ -373,46 +397,10 @@ fn find_all_table_blocks(source: &str, table_name: &str) -> Vec<(usize, usize)> 
     blocks
 }
 
-/// Replaces one config source through a durable same-directory rename.
-pub(in crate::api) async fn write_atomic(
-    path: PathBuf,
-    contents: String,
-) -> Result<(), ApiFailure> {
-    tokio::task::spawn_blocking(move || write_atomic_sync(&path, &contents))
-        .await
-        .map_err(|e| ApiFailure::internal(format!("failed to join writer: {}", e)))?
-        .map_err(|e| ApiFailure::internal(format!("failed to write config: {}", e)))
-}
-
-fn write_atomic_sync(path: &Path, contents: &str) -> std::io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)?;
-
-    let tmp_name = format!(
-        ".{}.tmp-{}",
-        path.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("config.toml"),
-        rand::random::<u64>()
-    );
-    let tmp_path = parent.join(tmp_name);
-
-    let write_result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp_path)?;
-        file.write_all(contents.as_bytes())?;
-        file.sync_all()?;
-        std::fs::rename(&tmp_path, path)?;
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
-        Ok(())
-    })();
-
-    if write_result.is_err() {
-        let _ = std::fs::remove_file(&tmp_path);
-    }
-    write_result
+fn revision_conflict() -> ApiFailure {
+    ApiFailure::new(
+        hyper::StatusCode::CONFLICT,
+        "revision_conflict",
+        "Config revision changed before persistence",
+    )
 }

@@ -1,6 +1,8 @@
 (()=>{'use strict';
 let bootstrap="__BOOTSTRAP__";
-const relayOrigin='https://__HOST__',carrierCapabilities='https,https-lanes,websocket,websocket-lanes';
+const relayOrigin='https://__HOST__',relayBase=relayOrigin+'__BASE_PREFIX__',carrierCapabilities='https,https-lanes,websocket,websocket-lanes';
+__DIAGNOSTIC_BINDING__;
+__DIAGNOSTIC_RUNTIME_STARTED__;
 const responseBody=globalThis.TelemtBridgeResponse;if(!responseBody)throw new Error('missing response runtime');
 const requestSupport=globalThis.TelemtBridgeRequest;if(!requestSupport)throw new Error('missing request runtime');
 const bufferSupport=globalThis.TelemtBridgeBuffers;if(!bufferSupport)throw new Error('missing buffer runtime');
@@ -23,10 +25,10 @@ const pending=[],upPending=[],recoveryPending=[],lanes=new Map(),closedLanes=new
 const canonicalFailures=['timeout','network','upgrade','http','protocol'];
 const failure=(reason,message)=>Object.assign(new Error(message||reason),{telemtReason:reason});
 const failureReason=(error,fallback)=>error&&canonicalFailures.includes(error.telemtReason)?error.telemtReason:fallback;
-const status=state=>{if(port&&!closed)port.postMessage({t:'status',state})};
-const socketURL=()=>relayOrigin.replace(/^https:/,'wss:')+'/api/v1/ws';
+const status=__STATUS_FUNCTION__;
+const socketURL=()=>relayBase.replace(/^https:/,'wss:')+'/api/v1/ws';
 const requestClient=requestSupport.create({
- origin:()=>relayOrigin,closed:()=>closed,retryMs:()=>bridgeRetryMs,longPollMs:()=>longPollMs,requestMs:()=>bridgeRequestMs,
+ base:()=>relayBase,closed:()=>closed,retryMs:()=>bridgeRetryMs,longPollMs:()=>longPollMs,requestMs:()=>bridgeRequestMs,
  batchLimit:()=>batchLimit,read:(response,limit,exact,signal)=>responseBody.read(response,limit,exact,signal),cancel:responseBody.cancel,
  failure,reason:failureReason,retrying:()=>status('reconnecting')
 });
@@ -62,7 +64,7 @@ function retireCarrier(policy){
  }
  lanes.clear();closedLanes.clear();closedLaneOrder.length=0;releasePending(pending,null);releasePending(recoveryPending,null);
  for(const id of retireAllStreams())if(port){const frame=closeFrame(id);port.postMessage(frame,[frame])}
- bootstrap=policy.bootstrap;batchLimit=policy.limits.carrier_batch_bytes;queueLimit=policy.limits.pending_bytes_per_session;
+ bootstrap=policy.bootstrap;__DIAGNOSTIC_BOOTSTRAP_REPLACED__;batchLimit=policy.limits.carrier_batch_bytes;queueLimit=policy.limits.pending_bytes_per_session;
  queueItemLimit=policy.limits.pending_items_per_session;maxStreams=policy.limits.max_streams_per_session;
  laneQueueLimit=Math.min(queueLimit,8388608);laneItemLimit=Math.min(queueItemLimit,1024);
  longPollMs=policy.timeouts.long_poll_secs*1000;bridgeRequestMs=policy.timeouts.bridge_request_secs*1000;
@@ -389,16 +391,17 @@ function queueLane(value){
 }
 function openLaneSocket(lane){
  if(lane.socket||closed)return;lane.socket=new WebSocket(socketURL(),'tproxy-lane-v1.'+sessionToken+'.'+String(lane.id));lane.socket.binaryType='arraybuffer';
- const opened=lane.socket,openTimer=setTimeout(()=>{if(!closed&&lanes.get(lane.id)===lane&&lane.socket===opened)finishLane(lane,true)},websocketOpenMs);
- lane.socket.onopen=()=>{if(closed||lanes.get(lane.id)!==lane)return;lane.ready=true;status('connected');runLaneSocketUp(lane)};
+ const opened=lane.socket;let upgraded=false,settled=false,openTimer=null;const finishSocket=reason=>{if(settled)return;settled=true;if(openTimer)clearTimeout(openTimer);openTimer=null;if(closed||lanes.get(lane.id)!==lane||lane.socket!==opened)return;lane.ready=false;if(!upgraded){lane.socket=null;opened.close();recoveryController.recover(reason,null);return}finishLane(lane,true)};
+ openTimer=setTimeout(()=>finishSocket('timeout'),websocketOpenMs);
+ lane.socket.onopen=()=>{if(closed||lanes.get(lane.id)!==lane||lane.socket!==opened){opened.close();return}upgraded=true;lane.ready=true;status('connected');runLaneSocketUp(lane)};
  lane.socket.onmessage=event=>{
-  clearTimeout(openTimer);
-  if(closed||lanes.get(lane.id)!==lane||!(event.data instanceof ArrayBuffer)){finishLane(lane,true);return}
+  if(openTimer)clearTimeout(openTimer);openTimer=null;
+  if(closed||lanes.get(lane.id)!==lane||lane.socket!==opened||!(event.data instanceof ArrayBuffer)){finishLane(lane,true);return}
   let values;try{values=splitFrames(event.data);for(const value of values)if(value.id!==lane.id)throw new Error('cross-lane frame')}catch(error){finishLane(lane,true);return}
   if(values.some(value=>value.type===3))lane.remoteClosed=true;
   observeServerFrames(event.data);port.postMessage({t:'traffic',up:0,down:event.data.byteLength});port.postMessage(event.data,[event.data]);status('connected');
  };
- lane.socket.onerror=()=>{};lane.socket.onclose=()=>{clearTimeout(openTimer);lane.ready=false;lane.socket=null;if(!closed)finishLane(lane,true)};
+ lane.socket.onerror=()=>{};lane.socket.onclose=()=>finishSocket(upgraded?'network':'upgrade');
 }
 async function runLaneSocketUp(lane){
  if(lane.running||!lane.ready)return;lane.running=true;let lease=null;
@@ -475,7 +478,7 @@ async function pollLane(lane){
 }
 function deleteSession(){
  const token=cleanupToken||sessionToken,headers=canonicalFailures.includes(terminalFailure)?{'X-Carrier-Failure':terminalFailure}:null;
- if(token)fetch(relayOrigin+'/api/v1/session',options('DELETE',token,null,headers,undefined,true)).catch(()=>{});
+ if(token)fetch(relayBase+'/api/v1/session',options('DELETE',token,null,headers,undefined,true)).catch(()=>{});
 }
 function close(notifyServer){
  if(closed)return;closed=true;if(recoveryController)recoveryController.cancel();rejectRecoveryCommit(failure('network','bridge closed'));if(helloTimer)clearTimeout(helloTimer);helloTimer=null;if(carrierTimer)clearTimeout(carrierTimer);clearProbeTimer();if(schedulerTimer)clearTimeout(schedulerTimer);schedulerTimer=null;if(attemptController)attemptController.abort();if(pollController)pollController.abort();
@@ -487,20 +490,20 @@ function close(notifyServer){
  buffers.assertEmpty();
 }
 function activatePort(nextPort){
- initialized=true;port=nextPort;
+ initialized=true;port=nextPort;__DIAGNOSTIC_BOUNDARY_ACTIVATED__;
  port.onmessage=message=>{
   observeResumeTrigger();
   if(message.data instanceof ArrayBuffer){
-   if(!createStarted){createStarted=true;if(helloTimer)clearTimeout(helloTimer);helloTimer=null;helloFrame=message.data;if(negotiationEnabled){negotiationStartedAt=Date.now();armCarrierDeadline(attemptEpoch)}createSession(attemptEpoch)}
+   if(!createStarted){__DIAGNOSTIC_HELLO_RECEIVED__;createStarted=true;if(helloTimer)clearTimeout(helloTimer);helloTimer=null;helloFrame=message.data;if(negotiationEnabled){negotiationStartedAt=Date.now();armCarrierDeadline(attemptEpoch)}createSession(attemptEpoch)}
    else{
     let data;try{data=acceptNativeFrames(message.data)}catch(error){fail(error&&error.telemtReason==='capacity'?'capacity':'protocol');return}if(!data)return;
     if(recoveryController.active()&&!recoveryReplaced){if(!reserve(data,null)){fail('capacity');return}recoveryPending.push(data)}
     else if(!carrierCommitted){if(!reserve(data,null)){fail('capacity');return}pending.push(data);maybeStartCandidate()}
     else queueCarrier(data);
    }
-  }else if(message.data&&message.data.t==='close'){status('failed');close(true)}
+  }else if(message.data&&message.data.t==='close'){__DIAGNOSTIC_CLIENT_CLOSE__;status('failed');close(true)}
  };
- port.start();status('connecting');helloTimer=setTimeout(()=>fail('timeout'),bridgeRequestMs);
+ port.start();status('connecting');helloTimer=setTimeout(__HELLO_TIMEOUT_CALLBACK__,bridgeRequestMs);
 }
 recoveryController=recoverySupport.create({
  budgetMs:()=>bridgeRecoveryMs,requestMs:()=>bridgeRequestMs,url:()=>relayOrigin+recoveryPath,token:()=>cleanupToken||sessionToken,
@@ -539,5 +542,5 @@ function discoverAndroid(){
 discoverAndroid();
 addEventListener('online',observeResumeTrigger);
 if(globalThis.document&&typeof globalThis.document.addEventListener==='function')globalThis.document.addEventListener('visibilitychange',()=>{if(globalThis.document.visibilityState==='visible')observeResumeTrigger()});
-addEventListener('pagehide',()=>fail('navigation'),{once:true});
+addEventListener('pagehide',__PAGEHIDE_CALLBACK__,{once:true});
 })();

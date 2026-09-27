@@ -290,6 +290,7 @@ where
     // ── Combine split halves into bidirectional streams ──────────────
     let client_combined = CombinedStream::new(client_reader, client_writer);
     let mut server = CombinedStream::new(server_reader, server_writer);
+    let quota_handle = stats.current_user_quota_handle(&user_owned);
 
     // Wrap client with stats/activity tracking
     let mut client = StatsIo::new_with_traffic_lease(
@@ -297,6 +298,7 @@ where
         Arc::clone(&counters),
         Arc::clone(&stats),
         user_owned.clone(),
+        quota_handle,
         traffic_lease,
         quota_limit,
         Arc::clone(&quota_exceeded),

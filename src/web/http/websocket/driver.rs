@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -45,6 +46,7 @@ pub(super) async fn run_upgraded(
         UpgradeDeadlineLease::deadline,
     );
     let upgraded = tokio::select! {
+        biased;
         _ = cancellation.cancelled() => return,
         result = tokio::time::timeout_at(deadline, on_upgrade) => result,
     };
@@ -111,6 +113,40 @@ pub(super) async fn run_upgraded(
 
 type CarrierSocket = WebSocketStream<ConnectionIo>;
 
+enum DataPlaneEvent<I, D> {
+    Incoming(I),
+    Down(D),
+}
+
+#[derive(Default)]
+struct FairDataSelector {
+    prefer_down: bool,
+}
+
+impl FairDataSelector {
+    async fn select<I, D>(&mut self, incoming: I, down: D) -> DataPlaneEvent<I::Output, D::Output>
+    where
+        I: Future,
+        D: Future,
+    {
+        let event = if self.prefer_down {
+            tokio::select! {
+                biased;
+                down = down => DataPlaneEvent::Down(down),
+                incoming = incoming => DataPlaneEvent::Incoming(incoming),
+            }
+        } else {
+            tokio::select! {
+                biased;
+                incoming = incoming => DataPlaneEvent::Incoming(incoming),
+                down = down => DataPlaneEvent::Down(down),
+            }
+        };
+        self.prefer_down = matches!(event, DataPlaneEvent::Incoming(_));
+        event
+    }
+}
+
 async fn run_multiplex(
     socket: &mut CarrierSocket,
     runtime: &Arc<WebProcessRuntime>,
@@ -133,25 +169,31 @@ async fn run_multiplex(
     let write_timeout = Duration::from_secs(session.timeouts().websocket_write_secs);
     let maximum_message = session.limits().carrier_batch_bytes;
     let mut active = false;
+    let mut data_selector = FairDataSelector::default();
     loop {
         let down = session.poll_down_websocket(cursor);
-        tokio::pin!(down);
         let event = tokio::select! {
+            biased;
             _ = cancellation.cancelled() => return Err(()),
             _ = tokio::time::sleep_until(open_deadline.into()), if !active => return Err(()),
             _ = tokio::time::sleep_until(next_ping.into()) => DriverEvent::Liveness,
-            incoming = read_message(
-                socket,
-                runtime,
-                session.profile_key(),
-                &cancellation,
-                &mut read_budget,
-                maximum_message,
-                backpressure_timeout,
+            data = data_selector.select(
+                read_message(
+                    socket,
+                    runtime,
+                    session.profile_key(),
+                    &cancellation,
+                    &mut read_budget,
+                    maximum_message,
+                    backpressure_timeout,
+                ),
+                down,
             ) => {
-                DriverEvent::Incoming(incoming?)
+                match data {
+                    DataPlaneEvent::Incoming(incoming) => DriverEvent::Incoming(incoming?),
+                    DataPlaneEvent::Down(down) => DriverEvent::Down(down.map_err(|_| ())?),
+                }
             }
-            down = &mut down => DriverEvent::Down(down.map_err(|_| ())?),
         };
         match event {
             DriverEvent::Incoming((message, _budget)) => match message {
@@ -360,4 +402,23 @@ enum DriverEvent {
     Incoming((Message, Option<WebSocketBudgetLease>)),
     Down(crate::web::session::PollResult),
     Liveness,
+}
+
+#[cfg(test)]
+mod fairness_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn continuously_ready_directions_alternate() {
+        let mut selector = FairDataSelector::default();
+        for expected_incoming in [true, false, true, false] {
+            let event = selector
+                .select(std::future::ready("incoming"), std::future::ready("down"))
+                .await;
+            assert_eq!(
+                matches!(event, DataPlaneEvent::Incoming(_)),
+                expected_incoming
+            );
+        }
+    }
 }

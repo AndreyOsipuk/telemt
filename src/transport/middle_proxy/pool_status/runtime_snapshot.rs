@@ -16,6 +16,7 @@ impl MePool {
         let pending_started_at = reinit.pending_hardswap_started_at_epoch_secs;
         let pending_hardswap_age_secs =
             (pending_started_at > 0).then_some(now_epoch_secs.saturating_sub(pending_started_at));
+        let hardswap = self.api_hardswap_snapshot_for_reinit(reinit).await;
 
         let mut quarantined_endpoints = Vec::<MeApiQuarantinedEndpointSnapshot>::new();
         {
@@ -64,6 +65,13 @@ impl MePool {
                 .max_concurrency_effective
                 .load(Ordering::Acquire),
             hardswap_enabled: self.reinit.hardswap.load(Ordering::Relaxed),
+            pending_writers_current: hardswap.pending_writers_current,
+            pending_writer_deficit: hardswap.pending_writer_deficit,
+            pending_missing_dc_groups: hardswap.pending_missing_dc_groups,
+            pending_map_current: hardswap.pending_map_current,
+            orphan_warm_writers_current: hardswap.orphan_warm_writers_current,
+            replacement_preparing_current: hardswap.replacement_preparing_current,
+            replacement_retiring_current: hardswap.replacement_retiring_current,
             floor_mode: floor_mode_label(self.floor_mode()),
             adaptive_floor_idle_secs: self
                 .floor_runtime

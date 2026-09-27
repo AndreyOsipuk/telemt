@@ -71,6 +71,9 @@ pub enum WebDecoyConfig {
 pub struct WebVhostConfig {
     /// Canonical lowercase ACE hostname used by Telegram Desktop.
     pub host: String,
+    /// Optional canonical WEB endpoint prefix without surrounding slashes.
+    #[serde(default)]
+    pub base_path: String,
     /// Stable public destination tuple used by inner relay routing and KDF metadata.
     pub public_addr: SocketAddr,
     /// Ordinary-site fallback for this hostname.

@@ -154,13 +154,11 @@ async fn insert_writer(
     };
 
     pool.writers.write().await.push(writer);
-    {
-        let mut map = pool.proxy_map_v4.write().await;
-        map.entry(writer_dc)
-            .or_insert_with(Vec::new)
-            .push((addr.ip(), addr.port()));
-    }
-    pool.rebuild_endpoint_dc_map().await;
+    let mut map = pool.endpoint_snapshot.load().map_v4.clone();
+    map.entry(writer_dc)
+        .or_insert_with(Vec::new)
+        .push((addr.ip(), addr.port()));
+    pool.update_proxy_maps(map, None).await;
     if register_in_registry {
         pool.registry
             .register_writer(writer_id, tx, byte_budget)
@@ -240,14 +238,7 @@ async fn send_proxy_req_uses_live_same_dc_writer_while_preferred_endpoint_refill
     .await;
 
     assert!(pool.admission_ready_conditional_cast().await);
-    assert_eq!(
-        pool.preferred_endpoints_by_dc
-            .load()
-            .get(&2)
-            .cloned()
-            .unwrap_or_default(),
-        vec![new_addr]
-    );
+    assert_eq!(pool.preferred_endpoints_for_dc(2).await, vec![new_addr]);
 
     let (conn_id, _rx) = pool.registry.register().await;
     let result = pool
@@ -322,6 +313,36 @@ async fn send_proxy_req_does_not_replay_when_first_bind_commit_fails() {
     let bound = pool.registry.get_writer(conn_id).await;
     assert!(bound.is_some());
     assert_eq!(bound.expect("writer should be bound").writer_id, 11);
+}
+
+#[tokio::test]
+async fn missing_client_route_does_not_prune_a_healthy_writer() {
+    let (pool, _rng) = make_pool().await;
+    let writer_id = 12;
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 12)), 443);
+    let _writer_rx = insert_writer(&pool, writer_id, 2, addr, true).await;
+
+    let result = pool
+        .send_proxy_req(
+            999_999,
+            2,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30005),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443),
+            b"cancelled-route",
+            0,
+            None,
+            None,
+        )
+        .await;
+
+    assert!(result.is_err());
+    assert!(
+        pool.writers
+            .read()
+            .await
+            .iter()
+            .any(|writer| writer.id == writer_id)
+    );
 }
 
 #[tokio::test]

@@ -5,15 +5,33 @@ use std::path::Path;
 use std::sync::Arc;
 
 #[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
+use std::ffi::OsString;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
+#[cfg(unix)]
+use nix::dir::Dir;
+#[cfg(unix)]
+use nix::fcntl::{OFlag, openat};
+#[cfg(unix)]
+use nix::sys::stat::Mode;
 
 use bytes::Bytes;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
 use super::*;
+#[cfg(unix)]
+use crate::util::secure_fs::open_dir_nofollow;
 
-const WEB_CAPABILITY_CONTEXT: &[u8] = b"tdesktop-web-proxy-bridge-v1\n";
+// Path-based static snapshot fallback for platforms without directory descriptors.
+#[cfg(not(unix))]
+mod static_site_fallback;
+
+const WEB_CAPABILITY_CONTEXT_V1: &[u8] = b"tdesktop-web-proxy-bridge-v1\n";
+const WEB_CAPABILITY_CONTEXT_V2: &[u8] = b"tdesktop-web-proxy-bridge-v2\n";
 const WEB_DEBUG_FINGERPRINT_CONTEXT: &[u8] = b"telemt-web-debug-key-fingerprint-v1\0";
 const MAX_WEB_STATIC_DEPTH: usize = 64;
 
@@ -24,6 +42,7 @@ pub(super) fn rebuild(config: &mut ProxyConfig) -> Result<()> {
     })?;
     let mut runtime_vhosts = BTreeMap::new();
     let mut runtime_profiles = Vec::new();
+    let mut runtime_capabilities = Vec::new();
     let mut static_files = 0usize;
     let mut static_bytes = 0usize;
 
@@ -50,8 +69,11 @@ pub(super) fn rebuild(config: &mut ProxyConfig) -> Result<()> {
             })?;
             let (client_secret, client_secret_len) =
                 client_secret(auth_entry.secret, profile.secret_mode);
-            let capability =
-                derive_web_capability(&client_secret[..client_secret_len], vhost.host.as_bytes())?;
+            let capability = derive_web_capability(
+                &client_secret[..client_secret_len],
+                vhost.host.as_bytes(),
+                vhost.base_path.as_bytes(),
+            )?;
             let key_fingerprint = debug_key_fingerprint(&client_secret[..client_secret_len]);
             if !capabilities.insert(capability) {
                 return Err(ProxyError::Config(format!(
@@ -63,6 +85,7 @@ pub(super) fn rebuild(config: &mut ProxyConfig) -> Result<()> {
                 host: vhost.host.clone(),
                 public_addr: vhost.public_addr,
                 user: profile.user.clone(),
+                credential_id: auth_entry.credential_id,
                 secret_mode: profile.secret_mode,
                 carrier: config.web.carrier,
                 carrier_negotiation_enabled: config.web.carrier_negotiation_enabled(),
@@ -86,6 +109,7 @@ pub(super) fn rebuild(config: &mut ProxyConfig) -> Result<()> {
                     .unwrap_or(config.web.limits.max_streams_per_session),
             });
             capability_table.push(capability);
+            runtime_capabilities.push(capability);
             profiles.push(Arc::clone(&runtime_profile));
             runtime_profiles.push(runtime_profile);
         }
@@ -93,6 +117,11 @@ pub(super) fn rebuild(config: &mut ProxyConfig) -> Result<()> {
             vhost.host.clone(),
             Arc::new(WebRuntimeVhost {
                 host: vhost.host.clone(),
+                base: if vhost.base_path.is_empty() {
+                    "/".to_string()
+                } else {
+                    format!("/{}/", vhost.base_path)
+                },
                 decoy_fasttrack_mode: config.web.decoy_fasttrack_mode,
                 decoy,
                 decoy_header_secs: config.web.timeouts.decoy_header_secs,
@@ -105,6 +134,7 @@ pub(super) fn rebuild(config: &mut ProxyConfig) -> Result<()> {
     config.web.runtime = Some(Arc::new(WebRuntimeConfig {
         vhosts: runtime_vhosts,
         profiles: runtime_profiles,
+        capabilities: runtime_capabilities.into_boxed_slice(),
     }));
     Ok(())
 }
@@ -116,12 +146,23 @@ fn debug_key_fingerprint(secret: &[u8]) -> String {
     hex::encode(&digest.finalize()[..8])
 }
 
-/// Derives the Telegram Desktop WEB capability for one exact secret and host.
-pub(crate) fn derive_web_capability(secret: &[u8], host: &[u8]) -> Result<[u8; 32]> {
+/// Derives the Telegram Desktop WEB capability for one exact secret, host, and base path.
+pub(crate) fn derive_web_capability(
+    secret: &[u8],
+    host: &[u8],
+    base_path: &[u8],
+) -> Result<[u8; 32]> {
     let mut mac = Hmac::<Sha256>::new_from_slice(secret)
         .map_err(|_| ProxyError::Config("WEB capability secret must not be empty".to_string()))?;
-    mac.update(WEB_CAPABILITY_CONTEXT);
-    mac.update(host);
+    if base_path.is_empty() {
+        mac.update(WEB_CAPABILITY_CONTEXT_V1);
+        mac.update(host);
+    } else {
+        mac.update(WEB_CAPABILITY_CONTEXT_V2);
+        mac.update(host);
+        mac.update(b"\n");
+        mac.update(base_path);
+    }
     Ok(mac.finalize().into_bytes().into())
 }
 
@@ -192,34 +233,31 @@ fn load_static_site(
     total_files: &mut usize,
     total_bytes: &mut usize,
 ) -> Result<WebStaticSite> {
-    let root_metadata = fs::symlink_metadata(root).map_err(|error| {
-        ProxyError::Config(format!(
-            "failed to inspect WEB static directory `{}`: {error}",
-            root.display()
-        ))
-    })?;
-    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
-        return Err(ProxyError::Config(format!(
-            "WEB static directory `{}` must be a real directory, not a symlink",
-            root.display()
-        )));
-    }
-    let canonical_root = fs::canonicalize(root).map_err(|error| {
-        ProxyError::Config(format!(
-            "failed to canonicalize WEB static directory `{}`: {error}",
-            root.display()
-        ))
-    })?;
     let mut assets = BTreeMap::new();
-    load_static_directory(
-        &canonical_root,
-        &canonical_root,
-        &mut assets,
-        total_files,
-        total_bytes,
-        limits,
-        0,
-    )?;
+    #[cfg(unix)]
+    {
+        let directory = open_static_root(root)?;
+        load_static_directory(
+            directory,
+            Path::new(""),
+            root,
+            &mut assets,
+            total_files,
+            total_bytes,
+            limits,
+            0,
+        )?;
+    }
+    #[cfg(not(unix))]
+    {
+        static_site_fallback::load_static_site_by_path(
+            root,
+            limits,
+            &mut assets,
+            total_files,
+            total_bytes,
+        )?;
+    }
     if !assets.contains_key(&format!("/{index}")) {
         return Err(ProxyError::Config(format!(
             "WEB static directory `{}` does not contain index `{index}`",
@@ -232,54 +270,95 @@ fn load_static_site(
     })
 }
 
+#[cfg(unix)]
+fn open_static_root(root: &Path) -> Result<Dir> {
+    let descriptor = open_dir_nofollow(root).map_err(|error| {
+        ProxyError::Config(format!(
+            "WEB static directory `{}` must be a real directory, not a symlink: {error}",
+            root.display()
+        ))
+    })?;
+    Dir::from_fd(descriptor).map_err(|error| {
+        ProxyError::Config(format!(
+            "failed to read WEB static directory `{}`: {error}",
+            root.display()
+        ))
+    })
+}
+
+#[cfg(unix)]
 fn load_static_directory(
+    mut directory: Dir,
+    relative: &Path,
     root: &Path,
-    directory: &Path,
     assets: &mut BTreeMap<String, WebStaticAsset>,
     total_files: &mut usize,
     total_bytes: &mut usize,
     limits: &WebLimitsConfig,
     depth: usize,
 ) -> Result<()> {
-    let entries = fs::read_dir(directory).map_err(|error| {
-        ProxyError::Config(format!(
-            "failed to read WEB static directory `{}`: {error}",
-            directory.display()
-        ))
-    })?;
-    for entry in entries {
+    let mut entries = Vec::new();
+    for entry in directory.iter() {
         let entry = entry.map_err(|error| {
-            ProxyError::Config(format!("failed to read WEB static entry: {error}"))
+            ProxyError::Config(format!(
+                "failed to read WEB static directory `{}`: {error}",
+                root.join(relative).display()
+            ))
         })?;
+        let name = entry.file_name().to_bytes();
+        if name == b"." || name == b".." {
+            continue;
+        }
         if *total_files >= limits.max_static_files {
             return Err(ProxyError::Config(
                 "WEB static entries exceed process-wide web.limits.max_static_files".to_string(),
             ));
         }
         *total_files += 1;
-        let path = entry.path();
-        let file_type = entry.file_type().map_err(|error| {
+        entries.push(OsString::from_vec(name.to_vec()));
+    }
+    entries.sort_unstable();
+
+    for name in entries {
+        let relative_path = relative.join(&name);
+        let display_path = root.join(&relative_path);
+        let descriptor = openat(
+            &directory,
+            name.as_os_str(),
+            OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| {
             ProxyError::Config(format!(
-                "failed to inspect WEB static entry `{}`: {error}",
-                path.display()
+                "failed to open WEB static entry `{}` without following symlinks: {error}",
+                display_path.display()
             ))
         })?;
-        if file_type.is_symlink() {
-            return Err(ProxyError::Config(format!(
-                "WEB static entry `{}` must not be a symlink",
-                path.display()
-            )));
-        }
-        if file_type.is_dir() {
+        let file = fs::File::from(descriptor);
+        let metadata = file.metadata().map_err(|error| {
+            ProxyError::Config(format!(
+                "failed to inspect WEB static entry `{}`: {error}",
+                display_path.display()
+            ))
+        })?;
+        if metadata.is_dir() {
             if depth >= MAX_WEB_STATIC_DEPTH {
                 return Err(ProxyError::Config(format!(
                     "WEB static directory `{}` exceeds the maximum nesting depth",
-                    path.display()
+                    display_path.display()
                 )));
             }
+            let descriptor = file.into();
+            let child = Dir::from_fd(descriptor).map_err(|error| {
+                ProxyError::Config(format!(
+                    "failed to open WEB static directory `{}`: {error}",
+                    display_path.display()
+                ))
+            })?;
             load_static_directory(
+                child,
+                &relative_path,
                 root,
-                &path,
                 assets,
                 total_files,
                 total_bytes,
@@ -288,81 +367,105 @@ fn load_static_directory(
             )?;
             continue;
         }
-        if !file_type.is_file() {
-            return Err(ProxyError::Config(format!(
-                "WEB static entry `{}` must be a regular file",
-                path.display()
-            )));
-        }
-        let mut options = fs::OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
-        let file = options.open(&path).map_err(|error| {
-            ProxyError::Config(format!(
-                "failed to open WEB static file `{}`: {error}",
-                path.display()
-            ))
-        })?;
-        let metadata = file.metadata().map_err(|error| {
-            ProxyError::Config(format!(
-                "failed to inspect WEB static file `{}`: {error}",
-                path.display()
-            ))
-        })?;
         if !metadata.is_file() {
             return Err(ProxyError::Config(format!(
-                "WEB static entry `{}` changed before it was opened",
-                path.display()
+                "WEB static entry `{}` must be a regular file",
+                display_path.display()
             )));
         }
-        let file_len = usize::try_from(metadata.len()).map_err(|_| {
-            ProxyError::Config(format!("WEB static file `{}` is too large", path.display()))
-        })?;
-        if file_len > limits.max_static_file_bytes {
-            return Err(ProxyError::Config(format!(
-                "WEB static file `{}` exceeds web.limits.max_static_file_bytes",
-                path.display()
-            )));
-        }
-        *total_bytes = total_bytes.checked_add(file_len).ok_or_else(|| {
-            ProxyError::Config("WEB static snapshot byte count overflowed usize".to_string())
-        })?;
-        if *total_bytes > limits.max_static_bytes {
-            return Err(ProxyError::Config(
-                "WEB static snapshots exceed process-wide web.limits.max_static_bytes".to_string(),
-            ));
-        }
-        let relative = path.strip_prefix(root).map_err(|_| {
-            ProxyError::Config("WEB static path escaped its configured root".to_string())
-        })?;
-        let route = static_route(relative)?;
-        let mut body = Vec::with_capacity(file_len);
-        file.take(limits.max_static_file_bytes as u64 + 1)
-            .read_to_end(&mut body)
-            .map_err(|error| {
-                ProxyError::Config(format!(
-                    "failed to read WEB static file `{}`: {error}",
-                    path.display()
-                ))
-            })?;
-        if body.len() != file_len {
-            return Err(ProxyError::Config(format!(
-                "WEB static file `{}` changed while its snapshot was built",
-                path.display()
-            )));
-        }
-        let etag = format!("\"{}\"", hex::encode(Sha256::digest(&body)));
-        assets.insert(
-            route,
-            WebStaticAsset {
-                body: Bytes::from(body),
-                content_type: static_content_type(&path),
-                etag,
-            },
-        );
+        load_static_file(
+            file,
+            &metadata,
+            &relative_path,
+            &display_path,
+            assets,
+            total_bytes,
+            limits,
+        )?;
     }
     Ok(())
+}
+
+fn load_static_file(
+    mut file: fs::File,
+    metadata: &fs::Metadata,
+    relative: &Path,
+    display_path: &Path,
+    assets: &mut BTreeMap<String, WebStaticAsset>,
+    total_bytes: &mut usize,
+    limits: &WebLimitsConfig,
+) -> Result<()> {
+    let file_len = usize::try_from(metadata.len()).map_err(|_| {
+        ProxyError::Config(format!(
+            "WEB static file `{}` is too large",
+            display_path.display()
+        ))
+    })?;
+    if file_len > limits.max_static_file_bytes {
+        return Err(ProxyError::Config(format!(
+            "WEB static file `{}` exceeds web.limits.max_static_file_bytes",
+            display_path.display()
+        )));
+    }
+    *total_bytes = total_bytes.checked_add(file_len).ok_or_else(|| {
+        ProxyError::Config("WEB static snapshot byte count overflowed usize".to_string())
+    })?;
+    if *total_bytes > limits.max_static_bytes {
+        return Err(ProxyError::Config(
+            "WEB static snapshots exceed process-wide web.limits.max_static_bytes".to_string(),
+        ));
+    }
+    let route = static_route(relative)?;
+    let mut body = Vec::with_capacity(file_len);
+    file.by_ref()
+        .take(limits.max_static_file_bytes as u64 + 1)
+        .read_to_end(&mut body)
+        .map_err(|error| {
+            ProxyError::Config(format!(
+                "failed to read WEB static file `{}`: {error}",
+                display_path.display()
+            ))
+        })?;
+    let final_metadata = file.metadata().map_err(|error| {
+        ProxyError::Config(format!(
+            "failed to recheck WEB static file `{}`: {error}",
+            display_path.display()
+        ))
+    })?;
+    if body.len() != file_len || !static_file_version_matches(metadata, &final_metadata) {
+        return Err(ProxyError::Config(format!(
+            "WEB static file `{}` changed while its snapshot was built",
+            display_path.display()
+        )));
+    }
+    let etag = format!("\"{}\"", hex::encode(Sha256::digest(&body)));
+    assets.insert(
+        route,
+        WebStaticAsset {
+            body: Bytes::from(body),
+            content_type: static_content_type(relative),
+            etag,
+        },
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+fn static_file_version_matches(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    before.dev() == after.dev()
+        && before.ino() == after.ino()
+        && before.len() == after.len()
+        && before.mtime() == after.mtime()
+        && before.mtime_nsec() == after.mtime_nsec()
+        && before.ctime() == after.ctime()
+        && before.ctime_nsec() == after.ctime_nsec()
+}
+
+#[cfg(not(unix))]
+fn static_file_version_matches(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    before.len() == after.len()
+        && before.modified().ok() == after.modified().ok()
+        && before.created().ok() == after.created().ok()
 }
 
 fn static_route(relative: &Path) -> Result<String> {
@@ -402,26 +505,7 @@ fn static_content_type(path: &Path) -> &'static str {
     }
 }
 
+// Runtime WEB construction tests remain separate from the production loader.
 #[cfg(test)]
-mod tests {
-    use base64::Engine as _;
-
-    use super::*;
-
-    #[test]
-    fn capability_matches_reference_vectors() {
-        let secret = hex::decode("000102030405060708090a0b0c0d0e0f").unwrap();
-        let plain = derive_web_capability(&secret, b"proxy.example.com").unwrap();
-        assert_eq!(
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(plain),
-            "MHLEY5PmW1GWqJkSrlmJpvJUiLhBH_QKy6yKg8a0JPk"
-        );
-        let mut dd_secret = vec![0xdd];
-        dd_secret.extend_from_slice(&secret);
-        let dd = derive_web_capability(&dd_secret, b"proxy.example.com").unwrap();
-        assert_eq!(
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(dd),
-            "IpJrt3e7sKtzPyoXy6w-Zj6GGEvsvclN66JzQEfPYLA"
-        );
-    }
-}
+#[path = "runtime_web/tests.rs"]
+mod tests;

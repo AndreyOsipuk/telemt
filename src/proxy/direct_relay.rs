@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::ffi::OsString;
+#[cfg(all(test, unix))]
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::SocketAddr;
@@ -26,6 +27,7 @@ use crate::proxy::shared_state::{
     ProxySharedState,
 };
 use crate::stats::Stats;
+use crate::stats::UserQuotaHandle;
 use crate::stream::{BufferPool, CryptoReader, CryptoWriter};
 use crate::transport::UpstreamManager;
 #[cfg(unix)]
@@ -33,7 +35,7 @@ use nix::fcntl::{Flock, FlockArg, OFlag, openat};
 #[cfg(unix)]
 use nix::sys::stat::Mode;
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 use std::os::unix::fs::OpenOptionsExt;
 
 // Direct relay lifecycle and conntrack publication.
@@ -178,10 +180,7 @@ fn open_unknown_dc_log_append_anchored(
 ) -> std::io::Result<std::fs::File> {
     #[cfg(unix)]
     {
-        let parent = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&path.allowed_parent)?;
+        let parent = crate::util::secure_fs::open_dir_nofollow(&path.allowed_parent)?;
 
         let oflags = OFlag::O_CREAT
             | OFlag::O_APPEND

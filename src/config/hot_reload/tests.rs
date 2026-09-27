@@ -144,11 +144,13 @@ fn web_debug_policy_is_hot_while_debug_capacity_is_process_owned() {
     let old = sample_config();
     let mut new = old.clone();
     new.web.debug.enabled = true;
+    new.web.debug.sideband = true;
     new.web.debug.default_window_secs = 60;
     new.web.limits.debug_records_capacity += 1;
 
     let applied = overlay_hot_fields(&old, &new);
     assert!(applied.web.debug.enabled);
+    assert!(applied.web.debug.sideband);
     assert_eq!(applied.web.debug.default_window_secs, 60);
     assert_eq!(
         applied.web.limits.debug_records_capacity,

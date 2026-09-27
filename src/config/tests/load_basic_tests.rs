@@ -46,6 +46,8 @@ mod legacy_policy_tests;
 mod me_route_tests;
 #[path = "load_basic_tests/me_startup_tests.rs"]
 mod me_startup_tests;
+#[path = "load_basic_tests/source_security_tests.rs"]
+mod source_security_tests;
 #[path = "load_basic_tests/synlimit_mss_tests.rs"]
 mod synlimit_mss_tests;
 #[path = "load_basic_tests/tls_fetch_tests.rs"]

@@ -12,6 +12,8 @@ use tracing::{debug, info, warn};
 use crate::config::ProxyConfig;
 use crate::error::Result;
 use crate::transport::UpstreamManager;
+#[cfg(unix)]
+use crate::util::secure_fs::{atomic_replace_async, read_regular_limited_async};
 
 use super::MePool;
 use super::http_fetch::{HTTPS_RESPONSE_BODY_MAX_BYTES, https_get};
@@ -73,25 +75,34 @@ pub fn parse_proxy_config_text(text: &str, http_status: u16) -> ProxyConfigData 
 }
 
 pub async fn load_proxy_config_cache(path: &str) -> Result<ProxyConfigData> {
-    let text = tokio::fs::read_to_string(path).await.map_err(|e| {
+    #[cfg(unix)]
+    let bytes =
+        read_regular_limited_async(Path::new(path).to_path_buf(), HTTPS_RESPONSE_BODY_MAX_BYTES)
+            .await;
+    #[cfg(not(unix))]
+    let bytes = tokio::fs::read(path).await;
+    let bytes = bytes.map_err(|e| {
         crate::error::ProxyError::Proxy(format!("read proxy-config cache '{path}' failed: {e}"))
+    })?;
+    let text = String::from_utf8(bytes).map_err(|e| {
+        crate::error::ProxyError::Proxy(format!(
+            "proxy-config cache '{path}' is not valid UTF-8: {e}"
+        ))
     })?;
     Ok(parse_proxy_config_text(&text, 200))
 }
 
 pub async fn save_proxy_config_cache(path: &str, raw_text: &str) -> Result<()> {
-    if let Some(parent) = Path::new(path).parent()
-        && !parent.as_os_str().is_empty()
-    {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| {
-            crate::error::ProxyError::Proxy(format!(
-                "create proxy-config cache dir '{}' failed: {e}",
-                parent.display()
-            ))
-        })?;
-    }
-
-    tokio::fs::write(path, raw_text).await.map_err(|e| {
+    #[cfg(unix)]
+    let write = atomic_replace_async(
+        Path::new(path).to_path_buf(),
+        raw_text.as_bytes().to_vec(),
+        0o640,
+    )
+    .await;
+    #[cfg(not(unix))]
+    let write = tokio::fs::write(path, raw_text).await;
+    write.map_err(|e| {
         crate::error::ProxyError::Proxy(format!("write proxy-config cache '{path}' failed: {e}"))
     })?;
     Ok(())

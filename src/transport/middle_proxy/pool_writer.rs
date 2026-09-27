@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -18,12 +20,60 @@ use crate::error::{ProxyError, Result};
 use crate::protocol::constants::{RPC_CLOSE_EXT_U32, RPC_PING_U32};
 
 use super::codec::{RpcWriter, WriterCommand, build_control_payload};
-use super::pool::{MePool, MeWriter, WriterContour};
+use super::pool::{
+    MePool, MeWriter, WriterContour, WriterOpenIntent, WriterOpenReservation, WriterRole,
+};
+use super::pool_lifecycle::MeTaskRegistration;
 use super::reader::reader_loop;
+use super::registry::WriterReplacementReservation;
 use super::wire::build_proxy_req_payload;
 
 // Writer admission, teardown, and drain-state transitions.
+mod publication;
+mod replacement;
 mod runtime;
+
+struct PreparedWriter<'a> {
+    writer: MeWriter,
+    tx: mpsc::Sender<WriterCommand>,
+    byte_budget: Arc<tokio::sync::Semaphore>,
+    task_registration: MeTaskRegistration<'a>,
+    writer_task: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+    intent: WriterOpenIntent,
+    _open_reservation: WriterOpenReservation<'a>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Commit-time invariant applied to a transactional writer replacement.
+pub(super) enum WriterReplacementPurpose {
+    /// Replaces an idle writer before the upstream idle lifetime expires.
+    IdleRefresh,
+    /// Moves one idle slot from a donor above floor to a receiver below floor.
+    FloorRebalance {
+        /// Minimum writer count that must remain in the donor group.
+        donor_floor: usize,
+        /// Target count above which the receiver no longer needs the slot.
+        receiver_floor: usize,
+    },
+    /// Replaces a stale-generation writer with an active-generation writer.
+    GenerationConvergence,
+    /// Rotates a single-endpoint shadow while retaining coverage.
+    ShadowRotation,
+    /// Replaces a writer after cryptographic secret rotation.
+    SecretRotation,
+}
+
+impl WriterReplacementPurpose {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::IdleRefresh => "idle_refresh",
+            Self::FloorRebalance { .. } => "floor_rebalance",
+            Self::GenerationConvergence => "generation_convergence",
+            Self::ShadowRotation => "shadow_rotation",
+            Self::SecretRotation => "secret_rotation",
+        }
+    }
+}
 
 const ME_ACTIVE_PING_SECS: u64 = 25;
 const ME_ACTIVE_PING_JITTER_SECS: i64 = 5;

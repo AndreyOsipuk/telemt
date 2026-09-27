@@ -120,6 +120,34 @@ impl ProcessControlPlane {
         Ok(())
     }
 
+    /// Registers work that must finish once accepted, even after shutdown cancellation starts.
+    pub(crate) fn spawn_completion<F>(&self, future: F) -> Result<(), F>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let Some(registration) = self.inner.admission.try_register() else {
+            return Err(future);
+        };
+        self.inner.tasks.spawn(future);
+        drop(registration);
+        Ok(())
+    }
+
+    /// Registers a cooperatively cancelled task whose cleanup future must finish.
+    pub(crate) fn spawn_cooperative<S, F>(&self, spawn: S) -> Result<(), S>
+    where
+        S: FnOnce(CancellationToken) -> F,
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let Some(registration) = self.inner.admission.try_register() else {
+            return Err(spawn);
+        };
+        let cancellation = self.inner.cancellation.clone();
+        self.inner.tasks.spawn(spawn(cancellation));
+        drop(registration);
+        Ok(())
+    }
+
     /// Closes task admission, cancels all owned work, and joins it within the deadline.
     pub(crate) async fn shutdown(&self, timeout: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
@@ -213,5 +241,50 @@ mod tests {
         drop(registration);
 
         assert!(scope.shutdown(Duration::from_secs(1)).await);
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_accepted_completion_without_cancelling_it() {
+        let scope = ProcessControlPlane::new();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_task = completed.clone();
+        assert!(
+            scope
+                .spawn_completion(async move {
+                    let _ = release_rx.await;
+                    completed_task.store(true, Ordering::Release);
+                })
+                .is_ok()
+        );
+
+        let shutdown_scope = scope.clone();
+        let shutdown =
+            tokio::spawn(async move { shutdown_scope.shutdown(Duration::from_secs(1)).await });
+        tokio::task::yield_now().await;
+        assert!(!shutdown.is_finished());
+        assert!(!completed.load(Ordering::Acquire));
+
+        release_tx.send(()).unwrap();
+        assert!(shutdown.await.unwrap());
+        assert!(completed.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn cooperative_task_observes_cancellation_and_finishes_cleanup() {
+        let scope = ProcessControlPlane::new();
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_task = Arc::clone(&completed);
+        assert!(
+            scope
+                .spawn_cooperative(move |cancellation| async move {
+                    cancellation.cancelled().await;
+                    completed_task.store(true, Ordering::Release);
+                })
+                .is_ok()
+        );
+
+        assert!(scope.shutdown(Duration::from_secs(1)).await);
+        assert!(completed.load(Ordering::Acquire));
     }
 }

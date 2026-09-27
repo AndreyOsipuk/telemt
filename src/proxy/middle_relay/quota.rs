@@ -12,7 +12,7 @@ pub(super) fn quota_soft_cap(limit: u64, overshoot: u64) -> u64 {
 }
 
 pub(super) async fn reserve_user_quota_with_yield(
-    user_stats: &UserStats,
+    quota_handle: &UserQuotaHandle,
     bytes: u64,
     limit: u64,
     stats: &Stats,
@@ -22,15 +22,14 @@ pub(super) async fn reserve_user_quota_with_yield(
     let mut backoff_ms = QUOTA_RESERVE_BACKOFF_MIN_MS;
     let mut backoff_rounds = 0usize;
     loop {
-        for _ in 0..QUOTA_RESERVE_SPIN_RETRIES {
-            match user_stats.quota_try_reserve(bytes, limit) {
-                Ok(total) => return Ok(total),
+        for _ in 0..QUOTA_RESERVE_ATTEMPTS_PER_ROUND {
+            match quota_handle.try_reserve(bytes, limit) {
+                Ok(reservation) => return Ok(reservation.commit()),
                 Err(QuotaReserveError::LimitExceeded) => {
                     return Err(MiddleQuotaReserveError::LimitExceeded);
                 }
                 Err(QuotaReserveError::Contended) => {
                     stats.increment_quota_contention_total();
-                    std::hint::spin_loop();
                 }
             }
         }

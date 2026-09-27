@@ -1,12 +1,16 @@
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::Instant;
+
+use tokio::sync::Notify;
 
 use super::state::{allocate_stream_port, allow_rate, decrement_map, release_stream_port};
 use super::{ProfileKey, WebProcessRuntime};
 use crate::web::telemetry::WebRejectionReason;
 
 impl WebProcessRuntime {
-    /// Reserves one process-wide and per-profile live logical-stream slot.
+    /// Reserves one live stream slot and immediately dispatches any operator-fence wake.
+    #[allow(dead_code)]
     pub(crate) fn try_acquire_stream(
         &self,
         profile_key: ProfileKey,
@@ -14,49 +18,68 @@ impl WebProcessRuntime {
         client_ip: IpAddr,
         public_addr: SocketAddr,
     ) -> Result<u16, super::ManagerError> {
-        let _operator_admission = match self.try_operator_admission() {
+        let (result, notify) =
+            self.try_acquire_stream_quiet(profile_key, max_streams, client_ip, public_addr);
+        if let Some(notify) = notify {
+            notify.notify_waiters();
+        }
+        result
+    }
+
+    /// Reserves one stream while returning any operator-fence wake for deferred dispatch.
+    pub(crate) fn try_acquire_stream_quiet(
+        &self,
+        profile_key: ProfileKey,
+        max_streams: usize,
+        client_ip: IpAddr,
+        public_addr: SocketAddr,
+    ) -> (Result<u16, super::ManagerError>, Option<Arc<Notify>>) {
+        let operator_admission = match self.try_operator_admission() {
             Ok(admission) => admission,
             Err(error) => {
                 self.telemetry.record_stream_rejected();
-                return Err(error);
+                return (Err(error), None);
             }
         };
-        let now = Instant::now();
-        let mut state = self.stream_admission.lock();
-        if state.closed {
-            self.telemetry.record_stream_rejected();
-            self.telemetry
-                .record_rejection(WebRejectionReason::RuntimeClosed);
-            return Err(super::ManagerError::Closed);
-        }
-        if state.streams_live >= self.limits.max_streams_global
-            || state
-                .streams_per_profile
-                .get(&profile_key)
-                .copied()
-                .unwrap_or(0)
-                >= max_streams
-        {
-            self.record_stream_rejected_reason(WebRejectionReason::StreamCapacity);
-            return Err(super::ManagerError::Limit);
-        }
-        if !allow_rate(
-            &mut state.stream_rate,
-            now,
-            self.limits.new_streams_per_minute,
-            self.limits.new_streams_burst,
-        ) {
-            self.record_stream_rejected_reason(WebRejectionReason::StreamRate);
-            return Err(super::ManagerError::Limit);
-        }
-        let Some(peer_port) = allocate_stream_port(&mut state, client_ip, public_addr) else {
-            self.record_stream_rejected_reason(WebRejectionReason::StreamTupleExhausted);
-            return Err(super::ManagerError::Limit);
+        let result = {
+            let now = Instant::now();
+            let mut state = self.stream_admission.lock();
+            if state.closed {
+                self.telemetry.record_stream_rejected();
+                self.telemetry
+                    .record_rejection(WebRejectionReason::RuntimeClosed);
+                Err(super::ManagerError::Closed)
+            } else if state.streams_live >= self.limits.max_streams_global
+                || state
+                    .streams_per_profile
+                    .get(&profile_key)
+                    .copied()
+                    .unwrap_or(0)
+                    >= max_streams
+            {
+                self.record_stream_rejected_reason(WebRejectionReason::StreamCapacity);
+                Err(super::ManagerError::Limit)
+            } else if !allow_rate(
+                &mut state.stream_rate,
+                now,
+                self.limits.new_streams_per_minute,
+                self.limits.new_streams_burst,
+            ) {
+                self.record_stream_rejected_reason(WebRejectionReason::StreamRate);
+                Err(super::ManagerError::Limit)
+            } else if let Some(peer_port) = allocate_stream_port(&mut state, client_ip, public_addr)
+            {
+                state.streams_live += 1;
+                *state.streams_per_profile.entry(profile_key).or_insert(0) += 1;
+                self.telemetry.record_stream_opened();
+                Ok(peer_port)
+            } else {
+                self.record_stream_rejected_reason(WebRejectionReason::StreamTupleExhausted);
+                Err(super::ManagerError::Limit)
+            }
         };
-        state.streams_live += 1;
-        *state.streams_per_profile.entry(profile_key).or_insert(0) += 1;
-        self.telemetry.record_stream_opened();
-        Ok(peer_port)
+        let notify = operator_admission.release_deferred();
+        (result, notify)
     }
 
     /// Releases one live logical-stream slot after its relay task exits.
@@ -67,14 +90,29 @@ impl WebProcessRuntime {
         public_addr: SocketAddr,
         peer_port: u16,
     ) {
+        if let Some(notify) =
+            self.release_stream_quiet(profile_key, client_ip, public_addr, peer_port)
+        {
+            notify.notify_waiters();
+        }
+    }
+
+    /// Releases one stream while returning any drain wake for deferred dispatch.
+    pub(crate) fn release_stream_quiet(
+        &self,
+        profile_key: ProfileKey,
+        client_ip: IpAddr,
+        public_addr: SocketAddr,
+        peer_port: u16,
+    ) -> Option<Arc<Notify>> {
         let mut state = self.stream_admission.lock();
         if !release_stream_port(&mut state, client_ip, public_addr, peer_port) {
-            return;
+            return None;
         }
         state.streams_live = state.streams_live.saturating_sub(1);
         decrement_map(&mut state.streams_per_profile, &profile_key);
         drop(state);
-        self.notify_operator_work_changed();
+        self.operator_lifecycle.work_changed_notification()
     }
 
     /// Records a logical stream rejected outside manager quota acquisition.

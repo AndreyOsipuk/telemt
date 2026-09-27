@@ -20,6 +20,7 @@ pub(super) async fn read_message(
     backpressure_timeout: Duration,
 ) -> Result<(Message, Option<WebSocketBudgetLease>), ()> {
     tokio::select! {
+        biased;
         _ = cancellation.cancelled() => return Err(()),
         ready = socket.get_ref().readable() => ready.map_err(|_| ())?,
     }
@@ -28,6 +29,7 @@ pub(super) async fn read_message(
             Some(reserve_data(runtime, owner, maximum, cancellation, backpressure_timeout).await?);
     }
     let message = tokio::select! {
+        biased;
         _ = cancellation.cancelled() => return Err(()),
         message = socket.next() => message.ok_or(())?.map_err(|_| ())?,
     };
@@ -59,6 +61,7 @@ pub(super) async fn reserve_data(
                 return Ok(budget);
             }
             tokio::select! {
+                biased;
                 _ = cancellation.cancelled() => return Err(()),
                 _ = notified => {}
             }
@@ -114,6 +117,7 @@ pub(super) async fn process_lane(
                 Err(_) => return Err(()),
             }
             tokio::select! {
+                biased;
                 _ = cancellation.cancelled() => return Err(()),
                 _ = notified => {}
             }
@@ -147,6 +151,7 @@ where
                 Err(_) => return Err(()),
             }
             tokio::select! {
+                biased;
                 _ = cancellation.cancelled() => return Err(()),
                 _ = notified => {}
             }
@@ -163,6 +168,7 @@ pub(super) async fn send(
     timeout: Duration,
 ) -> Result<(), ()> {
     tokio::select! {
+        biased;
         _ = cancellation.cancelled() => Err(()),
         result = tokio::time::timeout(timeout, socket.send(message)) => {
             result.map_err(|_| ())?.map_err(|_| ())
@@ -176,6 +182,7 @@ pub(super) async fn flush(
     timeout: Duration,
 ) -> Result<(), ()> {
     tokio::select! {
+        biased;
         _ = cancellation.cancelled() => Err(()),
         result = tokio::time::timeout(timeout, socket.flush()) => {
             result.map_err(|_| ())?.map_err(|_| ())

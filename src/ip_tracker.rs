@@ -15,6 +15,7 @@ use arc_swap::ArcSwap;
 use tokio::sync::{Mutex as AsyncMutex, RwLock};
 
 use crate::config::UserMaxUniqueIpsMode;
+use crate::proxy::user_admission::UserIncarnation;
 
 const CLEANUP_DRAIN_BATCH_LIMIT: usize = 1024;
 const MAX_ACTIVE_IP_ENTRIES: u64 = 131_072;
@@ -32,15 +33,20 @@ mod tests;
 struct UserIpShard {
     active_ips: HashMap<String, HashMap<IpAddr, usize>>,
     recent_ips: HashMap<String, HashMap<IpAddr, Instant>>,
+    incarnations: HashMap<String, UserIncarnation>,
 }
 
 #[derive(Debug, Default)]
 struct CleanupShard {
-    queue: Mutex<HashMap<String, HashMap<IpAddr, usize>>>,
+    queue: Mutex<CleanupQueue>,
 }
+
+type CleanupQueue = HashMap<String, HashMap<UserIncarnation, HashMap<IpAddr, usize>>>;
+type CleanupBatch = HashMap<(String, UserIncarnation, IpAddr), usize>;
 
 #[derive(Debug, Clone)]
 struct UserIpLimitPolicy {
+    source_generation: u64,
     max_ips: Arc<HashMap<String, usize>>,
     default_max_ips: usize,
     mode: UserMaxUniqueIpsMode,
@@ -50,6 +56,7 @@ struct UserIpLimitPolicy {
 impl Default for UserIpLimitPolicy {
     fn default() -> Self {
         Self {
+            source_generation: 0,
             max_ips: Arc::new(HashMap::new()),
             default_max_ips: 0,
             mode: UserMaxUniqueIpsMode::ActiveWindow,
@@ -68,6 +75,7 @@ pub struct UserIpTracker {
     recent_cap_rejects: Arc<AtomicU64>,
     cleanup_deferred_releases: Arc<AtomicU64>,
     limit_policy: Arc<ArcSwap<UserIpLimitPolicy>>,
+    policy_update: Arc<Mutex<()>>,
     last_compact_epoch_secs: Arc<AtomicU64>,
     cleanup_queue_len: Arc<AtomicU64>,
     cleanup_shards: Arc<Box<[CleanupShard]>>,
@@ -119,6 +127,7 @@ impl UserIpTracker {
             recent_cap_rejects: Arc::new(AtomicU64::new(0)),
             cleanup_deferred_releases: Arc::new(AtomicU64::new(0)),
             limit_policy: Arc::new(ArcSwap::from_pointee(UserIpLimitPolicy::default())),
+            policy_update: Arc::new(Mutex::new(())),
             last_compact_epoch_secs: Arc::new(AtomicU64::new(0)),
             cleanup_queue_len: Arc::new(AtomicU64::new(0)),
             cleanup_shards: Arc::new(cleanup_shards),
@@ -194,19 +203,26 @@ impl UserIpTracker {
     }
 
     pub(super) fn pop_one_cleanup(
-        queue: &mut HashMap<String, HashMap<IpAddr, usize>>,
-    ) -> Option<(String, IpAddr, usize)> {
+        queue: &mut CleanupQueue,
+    ) -> Option<(String, UserIncarnation, IpAddr, usize)> {
         let user = queue.keys().next().cloned()?;
-        let ip = queue.get(&user)?.keys().next().copied()?;
-        let count = queue.get_mut(&user)?.remove(&ip)?;
-        let remove_user = queue
-            .get(&user)
-            .map(|user_queue| user_queue.is_empty())
-            .unwrap_or(false);
-        if remove_user {
+        let incarnation = queue.get(&user)?.keys().next().copied()?;
+        let ip = queue
+            .get(&user)?
+            .get(&incarnation)?
+            .keys()
+            .next()
+            .copied()?;
+        let incarnations = queue.get_mut(&user)?;
+        let ips = incarnations.get_mut(&incarnation)?;
+        let count = ips.remove(&ip)?;
+        if ips.is_empty() {
+            incarnations.remove(&incarnation);
+        }
+        if incarnations.is_empty() {
             queue.remove(&user);
         }
-        Some((user, ip, count))
+        Some((user, incarnation, ip, count))
     }
 
     #[cfg(test)]
@@ -221,6 +237,19 @@ impl UserIpTracker {
 
     #[cfg(not(test))]
     pub(super) fn observe_cleanup_poison_for_tests(&self) {}
+
+    #[cfg(test)]
+    pub(crate) async fn hold_user_shard_for_tests(
+        &self,
+        user: &str,
+        entered: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let shard_idx = Self::shard_idx(user);
+        let _guard = self.shards[shard_idx].write().await;
+        let _ = entered.send(());
+        let _ = release.await;
+    }
 
     pub(super) fn now_epoch_secs() -> u64 {
         std::time::SystemTime::now()

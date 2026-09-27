@@ -17,6 +17,8 @@ pub(crate) enum TraceRoute {
     Downlink,
     /// WebSocket upgrade handshake.
     Websocket,
+    /// Authenticated generated-bridge diagnostic report.
+    Diagnostic,
 }
 
 impl TraceRoute {
@@ -30,6 +32,7 @@ impl TraceRoute {
             Self::Uplink => "uplink",
             Self::Downlink => "downlink",
             Self::Websocket => "websocket",
+            Self::Diagnostic => "diagnostic",
         }
     }
 }
@@ -226,6 +229,8 @@ pub(crate) struct TraceWebSocketRecord {
 pub(crate) enum TraceLifecycleEvent {
     /// A bridge bootstrap was issued.
     BridgeIssued,
+    /// A generated bridge reported one fixed diagnostic event.
+    BridgeDiagnostic,
     /// Bootstrap or bridge admission was rejected.
     BootstrapRejected,
     /// A session request was classified for legacy or automatic negotiation.
@@ -275,6 +280,7 @@ impl TraceLifecycleEvent {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::BridgeIssued => "bridge_issued",
+            Self::BridgeDiagnostic => "bridge_diagnostic",
             Self::BootstrapRejected => "bootstrap_rejected",
             Self::CarrierClassified => "carrier_classified",
             Self::CarrierSelected => "carrier_selected",

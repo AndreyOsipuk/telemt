@@ -21,7 +21,6 @@ pub(super) async fn create_user_route(
     }
     let expected_revision = parse_if_match(req.headers());
     let body = read_json::<CreateUserRequest>(req.into_body(), body_limit).await?;
-    let requested_enabled = body.enabled;
     let result = create_user(body, expected_revision, shared).await;
     let (mut data, revision) = match result {
         Ok(ok) => ok,
@@ -34,25 +33,6 @@ pub(super) async fn create_user_route(
     };
     let runtime_cfg = config_rx.borrow().clone();
     data.user.in_runtime = runtime_cfg.access.users.contains_key(&data.user.username);
-    if let Some(enabled) = requested_enabled {
-        shared
-            .proxy_shared
-            .set_user_enabled(&data.user.username, enabled);
-        if !enabled {
-            let cancelled = shared
-                .proxy_shared
-                .cancel_user_sessions(&data.user.username);
-            if cancelled > 0 {
-                shared.runtime_events.record(
-                    "api.user.disable.runtime",
-                    format!(
-                        "username={} cancelled_sessions={}",
-                        data.user.username, cancelled
-                    ),
-                );
-            }
-        }
-    }
     shared.runtime_events.record(
         "api.user.create.ok",
         format!("username={}", data.user.username),

@@ -12,6 +12,8 @@ mod me_lifecycle;
 mod me_buffers;
 // ME writer selection, KDF, and hardswap metrics.
 mod me_policy;
+// Live hardswap ownership and replacement progress metrics.
+mod me_hardswap;
 // Adaptive-floor and writer-cap metrics.
 mod me_floor;
 // Desync, pool recovery, and refill metrics.
@@ -27,6 +29,7 @@ pub(super) async fn render_metrics(
     tls_cache: Option<&TlsFrontCache>,
     tls_full_cert_budget: &TlsFullCertBudget,
     web_publication: &crate::web::control::WebRuntimePublication,
+    me_hardswap: Option<&crate::transport::middle_proxy::MeApiHardswapSnapshot>,
 ) -> String {
     let mut out = String::with_capacity(4096);
     let telemetry = stats.telemetry_policy();
@@ -62,6 +65,7 @@ pub(super) async fn render_metrics(
         me_allows_debug,
     );
     me_policy::render(&mut out, stats, me_allows_normal, me_allows_debug);
+    me_hardswap::render(&mut out, me_hardswap, me_allows_normal);
     me_floor::render(&mut out, stats, config, me_allows_normal);
     me_recovery::render(&mut out, stats, me_allows_normal, me_allows_debug);
     users::render(

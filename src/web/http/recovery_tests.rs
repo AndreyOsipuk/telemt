@@ -195,12 +195,12 @@ async fn malformed_or_over_capacity_recovery_is_indistinguishable_from_decoy() {
 
     let malformed = recover(&listener, &runtime, &encoded, "Bearer malformed").await;
     let (malformed_headers, malformed_body) = split_response(&malformed);
-    assert!(malformed_headers.starts_with(b"HTTP/1.1 200"));
+    assert!(malformed_headers.starts_with(b"HTTP/1.1 404"));
     assert_eq!(
         response_header(malformed_headers, "cache-control"),
         "no-store"
     );
-    assert_eq!(malformed_body, b"<!doctype html><title>decoy</title>");
+    assert_eq!(malformed_body, b"not found\n");
 
     let invalid_capability = recover(
         &listener,
@@ -209,7 +209,13 @@ async fn malformed_or_over_capacity_recovery_is_indistinguishable_from_decoy() {
         &format!("Bearer {}", "U".repeat(43)),
     )
     .await;
-    assert_eq!(invalid_capability, malformed);
+    let (invalid_headers, invalid_body) = split_response(&invalid_capability);
+    assert!(invalid_headers.starts_with(b"HTTP/1.1 200"));
+    assert_eq!(
+        response_header(invalid_headers, "cache-control"),
+        "no-store"
+    );
+    assert_eq!(invalid_body, b"<!doctype html><title>decoy</title>");
 
     let malformed_accept = request(
         &listener,
@@ -231,12 +237,12 @@ async fn malformed_or_over_capacity_recovery_is_indistinguishable_from_decoy() {
     )
     .await;
     let (capacity_headers, capacity_body) = split_response(&over_capacity);
-    assert!(capacity_headers.starts_with(b"HTTP/1.1 200"));
+    assert!(capacity_headers.starts_with(b"HTTP/1.1 404"));
     assert_eq!(
         response_header(capacity_headers, "cache-control"),
         "no-store"
     );
-    assert_eq!(capacity_body, b"<!doctype html><title>decoy</title>");
+    assert_eq!(capacity_body, b"not found\n");
 
     runtime.shutdown().await;
     generation.stop_sessions().await;

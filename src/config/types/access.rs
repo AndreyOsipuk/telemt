@@ -1,5 +1,8 @@
 use super::*;
 
+/// Highest rate that fits one packed 20 ms shaping epoch.
+pub(crate) const MAX_RATE_LIMIT_BPS: u64 = 100_000_000_000;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccessConfig {
     #[serde(default = "default_access_users")]
@@ -260,10 +263,10 @@ fn parse_cidr_auto_prefix(
 /// Transport rate limit in bits-per-second.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RateLimitBps {
-    /// Upload direction limit in bits-per-second; `0` means unlimited.
+    /// Upload limit in bits-per-second within `0..=100_000_000_000`; `0` means unlimited.
     #[serde(default)]
     pub up_bps: u64,
-    /// Download direction limit in bits-per-second; `0` means unlimited.
+    /// Download limit in bits-per-second within `0..=100_000_000_000`; `0` means unlimited.
     #[serde(default)]
     pub down_bps: u64,
 }

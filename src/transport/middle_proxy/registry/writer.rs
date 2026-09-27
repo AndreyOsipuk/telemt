@@ -8,6 +8,7 @@ use tokio::sync::mpsc::error::TrySendError;
 
 use super::super::codec::WriterCommand;
 use super::super::{MeResponse, RouteBytePermit};
+use super::replacement::WriterBindOutcome;
 use super::{
     BoundConn, ConnMeta, ConnRegistry, ConnWriter, HotConnBinding, RouteResult,
     WriterActivitySnapshot,
@@ -58,28 +59,16 @@ impl ConnRegistry {
     }
 
     /// Registers one writer command route and its matching memory budget atomically.
+    #[allow(dead_code)]
     pub async fn register_writer(
         &self,
         writer_id: u64,
         tx: mpsc::Sender<WriterCommand>,
         byte_budget: Arc<tokio::sync::Semaphore>,
     ) {
-        let mut binding = self.binding.inner.lock().await;
-        binding
-            .conns_for_writer
-            .entry(writer_id)
-            .or_insert_with(HashSet::new);
-        self.binding
-            .bound_clients_by_writer
-            .entry(writer_id)
-            .or_insert(0);
-        self.binding
-            .writer_idle_since_epoch_secs
-            .entry(writer_id)
-            .or_insert_with(Self::now_epoch_secs);
-        self.writers
-            .map
-            .insert(writer_id, super::WriterRoute { tx, byte_budget });
+        self.prepare_writer_registration()
+            .await
+            .install(writer_id, tx, byte_budget);
     }
 
     /// Unregister connection, returning associated writer_id if any.
@@ -298,17 +287,30 @@ impl ConnRegistry {
         }
     }
 
-    pub async fn bind_writer(&self, conn_id: u64, writer_id: u64, meta: ConnMeta) -> bool {
+    /// Atomically binds one client route while rejecting retiring writer generations.
+    pub(in crate::transport::middle_proxy) async fn bind_writer_with_outcome(
+        &self,
+        conn_id: u64,
+        writer_id: u64,
+        meta: ConnMeta,
+    ) -> WriterBindOutcome {
         let mut binding = self.binding.inner.lock().await;
         // ROUTING IS THE SOURCE OF TRUTH:
         // never keep/attach writer binding for a connection that is already
         // absent from the routing table.
         if !self.routing.map.contains_key(&conn_id) {
-            return false;
+            return WriterBindOutcome::RouteMissing;
         }
-        if !self.writers.map.contains_key(&writer_id) {
-            return false;
+        let Some(writer_route) = self.writers.map.get(&writer_id) else {
+            return WriterBindOutcome::WriterMissing;
+        };
+        let writer_state = writer_route.replacement_state.load(Ordering::Acquire);
+        if writer_state == super::WriterReplacementState::Retiring as u8
+            || writer_state == super::WriterReplacementState::Draining as u8
+        {
+            return WriterBindOutcome::WriterRetiring;
         }
+        drop(writer_route);
 
         let previous_writer_id = binding.writer_for_conn.insert(conn_id, writer_id);
         if let Some(previous_writer_id) = previous_writer_id
@@ -343,21 +345,15 @@ impl ConnRegistry {
         self.hot_binding
             .map
             .insert(conn_id, HotConnBinding { writer_id, meta });
-        true
+        WriterBindOutcome::Bound
     }
 
-    pub async fn mark_writer_idle(&self, writer_id: u64) {
-        let mut binding = self.binding.inner.lock().await;
-        binding
-            .conns_for_writer
-            .entry(writer_id)
-            .or_insert_with(HashSet::new);
-        let count = binding
-            .conns_for_writer
-            .get(&writer_id)
-            .map(|set| set.len())
-            .unwrap_or(0);
-        self.set_writer_bound_count(writer_id, count);
+    pub async fn bind_writer(&self, conn_id: u64, writer_id: u64, meta: ConnMeta) -> bool {
+        matches!(
+            self.bind_writer_with_outcome(conn_id, writer_id, meta)
+                .await,
+            WriterBindOutcome::Bound
+        )
     }
 
     pub async fn get_last_writer_meta(&self, writer_id: u64) -> Option<ConnMeta> {

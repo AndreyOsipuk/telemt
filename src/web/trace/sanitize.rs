@@ -9,6 +9,7 @@ const USER_AGENT_MAX_BYTES: usize = 512;
 const MIN_REDACTION_BYTES: usize = 8;
 const MAX_REDACTION_BYTES: usize = 512;
 const MAX_HEADER_REDACTIONS: usize = 16;
+const DIAGNOSTIC_BODY_CAPTURE_MAX_BYTES: usize = 64;
 
 /// Calculates a conservative request metadata and credential lease.
 pub(super) fn request_dynamic_bytes<B>(
@@ -126,7 +127,7 @@ pub(super) fn capture_limit(
     route: TraceRoute,
     max_carrier_body_bytes: usize,
 ) -> Option<usize> {
-    match policy.body_capture {
+    let limit = match policy.body_capture {
         WebDebugBodyCapture::Off | WebDebugBodyCapture::Metadata => None,
         WebDebugBodyCapture::Prefix => Some(if decoy_route(route) {
             policy.decoy_body_prefix_bytes
@@ -138,7 +139,14 @@ pub(super) fn capture_limit(
         } else {
             max_carrier_body_bytes
         }),
-    }
+    };
+    limit.map(|limit| {
+        if route == TraceRoute::Diagnostic {
+            limit.min(DIAGNOSTIC_BODY_CAPTURE_MAX_BYTES)
+        } else {
+            limit
+        }
+    })
 }
 
 /// Returns a closed display label for one parsed frame type.
@@ -282,6 +290,25 @@ mod tests {
         };
         assert_eq!(capture_limit(&policy, TraceRoute::Decoy, 4096), Some(123));
         assert_eq!(capture_limit(&policy, TraceRoute::Uplink, 4096), Some(4096));
+    }
+
+    #[test]
+    fn diagnostic_body_capture_never_reserves_the_carrier_ceiling() {
+        let full = WebDebugConfig {
+            body_capture: WebDebugBodyCapture::Full,
+            ..Default::default()
+        };
+        assert_eq!(capture_limit(&full, TraceRoute::Diagnostic, 4096), Some(64));
+
+        let prefix = WebDebugConfig {
+            body_capture: WebDebugBodyCapture::Prefix,
+            body_prefix_bytes: 32,
+            ..Default::default()
+        };
+        assert_eq!(
+            capture_limit(&prefix, TraceRoute::Diagnostic, 4096),
+            Some(32)
+        );
     }
 
     #[test]

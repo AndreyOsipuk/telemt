@@ -276,13 +276,12 @@ async fn user_connection_reservation_drop_enqueues_cleanup_synchronously() {
 
     ip_tracker.set_user_limit(&user, 1).await;
     ip_tracker.check_and_add(&user, ip).await.unwrap();
-    stats.increment_user_curr_connects(&user);
-
     assert_eq!(ip_tracker.get_active_ip_count(&user).await, 1);
-    assert_eq!(stats.get_user_curr_connects(&user), 1);
 
     let reservation =
         UserConnectionReservation::new(stats.clone(), ip_tracker.clone(), user.clone(), ip, true);
+
+    assert_eq!(stats.get_user_curr_connects(&user), 1);
 
     // Drop the reservation synchronously without any tokio::spawn/await yielding!
     drop(reservation);
@@ -302,6 +301,111 @@ async fn user_connection_reservation_drop_enqueues_cleanup_synchronously() {
 
     ip_tracker.drain_cleanup_queue().await;
     assert_eq!(ip_tracker.get_active_ip_count(&user).await, 0);
+}
+
+#[tokio::test]
+async fn cancelled_ip_admission_releases_process_connection_permit() {
+    let ip_tracker = Arc::new(UserIpTracker::new());
+    let stats = Arc::new(Stats::new());
+    let user = "cancelled-admission-user";
+    let peer_addr: SocketAddr = "198.51.100.210:50000".parse().unwrap();
+    let mut config = ProxyConfig::default();
+    config.access.user_max_tcp_conns.insert(user.to_string(), 1);
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let held_tracker = Arc::clone(&ip_tracker);
+    let held_user = user.to_string();
+    let holder = tokio::spawn(async move {
+        held_tracker
+            .hold_user_shard_for_tests(&held_user, entered_tx, release_rx)
+            .await;
+    });
+    entered_rx.await.unwrap();
+
+    let acquire_stats = Arc::clone(&stats);
+    let acquire_tracker = Arc::clone(&ip_tracker);
+    let acquire_config = config.clone();
+    let acquire = tokio::spawn(async move {
+        acquire_user_connection_reservation(
+            user,
+            &acquire_config,
+            acquire_stats,
+            peer_addr,
+            acquire_tracker,
+        )
+        .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while stats.get_process_user_curr_connects(user) != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("connection permit must be acquired before IP admission completes");
+
+    acquire.abort();
+    let acquire_result = acquire.await;
+    assert!(
+        acquire_result
+            .as_ref()
+            .is_err_and(tokio::task::JoinError::is_cancelled)
+    );
+    assert_eq!(stats.get_process_user_curr_connects(user), 0);
+    assert_eq!(stats.get_user_curr_connects(user), 0);
+    assert_eq!(ip_tracker.cleanup_queue_len_for_tests(), 0);
+
+    let _ = release_tx.send(());
+    holder.await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_async_release_preserves_ip_cleanup_ownership() {
+    let ip_tracker = Arc::new(UserIpTracker::new());
+    let stats = Arc::new(Stats::new());
+    let user = "cancelled-release-user";
+    let peer_addr: SocketAddr = "198.51.100.211:50001".parse().unwrap();
+    let mut config = ProxyConfig::default();
+    config.access.user_max_tcp_conns.insert(user.to_string(), 1);
+
+    let reservation = acquire_user_connection_reservation(
+        user,
+        &config,
+        Arc::clone(&stats),
+        peer_addr,
+        Arc::clone(&ip_tracker),
+    )
+    .await
+    .unwrap();
+    assert_eq!(stats.get_process_user_curr_connects(user), 1);
+    assert_eq!(ip_tracker.get_active_ip_count(user).await, 1);
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let held_tracker = Arc::clone(&ip_tracker);
+    let held_user = user.to_string();
+    let holder = tokio::spawn(async move {
+        held_tracker
+            .hold_user_shard_for_tests(&held_user, entered_tx, release_rx)
+            .await;
+    });
+    entered_rx.await.unwrap();
+
+    let release = tokio::spawn(reservation.release());
+    tokio::task::yield_now().await;
+    release.abort();
+    assert!(release.await.unwrap_err().is_cancelled());
+
+    assert_eq!(stats.get_process_user_curr_connects(user), 0);
+    assert_eq!(stats.get_user_curr_connects(user), 0);
+    assert_eq!(ip_tracker.cleanup_queue_len_for_tests(), 1);
+
+    let _ = release_tx.send(());
+    holder.await.unwrap();
+    ip_tracker.drain_cleanup_queue().await;
+    assert_eq!(ip_tracker.get_active_ip_count(user).await, 0);
+    assert_eq!(ip_tracker.cleanup_queue_len_for_tests(), 0);
 }
 
 #[tokio::test]
@@ -2813,7 +2917,11 @@ async fn tcp_limit_rejection_does_not_reserve_ip_or_trigger_rollback() {
         .insert("user".to_string(), 1);
 
     let stats = Stats::new();
-    stats.increment_user_curr_connects("user");
+    let _existing_connection = stats
+        .connection_authority()
+        .try_acquire("user", Some(1))
+        .expect("existing connection must occupy the process admission slot");
+    let _existing_observation = stats.observe_user_current_connection("user");
 
     let ip_tracker = UserIpTracker::new();
     let peer_addr: SocketAddr = "198.51.100.210:50000".parse().unwrap();
@@ -2853,7 +2961,11 @@ async fn zero_tcp_limit_uses_global_fallback_and_rejects_without_side_effects() 
     config.access.user_max_tcp_conns_global_each = 1;
 
     let stats = Stats::new();
-    stats.increment_user_curr_connects("user");
+    let _existing_connection = stats
+        .connection_authority()
+        .try_acquire("user", Some(1))
+        .expect("existing connection must occupy the process admission slot");
+    let _existing_observation = stats.observe_user_current_connection("user");
     let ip_tracker = UserIpTracker::new();
     let peer_addr: SocketAddr = "198.51.100.211:50001".parse().unwrap();
 
@@ -2914,7 +3026,11 @@ async fn global_tcp_fallback_applies_when_per_user_limit_is_missing() {
     config.access.user_max_tcp_conns_global_each = 1;
 
     let stats = Stats::new();
-    stats.increment_user_curr_connects("user");
+    let _existing_connection = stats
+        .connection_authority()
+        .try_acquire("user", Some(1))
+        .expect("existing connection must occupy the process admission slot");
+    let _existing_observation = stats.observe_user_current_connection("user");
     let ip_tracker = UserIpTracker::new();
     let peer_addr: SocketAddr = "198.51.100.213:50003".parse().unwrap();
 
@@ -4024,7 +4140,11 @@ async fn concurrent_limit_rejections_from_mixed_ips_leave_no_ip_footprint() {
 
     let config = Arc::new(config);
     let stats = Arc::new(Stats::new());
-    stats.increment_user_curr_connects("user");
+    let _existing_connection = stats
+        .connection_authority()
+        .try_acquire("user", Some(1))
+        .expect("existing connection must occupy the process admission slot");
+    let _existing_observation = stats.observe_user_current_connection("user");
     let ip_tracker = Arc::new(UserIpTracker::new());
 
     let mut tasks = tokio::task::JoinSet::new();

@@ -33,6 +33,9 @@ mod pool_runtime_api;
 mod pool_status;
 mod pool_writer;
 #[cfg(test)]
+#[path = "tests/pool_writer_publication_tests.rs"]
+mod pool_writer_publication_tests;
+#[cfg(test)]
 #[path = "tests/pool_writer_security_tests.rs"]
 mod pool_writer_security_tests;
 mod reader;
@@ -63,6 +66,7 @@ pub use ping::{
 pub use pool::MePool;
 #[allow(unused_imports)]
 pub use pool_nat::{detect_public_ip, stun_probe};
+pub(crate) use pool_status::MeApiHardswapSnapshot;
 pub(crate) use registry::ConnLease;
 pub use registry::ConnRegistry;
 pub use rotation::{MeReinitTrigger, me_reinit_scheduler, me_rotation_task};

@@ -5,12 +5,13 @@ use hyper::StatusCode;
 use crate::config::ProxyConfig;
 use crate::config::RateLimitBps;
 use crate::ip_tracker::UserIpTracker;
+use crate::proxy::user_admission::credential_id_from_hex;
 use crate::stats::Stats;
 
 use super::ApiShared;
 use super::config_store::{
-    AccessSection, current_revision, ensure_expected_revision, load_config_from_disk,
-    save_access_sections_to_disk,
+    AccessSection, current_revision, load_config_for_mutation,
+    save_access_sections_to_disk_if_revision,
 };
 use super::model::{
     ApiFailure, CreateUserRequest, CreateUserResponse, PatchUserRequest, RotateSecretRequest,

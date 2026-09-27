@@ -14,10 +14,15 @@ use tokio_util::sync::CancellationToken;
 
 use crate::maestro::generation::{RuntimeGeneration, test_runtime_generation};
 use crate::web::frame::{self, FrameType};
-use crate::web::http::tests::{negotiation_runtime_config, runtime_config};
+use crate::web::http::tests::{
+    negotiation_runtime_config, runtime_config, runtime_config_with_base,
+};
 use crate::web::manager::{
     CarrierCapabilities, CarrierClientClass, CarrierFailure, CarrierRequest, WebProcessRuntime,
 };
+
+#[path = "tests/base_path.rs"]
+mod base_path;
 
 fn request(protocol: &str) -> Request<()> {
     Request::builder()
@@ -211,6 +216,15 @@ async fn upgrade(
     runtime: &Arc<WebProcessRuntime>,
     protocol: &str,
 ) -> WebSocketStream<TcpStream> {
+    upgrade_at(listener, runtime, "/api/v1/ws", protocol).await
+}
+
+async fn upgrade_at(
+    listener: &TcpListener,
+    runtime: &Arc<WebProcessRuntime>,
+    path: &str,
+    protocol: &str,
+) -> WebSocketStream<TcpStream> {
     let addr = listener.local_addr().unwrap();
     let (accepted, client) = tokio::join!(listener.accept(), TcpStream::connect(addr));
     let (server, peer) = accepted.unwrap();
@@ -226,7 +240,7 @@ async fn upgrade(
         permit,
     ));
     let request = format!(
-        "GET /api/v1/ws HTTP/1.1\r\nHost: proxy.example.com\r\nX-Forwarded-For: 192.0.2.10\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: {protocol}\r\nCookie: browser-state=allowed\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: proxy.example.com\r\nX-Forwarded-For: 192.0.2.10\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: {protocol}\r\nCookie: browser-state=allowed\r\n\r\n"
     );
     client.write_all(request.as_bytes()).await.unwrap();
     let mut response = Vec::new();
@@ -242,6 +256,38 @@ async fn upgrade(
             .contains(&format!("sec-websocket-protocol: {protocol}"))
     );
     WebSocketStream::from_raw_socket(client, Role::Client, None).await
+}
+
+#[tokio::test]
+async fn prefixed_websocket_route_upgrades_at_the_exact_base() {
+    let live = live_runtime_from_config(
+        runtime_config_with_base([31; 32], WebCarrier::Websocket, "/relay/nested/"),
+        1,
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (session, _) = create_session(&live.runtime);
+    let protocol = format!("tproxy-v1.{session}");
+    let mut socket = upgrade_at(
+        &listener,
+        &live.runtime,
+        "/relay/nested/api/v1/ws",
+        &protocol,
+    )
+    .await;
+
+    socket
+        .send(Message::Ping(Bytes::from_static(b"prefixed")))
+        .await
+        .unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(response, Message::Pong(Bytes::from_static(b"prefixed")));
+
+    let _ = socket.close(None).await;
+    live.shutdown().await;
 }
 
 fn masked_message(opcode: u8, payload: &[u8], mask: [u8; 4]) -> Vec<u8> {

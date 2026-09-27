@@ -9,8 +9,8 @@ use subtle::ConstantTimeEq;
 
 use super::backend::StreamCompletion;
 use super::{
-    InboundChunk, PendingClass, QUEUE_ITEM_COST, SessionCloseReason, SessionState, StreamIdentity,
-    StreamState, WebSession, inbound_queue_cost,
+    DeferredSessionEffects, InboundChunk, PendingClass, QUEUE_ITEM_COST, SessionCloseReason,
+    SessionState, StreamIdentity, StreamState, WebSession, inbound_queue_cost,
 };
 use crate::web::frame::{self, Frame, FrameType};
 use crate::web::manager::{ManagerError, TokenHash};
@@ -69,6 +69,9 @@ impl WebSession {
         if !self.carrier().is_multiplexed() {
             return Err(ManagerError::Protocol);
         }
+        if self.close_if_cancelled() {
+            return Err(ManagerError::Closed);
+        }
         if self
             .up_active
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -96,6 +99,7 @@ impl WebSession {
         let mut opened = Vec::new();
         let mut committed = false;
         let mut healthy = None;
+        let mut effects = DeferredSessionEffects::new();
         let result = {
             let mut state = self.state.lock();
             if state.closed {
@@ -138,13 +142,14 @@ impl WebSession {
             let applied = self.apply_batch_locked(
                 &mut state,
                 &frames,
+                &mut effects,
                 &mut opened,
                 &mut None,
                 &mut unused_bytes,
                 &mut unused_items,
                 &mut progress,
             );
-            self.release_locked(&mut state, unused_bytes, unused_items, false);
+            self.release_locked(&mut state, &mut effects, unused_bytes, unused_items, false);
             if !applied {
                 Err(ManagerError::Closed)
             } else {
@@ -154,7 +159,12 @@ impl WebSession {
                 Ok((sequence, progress.any()))
             }
         };
+        effects.finish();
         if matches!(result, Err(ManagerError::Backpressure)) {
+            return result;
+        }
+        if matches!(result, Err(ManagerError::Closed)) && self.close_if_cancelled() {
+            drop(opened);
             return result;
         }
         if result.is_err() {
@@ -183,6 +193,7 @@ impl WebSession {
         self: &Arc<Self>,
         state: &mut SessionState,
         frames: &[Frame<'_>],
+        effects: &mut DeferredSessionEffects,
         opened: &mut Vec<StreamCompletion>,
         reserved_open: &mut Option<(u32, u16)>,
         unused_bytes: &mut usize,
@@ -211,10 +222,11 @@ impl WebSession {
                             return false;
                         }
                         None => {
-                            let Some(peer_port) = self.reserve_stream_locked(state) else {
-                                self.remember_closed_locked(state, value.stream_id);
+                            let Some(peer_port) = self.reserve_stream_locked(state, effects) else {
+                                self.remember_closed_locked(state, effects, value.stream_id);
                                 if !self.queue_control_locked(
                                     state,
+                                    effects,
                                     FrameType::Close,
                                     value.stream_id,
                                     &[],
@@ -226,7 +238,7 @@ impl WebSession {
                             peer_port
                         }
                     };
-                    state.streams.insert(
+                    if let Some(previous) = state.streams.insert(
                         value.stream_id,
                         StreamState {
                             instance: stream.instance,
@@ -236,7 +248,9 @@ impl WebSession {
                             read_waker: None,
                             write_waker: None,
                         },
-                    );
+                    ) {
+                        effects.retain_stream(previous);
+                    }
                     progress.accepted_open = true;
                     opened.push(self.own_stream_task(stream, peer_port));
                 }
@@ -254,7 +268,7 @@ impl WebSession {
                         unused_bytes.saturating_sub(value.payload.len() + QUEUE_ITEM_COST);
                     *unused_items = unused_items.saturating_sub(1);
                     if let Some(waker) = stream.read_waker.take() {
-                        waker.wake();
+                        effects.wake(waker);
                     }
                 }
                 FrameType::Window if !was_closed => {
@@ -267,7 +281,7 @@ impl WebSession {
                         .saturating_add(u64::from(amount))
                         .min(u64::from(u32::MAX));
                     if let Some(waker) = stream.write_waker.take() {
-                        waker.wake();
+                        effects.wake(waker);
                     }
                 }
                 FrameType::Close if !was_closed => {
@@ -278,13 +292,13 @@ impl WebSession {
                         .closing_streams
                         .insert(value.stream_id, stream.instance);
                     let (bytes, items) = inbound_queue_cost(&stream.inbound);
-                    self.release_locked(state, bytes, items, false);
-                    self.remember_closed_locked(state, value.stream_id);
+                    self.release_locked(state, effects, bytes, items, false);
+                    self.remember_closed_locked(state, effects, value.stream_id);
                     if let Some(waker) = stream.read_waker {
-                        waker.wake();
+                        effects.wake(waker);
                     }
                     if let Some(waker) = stream.write_waker {
-                        waker.wake();
+                        effects.wake(waker);
                     }
                 }
                 FrameType::Data | FrameType::Window | FrameType::Close => {}
@@ -294,7 +308,11 @@ impl WebSession {
         true
     }
 
-    fn reserve_stream_locked(&self, state: &mut SessionState) -> Option<u16> {
+    fn reserve_stream_locked(
+        &self,
+        state: &mut SessionState,
+        effects: &mut DeferredSessionEffects,
+    ) -> Option<u16> {
         let manager = self.manager.upgrade()?;
         if state.active_peer_ports.len() >= self.profile.max_streams_per_session {
             manager.record_stream_rejected_reason(
@@ -302,23 +320,27 @@ impl WebSession {
             );
             return None;
         }
-        let peer_port = manager
-            .try_acquire_stream(
-                self.profile_key,
-                self.profile.max_streams,
-                self.client_ip,
-                self.profile.public_addr,
-            )
-            .ok()?;
+        let (peer_port, notify) = manager.try_acquire_stream_quiet(
+            self.profile_key,
+            self.profile.max_streams,
+            self.client_ip,
+            self.profile.public_addr,
+        );
+        if let Some(notify) = notify {
+            effects.notify(notify);
+        }
+        let peer_port = peer_port.ok()?;
         if state.active_peer_ports.insert(peer_port) {
             return Some(peer_port);
         }
-        manager.release_stream(
+        if let Some(notify) = manager.release_stream_quiet(
             self.profile_key,
             self.client_ip,
             self.profile.public_addr,
             peer_port,
-        );
+        ) {
+            effects.notify(notify);
+        }
         None
     }
 }

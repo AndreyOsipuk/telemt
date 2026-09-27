@@ -59,6 +59,7 @@ where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    let quota_handle = stats.current_user_quota_handle(&success.user);
     handle_via_direct_with_shared_and_conntrack(
         client_reader,
         client_writer,
@@ -75,6 +76,7 @@ where
         session_cancel,
         shared,
         ConntrackClosePolicy::Publish,
+        quota_handle,
     )
     .await
 }
@@ -96,6 +98,7 @@ pub(crate) async fn handle_via_direct_with_shared_and_conntrack<R, W>(
     session_cancel: CancellationToken,
     shared: Arc<ProxySharedState>,
     conntrack_close_policy: ConntrackClosePolicy,
+    quota_handle: UserQuotaHandle,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -171,6 +174,7 @@ where
         config.server.max_connections,
         user,
         Arc::clone(&stats),
+        quota_handle,
         config.access.user_data_quota.get(user).copied(),
         traffic_lease,
         relay_activity_timeout,

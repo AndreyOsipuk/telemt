@@ -90,6 +90,7 @@ impl RuntimeLogFilter {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn spawn_runtime_tasks(
+    generation_id: u64,
     config: &Arc<ProxyConfig>,
     config_path: &Path,
     probe: &NetworkProbe,
@@ -137,7 +138,9 @@ pub(crate) async fn spawn_runtime_tasks(
 
     let ip_tracker_maintenance = ip_tracker.clone();
     task_scope.spawn(async move {
-        ip_tracker_maintenance.run_periodic_maintenance().await;
+        ip_tracker_maintenance
+            .run_periodic_maintenance(generation_id)
+            .await;
     });
 
     let detected_ip_v4: Option<IpAddr> = probe.detected_ipv4.map(IpAddr::V4);
@@ -196,20 +199,7 @@ pub(crate) async fn spawn_runtime_tasks(
     let ip_tracker_policy = ip_tracker.clone();
     let mut config_rx_ip_limits = config_rx.clone();
     task_scope.spawn(async move {
-        let mut prev_limits = config_rx_ip_limits
-            .borrow()
-            .access
-            .user_max_unique_ips
-            .clone();
-        let mut prev_global_each = config_rx_ip_limits
-            .borrow()
-            .access
-            .user_max_unique_ips_global_each;
-        let mut prev_mode = config_rx_ip_limits.borrow().access.user_max_unique_ips_mode;
-        let mut prev_window = config_rx_ip_limits
-            .borrow()
-            .access
-            .user_max_unique_ips_window_secs;
+        let mut previous = config_rx_ip_limits.borrow().access.clone();
 
         loop {
             if config_rx_ip_limits.changed().await.is_err() {
@@ -217,39 +207,28 @@ pub(crate) async fn spawn_runtime_tasks(
             }
             let cfg = config_rx_ip_limits.borrow_and_update().clone();
 
-            if prev_limits != cfg.access.user_max_unique_ips
-                || prev_global_each != cfg.access.user_max_unique_ips_global_each
+            if previous.user_max_unique_ips != cfg.access.user_max_unique_ips
+                || previous.user_max_unique_ips_global_each
+                    != cfg.access.user_max_unique_ips_global_each
+                || previous.user_max_unique_ips_mode != cfg.access.user_max_unique_ips_mode
+                || previous.user_max_unique_ips_window_secs
+                    != cfg.access.user_max_unique_ips_window_secs
             {
-                ip_tracker_policy
-                    .load_limits(
+                let _ = ip_tracker_policy
+                    .apply_policy_from_source(
+                        generation_id,
                         cfg.access.user_max_unique_ips_global_each,
                         &cfg.access.user_max_unique_ips,
-                    )
-                    .await;
-                prev_limits = cfg.access.user_max_unique_ips.clone();
-                prev_global_each = cfg.access.user_max_unique_ips_global_each;
-            }
-
-            if prev_mode != cfg.access.user_max_unique_ips_mode
-                || prev_window != cfg.access.user_max_unique_ips_window_secs
-            {
-                ip_tracker_policy
-                    .set_limit_policy(
                         cfg.access.user_max_unique_ips_mode,
                         cfg.access.user_max_unique_ips_window_secs,
                     )
                     .await;
-                prev_mode = cfg.access.user_max_unique_ips_mode;
-                prev_window = cfg.access.user_max_unique_ips_window_secs;
+                previous = cfg.access.clone();
             }
         }
     });
 
     let limiter = shared_state.traffic_limiter.clone();
-    limiter.apply_policy(
-        config.access.user_rate_limits.clone(),
-        config.access.cidr_rate_limits.clone(),
-    );
     let mut config_rx_rate_limits = config_rx.clone();
     task_scope.spawn(async move {
         let mut prev_user_limits = config_rx_rate_limits
@@ -270,7 +249,8 @@ pub(crate) async fn spawn_runtime_tasks(
             if prev_user_limits != cfg.access.user_rate_limits
                 || prev_cidr_limits != cfg.access.cidr_rate_limits
             {
-                limiter.apply_policy(
+                let _ = limiter.apply_policy_from_source(
+                    generation_id,
                     cfg.access.user_rate_limits.clone(),
                     cfg.access.cidr_rate_limits.clone(),
                 );
@@ -288,8 +268,14 @@ pub(crate) async fn spawn_runtime_tasks(
                 break;
             }
             let cfg = config_rx_user_enabled.borrow_and_update().clone();
-            for user in shared_user_enabled.apply_user_enabled_config(&cfg.access.user_enabled) {
-                let cancelled = shared_user_enabled.cancel_user_sessions(&user);
+            let Some(cancelled_users) = shared_user_enabled.apply_user_config_from_source(
+                generation_id,
+                &cfg.access.users,
+                &cfg.access.user_enabled,
+            ) else {
+                continue;
+            };
+            for (user, cancelled) in cancelled_users {
                 if cancelled > 0 {
                     info!(
                         user = %user,

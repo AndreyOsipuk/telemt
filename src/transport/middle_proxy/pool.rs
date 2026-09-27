@@ -29,9 +29,27 @@ use super::pool_lifecycle::MePoolLifecycle;
 const ME_FORCE_CLOSE_SAFETY_FALLBACK_SECS: u64 = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct RefillDcKey {
+/// Exact lifecycle role used to coalesce refill work without cross-generation drift.
+pub(super) struct RefillTargetKey {
+    /// Telegram DC owning the writer.
     pub dc: i32,
+    /// Address family of the writer endpoint.
     pub family: IpFamily,
+    /// Generation that retains publication authority.
+    pub generation: u64,
+    /// Endpoint snapshot revision targeted by this refill producer.
+    pub endpoint_revision: u64,
+    /// Lifecycle contour that the replacement must preserve.
+    pub contour: WriterContour,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+/// Bounded queued-loss state for one exact refill target.
+pub(super) struct RefillTargetState {
+    /// Additional lost writers waiting behind the active refill producer.
+    pub(super) pending_count: usize,
+    /// Most recently lost endpoint, used as the next same-endpoint preference.
+    pub(super) next_addr: Option<SocketAddr>,
 }
 
 #[derive(Clone)]
@@ -88,14 +106,6 @@ impl WritersState {
         }
     }
 
-    pub(super) async fn update<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&mut Vec<MeWriter>) -> R,
-    {
-        let mut guard = self.write().await;
-        f(&mut guard)
-    }
-
     fn debug_assert_store_guarded(&self) {
         debug_assert!(
             self.writers_write_guard.try_lock().is_err(),
@@ -129,6 +139,13 @@ impl DerefMut for WritersWriteGuard<'_> {
     }
 }
 
+impl WritersWriteGuard<'_> {
+    /// Publishes the current vector while retaining exclusive mutation ownership.
+    pub(super) fn publish_current(&self) {
+        self.state.store_guarded(self.writers.clone());
+    }
+}
+
 impl Drop for WritersWriteGuard<'_> {
     fn drop(&mut self) {
         let writers = std::mem::take(&mut self.writers);
@@ -136,24 +153,12 @@ impl Drop for WritersWriteGuard<'_> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub(super) enum WriterContour {
     Warm = 0,
     Active = 1,
     Draining = 2,
-}
-
-pub(super) struct WriterOpenReservation<'a> {
-    counter: Option<&'a AtomicUsize>,
-}
-
-impl Drop for WriterOpenReservation<'_> {
-    fn drop(&mut self) {
-        if let Some(counter) = self.counter {
-            counter.fetch_sub(1, Ordering::AcqRel);
-        }
-    }
 }
 
 impl WriterContour {
@@ -263,7 +268,23 @@ pub struct RoutingCore {
     pub(super) writers: Arc<WritersState>,
     pub(super) rr: AtomicU64,
     pub(super) writer_epoch: watch::Sender<u64>,
-    pub(super) preferred_endpoints_by_dc: ArcSwap<HashMap<i32, Vec<SocketAddr>>>,
+    /// Coherent immutable authority for endpoint maps and reverse indexes.
+    pub(super) endpoint_snapshot: ArcSwap<EndpointSnapshot>,
+}
+
+/// Immutable endpoint routing authority published as one coherent revision.
+#[derive(Clone, Debug)]
+pub(super) struct EndpointSnapshot {
+    /// Monotonic revision covering every endpoint-derived index in this snapshot.
+    pub(super) revision: u64,
+    /// IPv4 endpoint map by Telegram DC.
+    pub(super) map_v4: HashMap<i32, Vec<(IpAddr, u16)>>,
+    /// IPv6 endpoint map by Telegram DC.
+    pub(super) map_v6: HashMap<i32, Vec<(IpAddr, u16)>>,
+    /// Reverse lookup from an endpoint to its optional Telegram DC.
+    pub(super) endpoint_dc_map: HashMap<SocketAddr, Option<i32>>,
+    /// Ordered endpoint candidates used for per-DC writer selection.
+    pub(super) preferred_endpoints_by_dc: HashMap<i32, Vec<SocketAddr>>,
 }
 
 pub(super) struct ReinitCore {
@@ -291,6 +312,7 @@ pub(super) struct ReinitStatusSnapshot {
     pub(super) pending_hardswap_generation: u64,
     pub(super) pending_hardswap_started_at_epoch_secs: u64,
     pub(super) pending_hardswap_map_hash: u64,
+    pub(super) pending_hardswap_endpoint_revision: u64,
     pub(super) inflight: usize,
 }
 
@@ -299,12 +321,16 @@ pub(super) struct ReinitPendingState {
     pub(super) generation: u64,
     pub(super) started_at_epoch_secs: u64,
     pub(super) map_hash: u64,
+    /// Endpoint authority revision targeted by the pending generation.
+    pub(super) endpoint_revision: u64,
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct ReinitAttemptState {
     pub(super) generation: u64,
     pub(super) map_hash: u64,
+    /// Endpoint authority revision captured by this attempt.
+    pub(super) endpoint_revision: u64,
     pub(super) hardswap: bool,
     pub(super) committed: bool,
 }
@@ -313,6 +339,8 @@ pub(super) struct ReinitCoordinatorState {
     pub(super) next_attempt_id: u64,
     pub(super) active_generation: u64,
     pub(super) desired_map_hash: u64,
+    /// Latest endpoint authority revision accepted by the coordinator.
+    pub(super) endpoint_revision: u64,
     pub(super) pending: Option<ReinitPendingState>,
     pub(super) attempts: HashMap<u64, ReinitAttemptState>,
 }
@@ -472,15 +500,15 @@ pub struct MePool {
     pub(super) rng: Arc<SecureRandom>,
     pub(super) proxy_tag: Option<Vec<u8>>,
     pub(super) proxy_secret: Arc<RwLock<SecretSnapshot>>,
-    pub(super) proxy_map_v4: Arc<RwLock<HashMap<i32, Vec<(IpAddr, u16)>>>>,
-    pub(super) proxy_map_v6: Arc<RwLock<HashMap<i32, Vec<(IpAddr, u16)>>>>,
-    pub(super) endpoint_dc_map: Arc<RwLock<HashMap<SocketAddr, Option<i32>>>>,
     pub(super) default_dc: AtomicI32,
     pub(super) next_writer_id: AtomicU64,
     pub(super) writer_connect_active_reserved: AtomicUsize,
     pub(super) writer_connect_warm_reserved: AtomicUsize,
+    /// Replacement connections opened but not yet committed to writer visibility.
+    pub(super) writer_replacement_open_reserved: AtomicUsize,
     pub(super) rtt_stats: Arc<Mutex<HashMap<u64, (f64, f64)>>>,
-    pub(super) refill_states: Arc<ParkingMutex<HashMap<RefillDcKey, Option<SocketAddr>>>>,
+    /// Coalesced refill state keyed by exact generation and contour ownership.
+    pub(super) refill_states: Arc<ParkingMutex<HashMap<RefillTargetKey, RefillTargetState>>>,
     pub(super) refill_running: AtomicUsize,
     pub(super) refill_pending: AtomicUsize,
     pub(super) conn_count: AtomicUsize,
@@ -516,5 +544,6 @@ mod transport_policy;
 mod selection_policy;
 // Bounded writer-open admission and coverage accounting.
 mod writer_admission;
+pub(super) use writer_admission::{WriterOpenIntent, WriterOpenReservation, WriterRole};
 // Endpoint-to-DC routing and health timing policy.
 mod routing;

@@ -98,9 +98,14 @@ pub(super) fn auth_probe_is_throttled_in(
     };
     if auth_probe_state_expired(&entry, now) {
         drop(entry);
-        state.remove_if(&peer_ip, |_, current| {
-            auth_probe_state_expired(current, now)
-        });
+        if state
+            .remove_if(&peer_ip, |_, current| {
+                auth_probe_state_expired(current, now)
+            })
+            .is_some()
+        {
+            shared.handshake.auth_probe_slots.release();
+        }
         return false;
     }
     now < entry.blocked_until
@@ -118,9 +123,14 @@ pub(super) fn auth_probe_saturation_grace_exhausted_in(
     };
     if auth_probe_state_expired(&entry, now) {
         drop(entry);
-        state.remove_if(&peer_ip, |_, current| {
-            auth_probe_state_expired(current, now)
-        });
+        if state
+            .remove_if(&peer_ip, |_, current| {
+                auth_probe_state_expired(current, now)
+            })
+            .is_some()
+        {
+            shared.handshake.auth_probe_slots.release();
+        }
         return false;
     }
 
@@ -216,12 +226,28 @@ pub(super) fn auth_probe_record_failure_in(
 ) {
     let peer_ip = normalize_auth_probe_ip(peer_ip);
     let state = &shared.handshake.auth_probe;
-    auth_probe_record_failure_with_state_in(shared, state, peer_ip, now);
+    auth_probe_record_failure_with_state_and_budget_in(
+        shared,
+        state,
+        Some(&shared.handshake.auth_probe_slots),
+        peer_ip,
+        now,
+    );
 }
 
 pub(super) fn auth_probe_record_failure_with_state_in(
     shared: &ProxySharedState,
     state: &DashMap<IpAddr, AuthProbeState>,
+    peer_ip: IpAddr,
+    now: Instant,
+) {
+    auth_probe_record_failure_with_state_and_budget_in(shared, state, None, peer_ip, now);
+}
+
+fn auth_probe_record_failure_with_state_and_budget_in(
+    shared: &ProxySharedState,
+    state: &DashMap<IpAddr, AuthProbeState>,
+    slots: Option<&crate::slot_budget::SlotBudget>,
     peer_ip: IpAddr,
     now: Instant,
 ) {
@@ -279,6 +305,9 @@ pub(super) fn auth_probe_record_failure_with_state_in(
                     })
                     .is_some()
                 {
+                    if let Some(slots) = slots {
+                        slots.release();
+                    }
                     break;
                 }
                 continue;
@@ -347,9 +376,15 @@ pub(super) fn auth_probe_record_failure_with_state_in(
             }
 
             for stale_key in stale_keys {
-                state.remove_if(&stale_key, |_, current| {
-                    auth_probe_state_expired(current, now)
-                });
+                if state
+                    .remove_if(&stale_key, |_, current| {
+                        auth_probe_state_expired(current, now)
+                    })
+                    .is_some()
+                    && let Some(slots) = slots
+                {
+                    slots.release();
+                }
             }
 
             if state.len() < AUTH_PROBE_TRACK_MAX_ENTRIES {
@@ -360,19 +395,37 @@ pub(super) fn auth_probe_record_failure_with_state_in(
                 auth_probe_note_saturation_in(shared, now);
                 return;
             };
-            state.remove_if(&evict_key, |_, current| {
-                current.fail_streak == evict_fail_streak && current.last_seen == evict_last_seen
-            });
+            if state
+                .remove_if(&evict_key, |_, current| {
+                    current.fail_streak == evict_fail_streak && current.last_seen == evict_last_seen
+                })
+                .is_some()
+                && let Some(slots) = slots
+            {
+                slots.release();
+            }
             auth_probe_note_saturation_in(shared, now);
         }
     }
 
+    let slot = if let Some(slots) = slots {
+        let Some(slot) = slots.try_acquire() else {
+            auth_probe_note_saturation_in(shared, now);
+            return;
+        };
+        Some(slot)
+    } else {
+        None
+    };
     match state.entry(peer_ip) {
         Entry::Occupied(mut entry) => {
             update_existing(entry.get_mut());
         }
         Entry::Vacant(entry) => {
             entry.insert(make_new_state());
+            if let Some(slot) = slot {
+                slot.commit();
+            }
         }
     }
 }
@@ -380,125 +433,15 @@ pub(super) fn auth_probe_record_failure_with_state_in(
 pub(super) fn auth_probe_record_success_in(shared: &ProxySharedState, peer_ip: IpAddr) {
     let peer_ip = normalize_auth_probe_ip(peer_ip);
     let state = &shared.handshake.auth_probe;
-    state.remove(&peer_ip);
-}
-
-#[cfg(test)]
-pub(crate) fn auth_probe_record_failure_for_testing(
-    shared: &ProxySharedState,
-    peer_ip: IpAddr,
-    now: Instant,
-) {
-    auth_probe_record_failure_in(shared, peer_ip, now);
-}
-
-#[cfg(test)]
-pub(crate) fn auth_probe_fail_streak_for_testing_in_shared(
-    shared: &ProxySharedState,
-    peer_ip: IpAddr,
-) -> Option<u32> {
-    let peer_ip = normalize_auth_probe_ip(peer_ip);
-    shared
-        .handshake
-        .auth_probe
-        .get(&peer_ip)
-        .map(|entry| entry.fail_streak)
-}
-
-#[cfg(test)]
-pub(crate) fn clear_auth_probe_state_for_testing_in_shared(shared: &ProxySharedState) {
-    shared.handshake.auth_probe.clear();
-    match shared.handshake.auth_probe_saturation.lock() {
-        Ok(mut saturation) => {
-            *saturation = None;
-        }
-        Err(poisoned) => {
-            let mut saturation = poisoned.into_inner();
-            *saturation = None;
-            shared.handshake.auth_probe_saturation.clear_poison();
-        }
+    if state.remove(&peer_ip).is_some() {
+        shared.handshake.auth_probe_slots.release();
     }
 }
 
 #[cfg(test)]
-pub(crate) fn auth_probe_state_for_testing_in_shared(
-    shared: &ProxySharedState,
-) -> &DashMap<IpAddr, AuthProbeState> {
-    &shared.handshake.auth_probe
-}
-
+mod testing;
 #[cfg(test)]
-pub(crate) fn auth_probe_saturation_state_for_testing_in_shared(
-    shared: &ProxySharedState,
-) -> &Mutex<Option<AuthProbeSaturationState>> {
-    &shared.handshake.auth_probe_saturation
-}
-
-#[cfg(test)]
-pub(crate) fn auth_probe_saturation_state_lock_for_testing_in_shared(
-    shared: &ProxySharedState,
-) -> std::sync::MutexGuard<'_, Option<AuthProbeSaturationState>> {
-    shared
-        .handshake
-        .auth_probe_saturation
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-#[cfg(test)]
-pub(crate) fn clear_unknown_sni_warn_state_for_testing_in_shared(shared: &ProxySharedState) {
-    let mut guard = shared
-        .handshake
-        .unknown_sni_warn_next_allowed
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *guard = None;
-}
-
-#[cfg(test)]
-pub(crate) fn should_emit_unknown_sni_warn_for_testing_in_shared(
-    shared: &ProxySharedState,
-    now: Instant,
-) -> bool {
-    should_emit_unknown_sni_warn_in(shared, now)
-}
-
-#[cfg(test)]
-pub(crate) fn clear_warned_secrets_for_testing_in_shared(shared: &ProxySharedState) {
-    if let Ok(mut guard) = shared.handshake.invalid_secret_warned.lock() {
-        guard.clear();
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn warned_secrets_for_testing_in_shared(
-    shared: &ProxySharedState,
-) -> &Mutex<HashSet<(String, String)>> {
-    &shared.handshake.invalid_secret_warned
-}
-
-#[cfg(test)]
-pub(crate) fn auth_probe_is_throttled_for_testing_in_shared(
-    shared: &ProxySharedState,
-    peer_ip: IpAddr,
-) -> bool {
-    auth_probe_is_throttled_in(shared, peer_ip, Instant::now())
-}
-
-#[cfg(test)]
-pub(crate) fn auth_probe_saturation_is_throttled_for_testing_in_shared(
-    shared: &ProxySharedState,
-) -> bool {
-    auth_probe_saturation_is_throttled_in(shared, Instant::now())
-}
-
-#[cfg(test)]
-pub(crate) fn auth_probe_saturation_is_throttled_at_for_testing_in_shared(
-    shared: &ProxySharedState,
-    now: Instant,
-) -> bool {
-    auth_probe_saturation_is_throttled_in(shared, now)
-}
+pub(crate) use testing::*;
 
 #[inline]
 pub(super) fn find_matching_tls_domain<'a>(config: &'a ProxyConfig, sni: &str) -> Option<&'a str> {

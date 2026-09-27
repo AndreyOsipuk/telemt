@@ -9,7 +9,7 @@ fn positive_direct_cutover_sets_timestamp_and_snapshot_coherently() {
     let rx = runtime.subscribe();
 
     assert!(
-        runtime.direct_since_epoch_secs().is_none(),
+        runtime.snapshot().direct_since_epoch_secs.is_none(),
         "middle startup must not expose direct-since timestamp"
     );
 
@@ -24,7 +24,7 @@ fn positive_direct_cutover_sets_timestamp_and_snapshot_coherently() {
     );
     assert_eq!(observed.mode, RelayRouteMode::Direct);
     assert!(
-        runtime.direct_since_epoch_secs().is_some(),
+        observed.direct_since_epoch_secs.is_some(),
         "direct cutover must publish a non-empty direct-since timestamp"
     );
 }
@@ -34,12 +34,12 @@ fn negative_idempotent_set_mode_does_not_mutate_timestamp_or_generation() {
     let runtime = RouteRuntimeController::new(RelayRouteMode::Direct);
 
     let before_state = runtime.snapshot();
-    let before_ts = runtime.direct_since_epoch_secs();
+    let before_ts = before_state.direct_since_epoch_secs;
 
     let changed = runtime.set_mode(RelayRouteMode::Direct);
 
     let after_state = runtime.snapshot();
-    let after_ts = runtime.direct_since_epoch_secs();
+    let after_ts = after_state.direct_since_epoch_secs;
 
     assert!(changed.is_none(), "idempotent set_mode must return None");
     assert_eq!(
@@ -58,7 +58,7 @@ fn edge_middle_cutover_clears_timestamp() {
     let rx = runtime.subscribe();
 
     assert!(
-        runtime.direct_since_epoch_secs().is_some(),
+        runtime.snapshot().direct_since_epoch_secs.is_some(),
         "direct startup must expose direct-since timestamp"
     );
 
@@ -73,7 +73,7 @@ fn edge_middle_cutover_clears_timestamp() {
     );
     assert_eq!(observed.mode, RelayRouteMode::Middle);
     assert!(
-        runtime.direct_since_epoch_secs().is_none(),
+        observed.direct_since_epoch_secs.is_none(),
         "middle cutover must clear direct-since timestamp"
     );
 }
@@ -90,7 +90,7 @@ fn adversarial_blackhat_probe_sequence_observes_consistent_mode_timestamp_pairs(
         let observed_direct = *rx.borrow();
         assert_eq!(observed_direct, emitted_direct);
         assert!(
-            runtime.direct_since_epoch_secs().is_some(),
+            observed_direct.direct_since_epoch_secs.is_some(),
             "direct observation must never expose empty timestamp"
         );
 
@@ -100,7 +100,7 @@ fn adversarial_blackhat_probe_sequence_observes_consistent_mode_timestamp_pairs(
         let observed_middle = *rx.borrow();
         assert_eq!(observed_middle, emitted_middle);
         assert!(
-            runtime.direct_since_epoch_secs().is_none(),
+            observed_middle.direct_since_epoch_secs.is_none(),
             "middle observation must never expose direct timestamp"
         );
     }
@@ -136,9 +136,9 @@ fn integration_subscriber_and_runtime_gates_stay_coherent_across_cutovers() {
         assert_eq!(snapshot, emitted);
 
         if matches!(mode, RelayRouteMode::Direct) {
-            assert!(runtime.direct_since_epoch_secs().is_some());
+            assert!(snapshot.direct_since_epoch_secs.is_some());
         } else {
-            assert!(runtime.direct_since_epoch_secs().is_none());
+            assert!(snapshot.direct_since_epoch_secs.is_none());
         }
     }
 }
@@ -176,12 +176,12 @@ fn light_fuzz_random_mode_plan_preserves_timestamp_and_generation_invariants() {
 
         if matches!(snapshot.mode, RelayRouteMode::Direct) {
             assert!(
-                runtime.direct_since_epoch_secs().is_some(),
+                snapshot.direct_since_epoch_secs.is_some(),
                 "direct fuzz state must expose timestamp"
             );
         } else {
             assert!(
-                runtime.direct_since_epoch_secs().is_none(),
+                snapshot.direct_since_epoch_secs.is_none(),
                 "middle fuzz state must clear timestamp"
             );
         }
@@ -199,12 +199,17 @@ fn stress_parallel_subscribers_never_observe_generation_regression() {
             let rx = runtime.subscribe();
             let mut last = rx.borrow().generation;
             for _ in 0..10_000usize {
-                let current = rx.borrow().generation;
+                let current = *rx.borrow();
                 assert!(
-                    current >= last,
+                    current.generation >= last,
                     "watch generation must be monotonic for every subscriber"
                 );
-                last = current;
+                assert_eq!(
+                    matches!(current.mode, RelayRouteMode::Direct),
+                    current.direct_since_epoch_secs.is_some(),
+                    "one route snapshot must contain a coherent mode/timestamp pair"
+                );
+                last = current.generation;
                 std::thread::yield_now();
             }
         }));
@@ -227,8 +232,8 @@ fn stress_parallel_subscribers_never_observe_generation_regression() {
 
     let final_state = runtime.snapshot();
     if matches!(final_state.mode, RelayRouteMode::Direct) {
-        assert!(runtime.direct_since_epoch_secs().is_some());
+        assert!(final_state.direct_since_epoch_secs.is_some());
     } else {
-        assert!(runtime.direct_since_epoch_secs().is_none());
+        assert!(final_state.direct_since_epoch_secs.is_none());
     }
 }

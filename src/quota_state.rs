@@ -1,11 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
@@ -106,34 +104,30 @@ impl QuotaStateOwner {
             used_bytes: 0,
             last_reset_epoch_secs,
         };
+        let reset_target = self.store.current_or_legacy_handle(user);
         let state = self.state_for_users(configured_users, Some((user, prospective.clone())));
         let path = self.path.clone();
-        let store = Arc::clone(&self.store);
-        let user = user.to_string();
         let task = tokio::task::spawn_blocking(move || {
             let _guard = guard;
             write_state_file_blocking(&path, &state)?;
-            Ok(store.reset(&user, last_reset_epoch_secs))
+            Ok(reset_target.reset(last_reset_epoch_secs))
         });
         wait_for_blocking_io(task).await
     }
 
-    /// Removes a deleted user's persisted and in-memory quota ownership.
+    /// Removes a deleted user's persisted quota checkpoint.
     pub(crate) async fn remove_user(
         &self,
         configured_users: &BTreeSet<String>,
         user: &str,
     ) -> std::io::Result<()> {
         let guard = Arc::clone(&self.mutation).lock_owned().await;
+        debug_assert!(!configured_users.contains(user));
         let state = self.state_for_users(configured_users, None);
         let path = self.path.clone();
-        let store = Arc::clone(&self.store);
-        let user = user.to_string();
         let task = tokio::task::spawn_blocking(move || {
             let _guard = guard;
-            let persisted = write_state_file_blocking(&path, &state);
-            store.remove(&user);
-            persisted
+            write_state_file_blocking(&path, &state)
         });
         wait_for_blocking_io(task).await
     }
@@ -173,27 +167,42 @@ fn now_epoch_secs() -> u64 {
 }
 
 async fn read_state_file(path: &Path) -> std::io::Result<Option<QuotaStateFile>> {
-    let file = match tokio::fs::File::open(path).await {
-        Ok(file) => file,
+    #[cfg(unix)]
+    let payload = match crate::util::secure_fs::read_regular_limited_async(
+        path.to_path_buf(),
+        QUOTA_STATE_MAX_BYTES as usize,
+    )
+    .await
+    {
+        Ok(payload) => payload,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
-    if file.metadata().await?.len() > QUOTA_STATE_MAX_BYTES {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "quota state file exceeds the 16 MiB limit",
-        ));
-    }
-    let mut payload = Vec::new();
-    file.take(QUOTA_STATE_MAX_BYTES.saturating_add(1))
-        .read_to_end(&mut payload)
-        .await?;
-    if payload.len() as u64 > QUOTA_STATE_MAX_BYTES {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "quota state file grew beyond the 16 MiB limit while reading",
-        ));
-    }
+    #[cfg(not(unix))]
+    let payload = {
+        let file = match tokio::fs::File::open(path).await {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if file.metadata().await?.len() > QUOTA_STATE_MAX_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "quota state file exceeds the 16 MiB limit",
+            ));
+        }
+        let mut payload = Vec::new();
+        file.take(QUOTA_STATE_MAX_BYTES.saturating_add(1))
+            .read_to_end(&mut payload)
+            .await?;
+        if payload.len() as u64 > QUOTA_STATE_MAX_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "quota state file grew beyond the 16 MiB limit while reading",
+            ));
+        }
+        payload
+    };
     let state = serde_json::from_slice(&payload).map_err(|error| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -217,11 +226,6 @@ async fn wait_for_blocking_io<T>(
 }
 
 fn write_state_file_blocking(path: &Path, state: &QuotaStateFile) -> std::io::Result<()> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)?;
     let mut payload = serde_json::to_vec_pretty(state)?;
     payload.push(b'\n');
     if payload.len() as u64 > QUOTA_STATE_MAX_BYTES {
@@ -231,45 +235,60 @@ fn write_state_file_blocking(path: &Path, state: &QuotaStateFile) -> std::io::Re
         ));
     }
 
-    let mut last_collision = None;
-    for _ in 0..8 {
-        let tmp_path = path.with_extension(format!(
-            "tmp.{}.{}",
-            std::process::id(),
-            rand::random::<u64>()
-        ));
-        let mut file = match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                last_collision = Some(error);
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        let result = (|| {
-            file.write_all(&payload)?;
-            file.sync_all()?;
-            drop(file);
-            std::fs::rename(&tmp_path, path)?;
-            #[cfg(unix)]
-            std::fs::File::open(parent)?.sync_all()?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&tmp_path);
-        }
-        return result;
+    #[cfg(unix)]
+    {
+        return crate::util::secure_fs::atomic_replace(path, &payload, 0o600);
     }
-    Err(last_collision.unwrap_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "failed to allocate a unique quota checkpoint temporary file",
-        )
-    }))
+    #[cfg(not(unix))]
+    {
+        use std::io::Write;
+
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+
+        let mut last_collision = None;
+        for _ in 0..8 {
+            let tmp_path = path.with_extension(format!(
+                "tmp.{}.{}",
+                std::process::id(),
+                rand::random::<u64>()
+            ));
+            let mut file = match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path)
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    last_collision = Some(error);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let result = (|| {
+                file.write_all(&payload)?;
+                file.sync_all()?;
+                drop(file);
+                std::fs::rename(&tmp_path, path)?;
+                #[cfg(unix)]
+                std::fs::File::open(parent)?.sync_all()?;
+                Ok(())
+            })();
+            if result.is_err() {
+                let _ = std::fs::remove_file(&tmp_path);
+            }
+            return result;
+        }
+        Err(last_collision.unwrap_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "failed to allocate a unique quota checkpoint temporary file",
+            )
+        }))
+    }
 }
 
 fn quota_user_state(quota: UserQuotaSnapshot) -> QuotaUserState {

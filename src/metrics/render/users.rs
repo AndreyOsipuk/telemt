@@ -153,7 +153,7 @@ pub(super) async fn render(
                 out,
                 "telemt_user_connections_current{{user=\"{}\"}} {}",
                 user,
-                s.curr_connects.load(std::sync::atomic::Ordering::Relaxed)
+                stats.get_process_user_curr_connects(user)
             );
             let _ = writeln!(
                 out,

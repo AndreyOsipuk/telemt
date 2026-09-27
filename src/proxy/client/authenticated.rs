@@ -25,6 +25,28 @@ impl RunningClientHandler {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
+        // Manually constructed handshake fixtures bypass credential validation, so
+        // materialize the process-authority state that a real handshake generation owns.
+        let config = if config.runtime_user_credential_id(&success.user).is_none() {
+            let mut test_config = (*config).clone();
+            test_config.access.users.insert(
+                success.user.clone(),
+                "00000000000000000000000000000000".to_string(),
+            );
+            test_config.rebuild_runtime_user_auth()?;
+            Arc::new(test_config)
+        } else {
+            config
+        };
+        let shared = ProxySharedState::new_with_direct_buffer_budget_and_user_admission(
+            crate::proxy::direct_buffer_budget::DirectBufferBudget::new(
+                crate::proxy::direct_buffer_budget::fallback_direct_buffer_hard_limit(),
+            ),
+            crate::proxy::user_admission::UserAdmissionAuthority::new_with_quota_store(
+                stats.quota_store(),
+            ),
+        );
+        shared.apply_user_config(&config.access.users, &config.access.user_enabled);
         Self::handle_authenticated_static_with_shared(
             client_reader,
             client_writer,
@@ -40,7 +62,7 @@ impl RunningClientHandler {
             local_addr,
             peer_addr,
             ip_tracker,
-            ProxySharedState::new(),
+            shared,
         )
         .await
     }
@@ -133,18 +155,17 @@ impl RunningClientHandler {
             .or((config.access.user_max_tcp_conns_global_each > 0)
                 .then_some(config.access.user_max_tcp_conns_global_each))
             .map(|v| v as u64);
-        if !stats.try_acquire_user_curr_connects(user, limit) {
+        let Some(_connection_permit) = stats.connection_authority().try_acquire(user, limit) else {
             return Err(ProxyError::ConnectionLimitExceeded {
                 user: user.to_string(),
             });
-        }
+        };
 
         match ip_tracker.check_and_add(user, peer_addr.ip()).await {
             Ok(()) => {
                 ip_tracker.remove_ip(user, peer_addr.ip()).await;
             }
             Err(reason) => {
-                stats.decrement_user_curr_connects(user);
                 warn!(
                     user = %user,
                     ip = %peer_addr.ip(),
@@ -156,8 +177,6 @@ impl RunningClientHandler {
                 });
             }
         }
-
-        stats.decrement_user_curr_connects(user);
         Ok(())
     }
 }

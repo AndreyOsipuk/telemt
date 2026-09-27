@@ -2,11 +2,15 @@ use super::*;
 
 // Bounded C2ME sender and downstream writer tasks.
 mod tasks;
+// Child-task ownership aborts relay tasks when the parent future is cancelled.
+mod children;
 // Conntrack close classification.
 mod close_reason;
 
+use children::RelayChildTasks;
 use close_reason::classify_conntrack_close_reason;
 use tasks::{run_c2me_sender, run_me_writer};
+
 struct RelayConnLease {
     connection: Option<ConnLease>,
     conn_id: u64,
@@ -61,6 +65,7 @@ pub(crate) async fn handle_via_middle_proxy_with_conntrack<R, W>(
     session_cancel: CancellationToken,
     shared: Arc<ProxySharedState>,
     conntrack_close_policy: ConntrackClosePolicy,
+    quota_handle: UserQuotaHandle,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -73,6 +78,7 @@ where
 
     let quota_limit = config.access.user_data_quota.get(&user).copied();
     let quota_user_stats = quota_limit.map(|_| stats.get_or_create_user_stats_handle(&user));
+    let quota_handle = quota_limit.map(|_| quota_handle);
     let peer = success.peer;
     let traffic_lease = shared.traffic_limiter.acquire_lease(&user, peer.ip());
     let proto_tag = success.proto_tag;
@@ -183,7 +189,7 @@ where
     let c2me_byte_semaphore = Arc::new(Semaphore::new(c2me_byte_budget));
     let (c2me_tx, c2me_rx) = mpsc::channel::<C2MeCommand>(c2me_channel_capacity);
     let me_pool_c2me = me_pool.clone();
-    let mut c2me_sender = tokio::spawn(run_c2me_sender(
+    let c2me_sender = AbortOnDropHandle::new(tokio::spawn(run_c2me_sender(
         c2me_rx,
         me_pool_c2me,
         conn_id,
@@ -191,7 +197,7 @@ where
         peer,
         translated_local_addr,
         effective_tag_array,
-    ));
+    )));
 
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     let flow_cancel = CancellationToken::new();
@@ -200,18 +206,20 @@ where
     let rng_clone = rng.clone();
     let user_clone = user.clone();
     let quota_user_stats_me_writer = quota_user_stats.clone();
+    let quota_handle_me_writer = quota_handle.clone();
     let traffic_lease_me_writer = traffic_lease.clone();
     let flow_cancel_me_writer = flow_cancel.clone();
     let last_downstream_activity_ms_clone = last_downstream_activity_ms.clone();
     let bytes_me2c_clone = bytes_me2c.clone();
     let d2c_flush_policy = MeD2cFlushPolicy::from_config(&config);
-    let mut me_writer = tokio::spawn(run_me_writer(
+    let me_writer = AbortOnDropHandle::new(tokio::spawn(run_me_writer(
         crypto_writer,
         me_rx_task,
         stats_clone,
         rng_clone,
         user_clone,
         quota_user_stats_me_writer,
+        quota_handle_me_writer,
         quota_limit,
         traffic_lease_me_writer,
         flow_cancel_me_writer,
@@ -222,7 +230,13 @@ where
         session_started_at,
         conn_id,
         stop_rx,
-    ));
+    )));
+    let mut child_tasks = RelayChildTasks {
+        c2me_sender,
+        me_writer,
+        flow_cancel: flow_cancel.clone(),
+        stop_tx: Some(stop_tx),
+    };
 
     let mut main_result: Result<()> = Ok(());
     let mut client_closed = false;
@@ -340,11 +354,11 @@ where
                         forensics.bytes_c2me = forensics
                             .bytes_c2me
                             .saturating_add(payload.len() as u64);
-                        if let (Some(limit), Some(user_stats)) =
-                            (quota_limit, quota_user_stats.as_deref())
+                        if let (Some(limit), Some(quota_handle)) =
+                            (quota_limit, quota_handle.as_ref())
                         {
                             match reserve_user_quota_with_yield(
-                                user_stats,
+                                quota_handle,
                                 payload.len() as u64,
                                 limit,
                                 stats.as_ref(),
@@ -379,7 +393,11 @@ where
                                     break;
                                 }
                             }
-                            stats.add_user_octets_from_handle(user_stats, payload.len() as u64);
+                            if let Some(user_stats) = quota_user_stats.as_deref() {
+                                stats.add_user_octets_from_handle(user_stats, payload.len() as u64);
+                            } else {
+                                stats.add_user_octets_from(&user, payload.len() as u64);
+                            }
                         } else {
                             stats.add_user_octets_from(&user, payload.len() as u64);
                         }
@@ -446,28 +464,30 @@ where
     }
 
     drop(c2me_tx);
-    let c2me_result = match timeout(ME_CHILD_JOIN_TIMEOUT, &mut c2me_sender).await {
+    let c2me_result = match timeout(ME_CHILD_JOIN_TIMEOUT, &mut child_tasks.c2me_sender).await {
         Ok(joined) => {
             joined.unwrap_or_else(|e| Err(ProxyError::Proxy(format!("ME sender join error: {e}"))))
         }
         Err(_) => {
             stats.increment_me_child_join_timeout_total();
             stats.increment_me_child_abort_total();
-            c2me_sender.abort();
+            child_tasks.c2me_sender.abort();
             Err(ProxyError::Proxy("ME sender join timeout".into()))
         }
     };
 
     flow_cancel.cancel();
-    let _ = stop_tx.send(());
-    let mut writer_result = match timeout(ME_CHILD_JOIN_TIMEOUT, &mut me_writer).await {
+    if let Some(stop_tx) = child_tasks.stop_tx.take() {
+        let _ = stop_tx.send(());
+    }
+    let mut writer_result = match timeout(ME_CHILD_JOIN_TIMEOUT, &mut child_tasks.me_writer).await {
         Ok(joined) => {
             joined.unwrap_or_else(|e| Err(ProxyError::Proxy(format!("ME writer join error: {e}"))))
         }
         Err(_) => {
             stats.increment_me_child_join_timeout_total();
             stats.increment_me_child_abort_total();
-            me_writer.abort();
+            child_tasks.me_writer.abort();
             Err(ProxyError::Proxy("ME writer join timeout".into()))
         }
     };

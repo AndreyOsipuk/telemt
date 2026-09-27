@@ -35,7 +35,7 @@ pub async fn me_zombie_writer_watchdog(pool: Arc<MePool>) {
                 continue;
             };
             ws.iter()
-                .filter(|w| w.draining.load(std::sync::atomic::Ordering::Relaxed))
+                .filter(|w| w.draining.load(std::sync::atomic::Ordering::Acquire))
                 .filter_map(|w| {
                     let deadline = w
                         .drain_deadline_epoch_secs

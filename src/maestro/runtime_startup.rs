@@ -56,6 +56,7 @@ pub(super) async fn prepare_runtime(
     ip_tracker: Arc<UserIpTracker>,
     shared_state: Arc<ProxySharedState>,
     direct_buffer_budget: Arc<DirectBufferBudget>,
+    max_connections: Arc<Semaphore>,
     route_runtime: Arc<RouteRuntimeController>,
     api_me_pool: Arc<RwLock<Option<Arc<MePool>>>>,
     runtime_task_scope: RuntimeTaskScope,
@@ -68,13 +69,6 @@ pub(super) async fn prepare_runtime(
     let mut use_middle_proxy = config.general.use_middle_proxy;
     let beobachten = Arc::new(BeobachtenStore::new());
     let rng = Arc::new(SecureRandom::new());
-
-    let max_connections_limit = if config.server.max_connections == 0 {
-        Semaphore::MAX_PERMITS
-    } else {
-        config.server.max_connections as usize
-    };
-    let max_connections = Arc::new(Semaphore::new(max_connections_limit));
 
     let me2dc_fallback = config.general.me2dc_fallback;
     let me_init_retry_attempts = config.general.me_init_retry_attempts;
@@ -229,6 +223,7 @@ pub(super) async fn prepare_runtime(
     }
 
     let runtime_watches = runtime_tasks::spawn_runtime_tasks(
+        1,
         &config,
         config_path,
         probe,
@@ -345,10 +340,12 @@ pub(super) async fn prepare_runtime(
         conntrack_scope.cancellation_token(),
     ));
     runtime_task_scope.spawn(run_direct_buffer_budget_controller(
+        1,
         direct_buffer_budget,
         buffer_pool.clone(),
         stats,
         shared_state,
+        max_connections.clone(),
         config.server.max_connections,
     ));
 

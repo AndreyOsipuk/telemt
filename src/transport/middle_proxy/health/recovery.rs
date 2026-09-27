@@ -209,10 +209,38 @@ pub(super) async fn maybe_rotate_single_endpoint_shadow(
         );
         return;
     };
+    let expected_role = {
+        let writers = pool.writers.read().await;
+        writers
+            .iter()
+            .find(|writer| writer.id == old_writer_id)
+            .map(WriterRole::from_writer)
+    };
+    let Some(expected_role) = expected_role else {
+        shadow_rotate_deadline.insert(key, now + Duration::from_secs(SHADOW_ROTATE_RETRY_SECS));
+        return;
+    };
+    let Some(mut reservation) = pool
+        .registry
+        .try_reserve_writer_replacement(old_writer_id)
+        .await
+    else {
+        shadow_rotate_deadline.insert(key, now + Duration::from_secs(SHADOW_ROTATE_RETRY_SECS));
+        return;
+    };
 
     let rotate_ok = match tokio::time::timeout(
         pool.reconnect_runtime.me_one_timeout,
-        pool.connect_one_for_dc(endpoint, dc, rng.as_ref()),
+        pool.replace_writer_with_generation_contour_for_dc(
+            endpoint,
+            rng.as_ref(),
+            pool.current_generation(),
+            WriterContour::Active,
+            dc,
+            expected_role,
+            WriterReplacementPurpose::ShadowRotation,
+            &mut reservation,
+        ),
     )
     .await
     {
@@ -246,8 +274,6 @@ pub(super) async fn maybe_rotate_single_endpoint_shadow(
         return;
     }
 
-    pool.mark_writer_draining_with_timeout(old_writer_id, pool.force_close_timeout(), false)
-        .await;
     pool.stats
         .increment_me_single_endpoint_shadow_rotate_total();
     shadow_rotate_deadline.insert(key, now + interval);

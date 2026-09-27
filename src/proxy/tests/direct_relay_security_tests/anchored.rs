@@ -74,6 +74,49 @@ fn adversarial_parent_swap_after_check_is_blocked_by_anchored_open() {
 
 #[cfg(unix)]
 #[test]
+fn adversarial_intermediate_parent_swap_is_blocked_by_component_walk() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().expect("temporary directory must be creatable");
+    let parent = directory.path().join("parent");
+    let moved = directory.path().join("moved");
+    let outside = directory.path().join("outside");
+    fs::create_dir_all(parent.join("nested")).expect("original nested directory must be creatable");
+    fs::create_dir_all(outside.join("nested")).expect("outside nested directory must be creatable");
+
+    let candidate = parent.join("nested/unknown-dc.log");
+    let sanitized = sanitize_unknown_dc_log_path(
+        candidate
+            .to_str()
+            .expect("temporary path must be valid UTF-8"),
+    )
+    .expect("candidate must sanitize before intermediate parent swap");
+    assert!(
+        unknown_dc_log_path_is_still_safe(&sanitized),
+        "precondition: target should initially pass revalidation"
+    );
+
+    fs::rename(&parent, &moved).expect("intermediate parent must be movable");
+    symlink(&outside, &parent).expect("intermediate parent symlink must be creatable");
+
+    let err = open_unknown_dc_log_append_anchored(&sanitized)
+        .expect_err("anchored open must reject a swapped intermediate component");
+    let raw = err.raw_os_error();
+    assert!(
+        matches!(
+            raw,
+            Some(libc::ELOOP) | Some(libc::ENOTDIR) | Some(libc::ENOENT)
+        ),
+        "component walk must fail closed on intermediate swap, got raw_os_error={raw:?}"
+    );
+    assert!(
+        !outside.join("nested/unknown-dc.log").exists(),
+        "component walk must not create a log through a swapped intermediate directory"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn anchored_open_nix_path_writes_expected_lines() {
     let base = std::env::current_dir()
         .expect("cwd must be available")

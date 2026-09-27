@@ -3,7 +3,7 @@ use std::sync::Arc;
 use bytes::{Bytes, BytesMut};
 
 use super::resident::{OwnedBatchBody, PendingCounts, PendingResponseLease};
-use super::{CarrierLane, DownBatch, WebSession};
+use super::{CarrierLane, DeferredSessionEffects, DownBatch, WebSession};
 use crate::config::WebLimitsConfig;
 use crate::web::frame::FrameType;
 use crate::web::manager::ManagerError;
@@ -13,6 +13,7 @@ pub(super) fn take_lane_down_batch(
     session: &WebSession,
     limits: &WebLimitsConfig,
     lane: &mut CarrierLane,
+    effects: &mut DeferredSessionEffects,
     cursor: u64,
     carrier_health_eligible: bool,
 ) -> Result<DownBatch, ManagerError> {
@@ -35,9 +36,10 @@ pub(super) fn take_lane_down_batch(
     let Some(manager) = session.manager.upgrade() else {
         return Err(ManagerError::Closed);
     };
-    let Some(_staging) = manager.try_downlink_staging_budget(body_len) else {
+    let Some(staging) = manager.try_downlink_staging_budget(body_len) else {
         return Err(ManagerError::Backpressure);
     };
+    effects.retain_staging_permit(staging);
     let mut body = BytesMut::with_capacity(body_len);
     let mut data_bytes = 0usize;
     let mut data_items = 0usize;

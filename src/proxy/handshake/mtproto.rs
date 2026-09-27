@@ -151,10 +151,14 @@ where
     if let Some(snapshot) = config.runtime_user_auth() {
         let sticky_ip_hint = sticky_hint_get_by_ip(shared, peer.ip());
         let sticky_prefix_hint = sticky_hint_get_by_ip_prefix(shared, peer.ip());
+        let sticky_ip_candidates =
+            sticky_ip_hint.and_then(|hint_key| snapshot.candidate_ids_by_hint_key(hint_key));
+        let sticky_prefix_candidates =
+            sticky_prefix_hint.and_then(|hint_key| snapshot.candidate_ids_by_hint_key(hint_key));
         let preferred_user_id = preferred_user.and_then(|user| snapshot.user_id_by_name(user));
         let exact_user_id = exact_user.and_then(|user| snapshot.user_id_by_name(user));
-        let has_hint = sticky_ip_hint.is_some()
-            || sticky_prefix_hint.is_some()
+        let has_hint = sticky_ip_candidates.is_some_and(|ids| !ids.is_empty())
+            || sticky_prefix_candidates.is_some_and(|ids| !ids.is_empty())
             || preferred_user_id.is_some()
             || exact_user_id.is_some();
         let overload = auth_probe_saturation_is_throttled_in(shared, Instant::now());
@@ -204,9 +208,17 @@ where
 
         let mut matched = exact_user_id.is_some_and(|user_id| try_user_id!(user_id));
         if exact_user.is_none()
-            && let Some(user_id) = sticky_ip_hint
+            && let Some(candidate_ids) = sticky_ip_candidates
         {
-            matched = try_user_id!(user_id);
+            for &user_id in candidate_ids {
+                if try_user_id!(user_id) {
+                    matched = true;
+                    break;
+                }
+                if budget_exhausted {
+                    break;
+                }
+            }
         }
 
         if exact_user.is_none()
@@ -218,9 +230,17 @@ where
 
         if exact_user.is_none()
             && !matched
-            && let Some(user_id) = sticky_prefix_hint
+            && let Some(candidate_ids) = sticky_prefix_candidates
         {
-            matched = try_user_id!(user_id);
+            for &user_id in candidate_ids {
+                if try_user_id!(user_id) {
+                    matched = true;
+                    break;
+                }
+                if budget_exhausted {
+                    break;
+                }
+            }
         }
 
         if exact_user.is_none() && !matched && !budget_exhausted {
@@ -231,18 +251,22 @@ where
                     .recent_user_ring_seq
                     .load(Ordering::Relaxed);
                 let scan_limit = ring.len().min(RECENT_USER_RING_SCAN_LIMIT);
-                for offset in 0..scan_limit {
+                'recent_hints: for offset in 0..scan_limit {
                     let idx = (next_seq as usize + ring.len() - 1 - offset) % ring.len();
-                    let encoded_user_id = ring[idx].load(Ordering::Relaxed);
-                    if encoded_user_id == 0 {
+                    let hint_key = ring[idx].load(Ordering::Relaxed);
+                    if hint_key == 0 {
                         continue;
                     }
-                    if try_user_id!(encoded_user_id - 1) {
-                        matched = true;
-                        break;
-                    }
-                    if budget_exhausted {
-                        break;
+                    if let Some(candidate_ids) = snapshot.candidate_ids_by_hint_key(hint_key) {
+                        for &user_id in candidate_ids {
+                            if try_user_id!(user_id) {
+                                matched = true;
+                                break 'recent_hints;
+                            }
+                            if budget_exhausted {
+                                break 'recent_hints;
+                            }
+                        }
                     }
                 }
             }
@@ -357,8 +381,10 @@ where
 
         auth_probe_record_success_in(shared, peer.ip());
         if let Some(user_id) = matched_user_id {
-            sticky_hint_record_success_in(shared, peer.ip(), user_id, None);
-            record_recent_user_success_in(shared, user_id);
+            if let Some(entry) = snapshot.entry_by_id(user_id) {
+                sticky_hint_record_success_in(shared, peer.ip(), entry.hint_key, None);
+                record_recent_user_success_in(shared, entry.hint_key);
+            }
         }
 
         let max_pending = config.general.crypto_pending_buffer;

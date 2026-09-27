@@ -3,6 +3,7 @@ use super::*;
 fn render_page(bootstrap: &str, candidate_count: usize) -> BridgePage {
     render(
         "proxy.example.com",
+        "/",
         bootstrap,
         2 * 1024 * 1024,
         32 * 1024 * 1024,
@@ -18,6 +19,31 @@ fn render_page(bootstrap: &str, candidate_count: usize) -> BridgePage {
         15,
         120,
         0,
+        false,
+        &SecureRandom::new(),
+    )
+}
+
+fn render_diagnostic_page(bootstrap: &str) -> BridgePage {
+    render(
+        "proxy.example.com",
+        "/",
+        bootstrap,
+        2 * 1024 * 1024,
+        32 * 1024 * 1024,
+        16 * 1024,
+        1024,
+        true,
+        4,
+        [3, 5, 8, 12],
+        25,
+        10,
+        90,
+        15,
+        15,
+        120,
+        0,
+        true,
         &SecureRandom::new(),
     )
 }
@@ -49,6 +75,49 @@ fn rendered_page_contains_bounded_negotiation_contract() {
 }
 
 #[test]
+fn rendered_page_resolves_carriers_against_the_exact_base_path() {
+    let page = render(
+        "proxy.example.com",
+        "/Dobry-Cola/super_app/",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        2 * 1024 * 1024,
+        32 * 1024 * 1024,
+        16 * 1024,
+        1024,
+        true,
+        4,
+        [3, 5, 8, 12],
+        25,
+        10,
+        90,
+        15,
+        15,
+        120,
+        0,
+        true,
+        &SecureRandom::new(),
+    );
+
+    assert!(
+        page.body
+            .contains("relayBase=relayOrigin+'/Dobry-Cola/super_app'")
+    );
+    assert!(page.body.contains("fetch(settings.base()+path"));
+    assert!(
+        page.body
+            .contains("relayBase.replace(/^https:/,'wss:')+'/api/v1/ws'")
+    );
+    assert!(page.body.contains("fetch(relayBase+'/api/v1/diagnostic'"));
+    assert!(page.body.contains("url:()=>relayOrigin+recoveryPath"));
+    assert!(
+        !page
+            .body
+            .contains("/Dobry-Cola/super_app/Dobry-Cola/super_app")
+    );
+    assert!(!page.body.contains("__BASE_PREFIX__"));
+}
+
+#[test]
 fn rendered_page_preserves_the_ios_bootstrap_literal() {
     let bootstrap = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
     let page = render_page(bootstrap, 2);
@@ -62,6 +131,7 @@ fn rendered_page_preserves_the_ios_bootstrap_literal() {
 fn rendered_page_embeds_the_configured_bridge_timing_policy() {
     let page = render(
         "proxy.example.com",
+        "/",
         "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG",
         2 * 1024 * 1024,
         32 * 1024 * 1024,
@@ -77,6 +147,7 @@ fn rendered_page_embeds_the_configured_bridge_timing_policy() {
         11,
         119,
         4,
+        false,
         &SecureRandom::new(),
     );
 
@@ -113,6 +184,7 @@ fn effective_deadline_formula_uses_the_final_checkpoint() {
 fn disabled_negotiation_does_not_arm_a_carrier_deadline() {
     let page = render(
         "proxy.example.com",
+        "/",
         "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
         2 * 1024 * 1024,
         32 * 1024 * 1024,
@@ -128,6 +200,7 @@ fn disabled_negotiation_does_not_arm_a_carrier_deadline() {
         15,
         120,
         0,
+        false,
         &SecureRandom::new(),
     );
     assert!(page.body.contains(
@@ -188,5 +261,127 @@ fn rendered_page_preserves_exact_v1_status_control_envelope() {
             .count(),
         1
     );
+    assert!(!page.body.contains("port.postMessage({t:'status',state,"));
+}
+
+#[test]
+fn committed_websocket_lane_escalates_only_pre_upgrade_failure() {
+    let page = render_page("LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL", 4);
+
+    assert!(page.body.contains("let upgraded=false,settled=false"));
+    assert!(page.body.contains(
+        "if(settled)return;settled=true;if(openTimer)clearTimeout(openTimer);openTimer=null"
+    ));
+    assert!(
+        page.body
+            .contains("if(closed||lanes.get(lane.id)!==lane||lane.socket!==opened)return")
+    );
+    assert!(page.body.contains(
+        "if(!upgraded){lane.socket=null;opened.close();recoveryController.recover(reason,null);return}"
+    ));
+    assert!(
+        page.body
+            .contains("recoveryController.recover(reason,null);return}finishLane(lane,true)")
+    );
+    assert!(
+        page.body
+            .contains("openTimer=setTimeout(()=>finishSocket('timeout'),websocketOpenMs)")
+    );
+    assert!(page.body.contains(
+        "if(closed||lanes.get(lane.id)!==lane||lane.socket!==opened){opened.close();return}"
+    ));
+    assert!(page.body.contains("upgraded=true;lane.ready=true"));
+    assert!(page.body.contains(
+        "lane.socket.onmessage=event=>{\n  if(openTimer)clearTimeout(openTimer);openTimer=null;\n  if(closed||lanes.get(lane.id)!==lane||lane.socket!==opened||!(event.data instanceof ArrayBuffer))"
+    ));
+    assert!(
+        page.body
+            .contains("lane.socket.onclose=()=>finishSocket(upgraded?'network':'upgrade')")
+    );
+    assert!(page.body.contains("port.postMessage({t:'status',state})"));
+    assert!(!page.body.contains("port.postMessage({t:'status',state,"));
+}
+
+#[test]
+fn bridge_diagnostic_sideband_is_absent_by_default() {
+    let page = render_page("IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII", 4);
+
+    assert!(page.body.contains("<body>\n<script nonce=\""));
+    assert!(page.body.contains(
+        "carrierCapabilities='https,https-lanes,websocket,websocket-lanes';\nconst responseBody="
+    ));
+    assert!(!page.body.contains("/api/v1/diagnostic"));
+    assert!(!page.body.contains("TelemtBridgeDiagnostics"));
+    for event in [
+        "runtime_started",
+        "status_posted",
+        "hello_received",
+        "boundary_timeout",
+        "hello_timeout",
+        "client_close_before_hello",
+        "document_unloaded_before_hello",
+        "runtime_error_before_hello",
+    ] {
+        assert!(!page.body.contains(event));
+    }
+}
+
+#[test]
+fn enabled_bridge_diagnostics_use_the_https_sideband_only() {
+    let page = render_diagnostic_page("JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ");
+
+    assert!(!page.body.contains("__"));
+    assert!(page.body.contains("fetch(relayBase+'/api/v1/diagnostic'"));
+    assert!(page.body.contains("JSON.stringify({v:1,event})"));
+    assert!(page.body.contains("'Content-Type':'application/json'"));
+    assert!(page.body.contains("keepalive:true"));
+    for event in [
+        "runtime_started",
+        "status_posted",
+        "hello_received",
+        "boundary_timeout",
+        "hello_timeout",
+        "client_close_before_hello",
+        "document_unloaded_before_hello",
+        "runtime_error_before_hello",
+    ] {
+        assert!(page.body.contains(event));
+    }
+    assert_eq!(page.body.matches("/api/v1/diagnostic").count(), 1);
+}
+
+#[test]
+fn bridge_diagnostic_hooks_preserve_native_and_recovery_contracts() {
+    let page = render_diagnostic_page("KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK");
+    let status_report = page.body.find("clientDiagnostics.statusPosted()").unwrap();
+    let native_status = page
+        .body
+        .find("port.postMessage({t:'status',state})")
+        .unwrap();
+    let hello_report = page.body.find("clientDiagnostics.helloReceived()").unwrap();
+    let create_started = page.body.find("createStarted=true;if(helloTimer)").unwrap();
+    let boundary_initialized = page.body.find("initialized=true;port=nextPort;").unwrap();
+    let boundary_activated = page
+        .body
+        .find("clientDiagnostics.boundaryActivated()")
+        .unwrap();
+    let port_handler = page.body.find("port.onmessage=message=>").unwrap();
+    let bootstrap_replaced = page.body.find("bootstrap=policy.bootstrap;").unwrap();
+    let diagnostic_rebound = page
+        .body
+        .find("clientDiagnostics.setBootstrap(bootstrap)")
+        .unwrap();
+    let limits_replaced = page
+        .body
+        .find("batchLimit=policy.limits.carrier_batch_bytes")
+        .unwrap();
+
+    assert!(native_status < status_report);
+    assert!(hello_report < create_started);
+    assert!(boundary_initialized < boundary_activated);
+    assert!(boundary_activated < port_handler);
+    assert!(bootstrap_replaced < diagnostic_rebound);
+    assert!(diagnostic_rebound < limits_replaced);
+    assert!(page.body.contains("clientDiagnostics.helloTimeout()"));
     assert!(!page.body.contains("port.postMessage({t:'status',state,"));
 }

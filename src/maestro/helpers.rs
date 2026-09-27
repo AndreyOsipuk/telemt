@@ -1,20 +1,8 @@
-#![allow(clippy::items_after_test_module)]
-
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
-
-use tokio::sync::watch;
-use tracing::{debug, error, info, warn};
 
 use crate::cli;
-use crate::config::ProxyConfig;
 use crate::logging::LogCliOptions;
-use crate::transport::UpstreamManager;
-use crate::transport::middle_proxy::{
-    ProxyConfigData, fetch_proxy_config_with_raw_via_upstream, load_proxy_config_cache,
-    save_proxy_config_cache,
-};
 
 const MAESTRO_COLOR: &str = "\x1b[92m";
 const COLOR_RESET: &str = "\x1b[0m";
@@ -47,6 +35,20 @@ pub(crate) fn resolve_runtime_config_path(
     startup_cwd: &Path,
     config_path_explicit: bool,
 ) -> PathBuf {
+    let normalize = |path: PathBuf| {
+        let mut normalized = PathBuf::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    normalized.pop();
+                }
+                component => normalized.push(component.as_os_str()),
+            }
+        }
+        normalized
+    };
+
     if config_path_explicit {
         let raw = PathBuf::from(config_path_cli);
         let absolute = if raw.is_absolute() {
@@ -54,7 +56,7 @@ pub(crate) fn resolve_runtime_config_path(
         } else {
             startup_cwd.join(raw)
         };
-        return absolute.canonicalize().unwrap_or(absolute);
+        return normalize(absolute);
     }
 
     let etc_telemt = std::path::Path::new("/etc/telemt");
@@ -66,7 +68,7 @@ pub(crate) fn resolve_runtime_config_path(
     ];
     for candidate in candidates {
         if candidate.is_file() {
-            return candidate.canonicalize().unwrap_or(candidate);
+            return normalize(candidate);
         }
     }
 
@@ -103,7 +105,17 @@ fn normalize_runtime_dir(path: &Path, startup_cwd: &Path) -> PathBuf {
     } else {
         startup_cwd.join(path)
     };
-    absolute.canonicalize().unwrap_or(absolute)
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 /// Parsed CLI arguments.
@@ -314,588 +326,10 @@ fn print_help() {
     }
 }
 
+// Runtime reporting and startup snapshot helpers.
+mod runtime;
+
+pub(crate) use runtime::*;
+
 #[cfg(test)]
-mod tests {
-    use std::path::{Path, PathBuf};
-
-    use super::{
-        expected_handshake_close_description, format_maestro_line, is_expected_handshake_eof,
-        peer_close_description, resolve_runtime_base_dir, resolve_runtime_config_path,
-    };
-    use crate::error::{ProxyError, StreamError};
-
-    #[test]
-    fn maestro_line_formatter_respects_disabled_colors() {
-        let plain = format_maestro_line("boot", false);
-        assert_eq!(plain, "MAESTRO: boot");
-        assert!(!plain.contains('\x1b'));
-    }
-
-    #[test]
-    fn maestro_line_formatter_keeps_color_when_enabled() {
-        let colored = format_maestro_line("boot", true);
-        assert!(colored.contains("\x1b[92mMAESTRO\x1b[0m"));
-    }
-
-    #[test]
-    fn resolve_runtime_config_path_anchors_relative_to_startup_cwd() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let startup_cwd = std::env::temp_dir().join(format!("telemt_cfg_path_{nonce}"));
-        std::fs::create_dir_all(&startup_cwd).unwrap();
-        let target = startup_cwd.join("config.toml");
-        std::fs::write(&target, " ").unwrap();
-
-        let resolved = resolve_runtime_config_path("config.toml", &startup_cwd, true);
-        assert_eq!(resolved, target.canonicalize().unwrap());
-
-        let _ = std::fs::remove_file(&target);
-        let _ = std::fs::remove_dir(&startup_cwd);
-    }
-
-    #[test]
-    fn resolve_runtime_config_path_keeps_absolute_for_missing_file() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let startup_cwd = std::env::temp_dir().join(format!("telemt_cfg_path_missing_{nonce}"));
-        std::fs::create_dir_all(&startup_cwd).unwrap();
-
-        let resolved = resolve_runtime_config_path("missing.toml", &startup_cwd, true);
-        assert_eq!(resolved, startup_cwd.join("missing.toml"));
-
-        let _ = std::fs::remove_dir(&startup_cwd);
-    }
-
-    #[test]
-    fn resolve_runtime_config_path_uses_startup_candidates_when_not_explicit() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let startup_cwd =
-            std::env::temp_dir().join(format!("telemt_cfg_startup_candidates_{nonce}"));
-        std::fs::create_dir_all(&startup_cwd).unwrap();
-        let telemt = startup_cwd.join("telemt.toml");
-        std::fs::write(&telemt, " ").unwrap();
-
-        let resolved = resolve_runtime_config_path("config.toml", &startup_cwd, false);
-        assert_eq!(resolved, telemt.canonicalize().unwrap());
-
-        let _ = std::fs::remove_file(&telemt);
-        let _ = std::fs::remove_dir(&startup_cwd);
-    }
-
-    #[test]
-    fn resolve_runtime_config_path_defaults_to_startup_config_when_none_found() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let startup_cwd = std::env::temp_dir().join(format!("telemt_cfg_startup_default_{nonce}"));
-        std::fs::create_dir_all(&startup_cwd).unwrap();
-
-        let resolved = resolve_runtime_config_path("config.toml", &startup_cwd, false);
-        assert_eq!(resolved, startup_cwd.join("config.toml"));
-
-        let _ = std::fs::remove_dir(&startup_cwd);
-    }
-
-    #[test]
-    fn resolve_runtime_base_dir_prefers_cli_data_path() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let startup_cwd = std::env::temp_dir().join(format!("telemt_runtime_base_cwd_{nonce}"));
-        let data_path = std::env::temp_dir().join(format!("telemt_runtime_base_data_{nonce}"));
-        std::fs::create_dir_all(&startup_cwd).unwrap();
-        std::fs::create_dir_all(&data_path).unwrap();
-
-        let resolved = resolve_runtime_base_dir(
-            &startup_cwd.join("config.toml"),
-            &startup_cwd,
-            true,
-            Some(&data_path),
-        );
-        assert_eq!(resolved, data_path.canonicalize().unwrap());
-
-        let _ = std::fs::remove_dir(&data_path);
-        let _ = std::fs::remove_dir(&startup_cwd);
-    }
-
-    #[test]
-    fn resolve_runtime_base_dir_uses_working_directory_before_explicit_config_parent() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let startup_cwd = std::env::temp_dir().join(format!("telemt_runtime_base_start_{nonce}"));
-        let config_dir = std::env::temp_dir().join(format!("telemt_runtime_base_cfg_{nonce}"));
-        std::fs::create_dir_all(&startup_cwd).unwrap();
-        std::fs::create_dir_all(&config_dir).unwrap();
-
-        let resolved =
-            resolve_runtime_base_dir(&config_dir.join("telemt.toml"), &startup_cwd, true, None);
-        assert_eq!(resolved, startup_cwd.canonicalize().unwrap());
-
-        let _ = std::fs::remove_dir(&config_dir);
-        let _ = std::fs::remove_dir(&startup_cwd);
-    }
-
-    #[test]
-    fn resolve_runtime_base_dir_uses_explicit_config_parent_from_root() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let config_dir = std::env::temp_dir().join(format!("telemt_runtime_base_root_cfg_{nonce}"));
-        std::fs::create_dir_all(&config_dir).unwrap();
-
-        let resolved =
-            resolve_runtime_base_dir(&config_dir.join("telemt.toml"), Path::new("/"), true, None);
-        assert_eq!(resolved, config_dir.canonicalize().unwrap());
-
-        let _ = std::fs::remove_dir(&config_dir);
-    }
-
-    #[test]
-    fn resolve_runtime_base_dir_uses_systemd_working_directory_before_etc() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let startup_cwd = std::env::temp_dir().join(format!("telemt_runtime_base_systemd_{nonce}"));
-        std::fs::create_dir_all(&startup_cwd).unwrap();
-
-        let resolved =
-            resolve_runtime_base_dir(&startup_cwd.join("config.toml"), &startup_cwd, false, None);
-        assert_eq!(resolved, startup_cwd.canonicalize().unwrap());
-
-        let _ = std::fs::remove_dir(&startup_cwd);
-    }
-
-    #[test]
-    fn resolve_runtime_base_dir_falls_back_to_etc_from_root() {
-        let resolved = resolve_runtime_base_dir(
-            Path::new("/etc/telemt/config.toml"),
-            Path::new("/"),
-            false,
-            None,
-        );
-        assert_eq!(resolved, PathBuf::from("/etc/telemt"));
-    }
-
-    #[test]
-    fn expected_handshake_eof_matches_connection_reset() {
-        let err = ProxyError::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
-        assert!(is_expected_handshake_eof(&err));
-    }
-
-    #[test]
-    fn expected_handshake_eof_matches_stream_io_unexpected_eof() {
-        let err = ProxyError::Stream(StreamError::Io(std::io::Error::from(
-            std::io::ErrorKind::UnexpectedEof,
-        )));
-        assert!(is_expected_handshake_eof(&err));
-    }
-
-    #[test]
-    fn peer_close_description_is_human_readable_for_all_peer_close_kinds() {
-        let cases = [
-            (
-                std::io::ErrorKind::ConnectionReset,
-                "Peer reset TCP connection (RST)",
-            ),
-            (
-                std::io::ErrorKind::ConnectionAborted,
-                "Peer aborted TCP connection during transport",
-            ),
-            (
-                std::io::ErrorKind::BrokenPipe,
-                "Peer closed write side (broken pipe)",
-            ),
-            (
-                std::io::ErrorKind::NotConnected,
-                "Socket was already closed by peer",
-            ),
-        ];
-
-        for (kind, expected) in cases {
-            let err = ProxyError::Io(std::io::Error::from(kind));
-            assert_eq!(peer_close_description(&err), Some(expected));
-        }
-    }
-
-    #[test]
-    fn handshake_close_description_is_human_readable_for_all_expected_kinds() {
-        let cases = [
-            (
-                ProxyError::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)),
-                "Peer closed before sending full 64-byte MTProto handshake",
-            ),
-            (
-                ProxyError::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
-                "Peer reset TCP connection during initial MTProto handshake",
-            ),
-            (
-                ProxyError::Io(std::io::Error::from(std::io::ErrorKind::ConnectionAborted)),
-                "Peer aborted TCP connection during initial MTProto handshake",
-            ),
-            (
-                ProxyError::Io(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
-                "Peer closed write side before MTProto handshake completed",
-            ),
-            (
-                ProxyError::Io(std::io::Error::from(std::io::ErrorKind::NotConnected)),
-                "Handshake socket was already closed by peer",
-            ),
-            (
-                ProxyError::Stream(StreamError::UnexpectedEof),
-                "Peer closed before sending full 64-byte MTProto handshake",
-            ),
-        ];
-
-        for (err, expected) in cases {
-            assert_eq!(expected_handshake_close_description(&err), Some(expected));
-        }
-    }
-}
-
-pub(crate) fn print_proxy_links(host: &str, port: u16, config: &ProxyConfig) {
-    print_maestro_line(format!("Proxy links ({host})"));
-    for user_name in config
-        .general
-        .links
-        .show
-        .resolve_users(&config.access.users)
-    {
-        if let Some(secret) = config.access.users.get(user_name) {
-            print_maestro_line(format!("User: {user_name}"));
-            if config.general.modes.classic {
-                print_maestro_line(format!(
-                    "Classic: tg://proxy?server={host}&port={port}&secret={secret}"
-                ));
-            }
-            if config.general.modes.secure {
-                print_maestro_line(format!(
-                    "DD: tg://proxy?server={host}&port={port}&secret=dd{secret}"
-                ));
-            }
-            if config.general.modes.tls {
-                let mut domains = Vec::with_capacity(1 + config.censorship.tls_domains.len());
-                domains.push(config.censorship.tls_domain.clone());
-                for d in &config.censorship.tls_domains {
-                    if !domains.contains(d) {
-                        domains.push(d.clone());
-                    }
-                }
-
-                for domain in domains {
-                    let domain_hex = hex::encode(&domain);
-                    print_maestro_line(format!(
-                        "EE-TLS: tg://proxy?server={host}&port={port}&secret=ee{secret}{domain_hex}"
-                    ));
-                }
-            }
-        } else {
-            warn!(target: "telemt::links", "User '{}' in show_link not found", user_name);
-        }
-    }
-}
-
-/// Prints WEB links only for profiles selected by the existing link policy.
-pub(crate) fn print_web_proxy_links(config: &ProxyConfig) {
-    if !config.web.enabled || config.general.links.show.is_empty() {
-        return;
-    }
-    let Some(runtime) = config.web.runtime.as_ref() else {
-        return;
-    };
-    let shown = config
-        .general
-        .links
-        .show
-        .resolve_users(&config.access.users);
-    let mut heading_printed = false;
-    for profile in &runtime.profiles {
-        if !shown.iter().any(|user| user.as_str() == profile.user) {
-            continue;
-        }
-        if !heading_printed {
-            print_maestro_line("WEB proxy links");
-            heading_printed = true;
-        }
-        let Some(secret) = config.access.users.get(&profile.user) else {
-            continue;
-        };
-        let prefix = match profile.secret_mode {
-            crate::config::WebSecretMode::Plain => "",
-            crate::config::WebSecretMode::Dd => "dd",
-        };
-        print_maestro_line(format!(
-            "User: {} ({:?})",
-            profile.user, profile.secret_mode
-        ));
-        print_maestro_line(format!(
-            "WEB: tg://webproxy?server={}&secret={prefix}{secret}",
-            profile.host,
-        ));
-    }
-}
-
-pub(crate) async fn write_beobachten_snapshot(path: &str, payload: &str) -> std::io::Result<()> {
-    if let Some(parent) = std::path::Path::new(path).parent()
-        && !parent.as_os_str().is_empty()
-    {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::write(path, payload).await
-}
-
-pub(crate) fn unit_label(value: u64, singular: &'static str, plural: &'static str) -> &'static str {
-    if value == 1 { singular } else { plural }
-}
-
-pub(crate) fn format_uptime(total_secs: u64) -> String {
-    const SECS_PER_MINUTE: u64 = 60;
-    const SECS_PER_HOUR: u64 = 60 * SECS_PER_MINUTE;
-    const SECS_PER_DAY: u64 = 24 * SECS_PER_HOUR;
-    const SECS_PER_MONTH: u64 = 30 * SECS_PER_DAY;
-    const SECS_PER_YEAR: u64 = 12 * SECS_PER_MONTH;
-
-    let mut remaining = total_secs;
-    let years = remaining / SECS_PER_YEAR;
-    remaining %= SECS_PER_YEAR;
-    let months = remaining / SECS_PER_MONTH;
-    remaining %= SECS_PER_MONTH;
-    let days = remaining / SECS_PER_DAY;
-    remaining %= SECS_PER_DAY;
-    let hours = remaining / SECS_PER_HOUR;
-    remaining %= SECS_PER_HOUR;
-    let minutes = remaining / SECS_PER_MINUTE;
-    let seconds = remaining % SECS_PER_MINUTE;
-
-    let mut parts = Vec::new();
-    if total_secs > SECS_PER_YEAR {
-        parts.push(format!("{} {}", years, unit_label(years, "year", "years")));
-    }
-    if total_secs > SECS_PER_MONTH {
-        parts.push(format!(
-            "{} {}",
-            months,
-            unit_label(months, "month", "months")
-        ));
-    }
-    if total_secs > SECS_PER_DAY {
-        parts.push(format!("{} {}", days, unit_label(days, "day", "days")));
-    }
-    if total_secs > SECS_PER_HOUR {
-        parts.push(format!("{} {}", hours, unit_label(hours, "hour", "hours")));
-    }
-    if total_secs > SECS_PER_MINUTE {
-        parts.push(format!(
-            "{} {}",
-            minutes,
-            unit_label(minutes, "minute", "minutes")
-        ));
-    }
-    parts.push(format!(
-        "{} {}",
-        seconds,
-        unit_label(seconds, "second", "seconds")
-    ));
-
-    format!("{} / {} seconds", parts.join(", "), total_secs)
-}
-
-#[allow(dead_code)]
-pub(crate) async fn wait_until_admission_open(admission_rx: &mut watch::Receiver<bool>) -> bool {
-    loop {
-        if *admission_rx.borrow() {
-            return true;
-        }
-        if admission_rx.changed().await.is_err() {
-            return *admission_rx.borrow();
-        }
-    }
-}
-
-pub(crate) fn is_expected_handshake_eof(err: &crate::error::ProxyError) -> bool {
-    expected_handshake_close_description(err).is_some()
-}
-
-pub(crate) fn peer_close_description(err: &crate::error::ProxyError) -> Option<&'static str> {
-    fn from_kind(kind: std::io::ErrorKind) -> Option<&'static str> {
-        match kind {
-            std::io::ErrorKind::ConnectionReset => Some("Peer reset TCP connection (RST)"),
-            std::io::ErrorKind::ConnectionAborted => {
-                Some("Peer aborted TCP connection during transport")
-            }
-            std::io::ErrorKind::BrokenPipe => Some("Peer closed write side (broken pipe)"),
-            std::io::ErrorKind::NotConnected => Some("Socket was already closed by peer"),
-            _ => None,
-        }
-    }
-
-    match err {
-        crate::error::ProxyError::Io(ioe) => from_kind(ioe.kind()),
-        crate::error::ProxyError::Stream(crate::error::StreamError::Io(ioe)) => {
-            from_kind(ioe.kind())
-        }
-        _ => None,
-    }
-}
-
-pub(crate) fn expected_handshake_close_description(
-    err: &crate::error::ProxyError,
-) -> Option<&'static str> {
-    fn from_kind(kind: std::io::ErrorKind) -> Option<&'static str> {
-        match kind {
-            std::io::ErrorKind::UnexpectedEof => {
-                Some("Peer closed before sending full 64-byte MTProto handshake")
-            }
-            std::io::ErrorKind::ConnectionReset => {
-                Some("Peer reset TCP connection during initial MTProto handshake")
-            }
-            std::io::ErrorKind::ConnectionAborted => {
-                Some("Peer aborted TCP connection during initial MTProto handshake")
-            }
-            std::io::ErrorKind::BrokenPipe => {
-                Some("Peer closed write side before MTProto handshake completed")
-            }
-            std::io::ErrorKind::NotConnected => Some("Handshake socket was already closed by peer"),
-            _ => None,
-        }
-    }
-
-    match err {
-        crate::error::ProxyError::Io(ioe) => from_kind(ioe.kind()),
-        crate::error::ProxyError::Stream(crate::error::StreamError::UnexpectedEof) => {
-            Some("Peer closed before sending full 64-byte MTProto handshake")
-        }
-        crate::error::ProxyError::Stream(crate::error::StreamError::Io(ioe)) => {
-            from_kind(ioe.kind())
-        }
-        _ => None,
-    }
-}
-
-pub(crate) async fn load_startup_proxy_config_snapshot(
-    url: &str,
-    cache_path: Option<&str>,
-    me2dc_fallback: bool,
-    label: &'static str,
-    upstream: Option<std::sync::Arc<UpstreamManager>>,
-) -> Option<ProxyConfigData> {
-    loop {
-        match fetch_proxy_config_with_raw_via_upstream(url, upstream.clone()).await {
-            Ok((cfg, raw)) => {
-                if !cfg.map.is_empty() {
-                    if let Some(path) = cache_path
-                        && let Err(e) = save_proxy_config_cache(path, &raw).await
-                    {
-                        warn!(error = %e, path, snapshot = label, "Failed to store startup proxy-config cache");
-                    }
-                    return Some(cfg);
-                }
-
-                warn!(
-                    snapshot = label,
-                    url, "Startup proxy-config is empty; trying disk cache"
-                );
-                if let Some(path) = cache_path {
-                    match load_proxy_config_cache(path).await {
-                        Ok(cached) if !cached.map.is_empty() => {
-                            info!(
-                                snapshot = label,
-                                path,
-                                proxy_for_lines = cached.proxy_for_lines,
-                                "Loaded startup proxy-config from disk cache"
-                            );
-                            return Some(cached);
-                        }
-                        Ok(_) => {
-                            warn!(
-                                snapshot = label,
-                                path, "Startup proxy-config cache is empty; ignoring cache file"
-                            );
-                        }
-                        Err(cache_err) => {
-                            debug!(
-                                snapshot = label,
-                                path,
-                                error = %cache_err,
-                                "Startup proxy-config cache unavailable"
-                            );
-                        }
-                    }
-                }
-
-                if me2dc_fallback {
-                    error!(
-                        snapshot = label,
-                        "Startup proxy-config unavailable and no saved config found; falling back to direct mode"
-                    );
-                    return None;
-                }
-
-                warn!(
-                    snapshot = label,
-                    retry_in_secs = 2,
-                    "Startup proxy-config unavailable and no saved config found; retrying because me2dc_fallback=false"
-                );
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-            Err(fetch_err) => {
-                if let Some(path) = cache_path {
-                    match load_proxy_config_cache(path).await {
-                        Ok(cached) if !cached.map.is_empty() => {
-                            info!(
-                                snapshot = label,
-                                path,
-                                proxy_for_lines = cached.proxy_for_lines,
-                                "Loaded startup proxy-config from disk cache"
-                            );
-                            return Some(cached);
-                        }
-                        Ok(_) => {
-                            warn!(
-                                snapshot = label,
-                                path, "Startup proxy-config cache is empty; ignoring cache file"
-                            );
-                        }
-                        Err(cache_err) => {
-                            debug!(
-                                snapshot = label,
-                                path,
-                                error = %cache_err,
-                                "Startup proxy-config cache unavailable"
-                            );
-                        }
-                    }
-                }
-
-                if me2dc_fallback {
-                    error!(
-                        snapshot = label,
-                        error = %fetch_err,
-                        "Startup proxy-config unavailable and no cached data; falling back to direct mode"
-                    );
-                    return None;
-                }
-
-                warn!(
-                    snapshot = label,
-                    error = %fetch_err,
-                    retry_in_secs = 2,
-                    "Startup proxy-config unavailable; retrying because me2dc_fallback=false"
-                );
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-        }
-    }
-}
+mod tests;

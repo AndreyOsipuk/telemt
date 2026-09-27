@@ -1,4 +1,5 @@
 use httpdate;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tracing::{debug, info, warn};
@@ -7,6 +8,8 @@ use super::http_fetch::https_get;
 use super::selftest::record_timeskew_sample;
 use crate::error::{ProxyError, Result};
 use crate::transport::UpstreamManager;
+#[cfg(unix)]
+use crate::util::secure_fs::{atomic_replace_async, read_regular_limited_async};
 
 pub const PROXY_SECRET_MIN_LEN: usize = 32;
 
@@ -58,7 +61,12 @@ pub async fn fetch_proxy_secret_with_upstream(
     match download_proxy_secret_with_max_len_via_upstream(max_len, upstream, proxy_secret_url).await
     {
         Ok(data) => {
-            if let Err(e) = tokio::fs::write(cache, &data).await {
+            #[cfg(unix)]
+            let cache_result =
+                atomic_replace_async(PathBuf::from(cache), data.clone(), 0o600).await;
+            #[cfg(not(unix))]
+            let cache_result = tokio::fs::write(cache, &data).await;
+            if let Err(e) = cache_result {
                 warn!(error = %e, "Failed to cache proxy-secret (non-fatal)");
             } else {
                 debug!(path = cache, len = data.len(), "Cached proxy-secret");
@@ -72,7 +80,11 @@ pub async fn fetch_proxy_secret_with_upstream(
     }
 
     // 2) Fallback to cache/file regardless of age; require len in bounds.
-    match tokio::fs::read(cache).await {
+    #[cfg(unix)]
+    let cached = read_regular_limited_async(PathBuf::from(cache), max_len).await;
+    #[cfg(not(unix))]
+    let cached = tokio::fs::read(cache).await;
+    match cached {
         Ok(data) if validate_proxy_secret_len(data.len(), max_len).is_ok() => {
             let age_hours = tokio::fs::metadata(cache)
                 .await

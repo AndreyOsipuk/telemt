@@ -21,12 +21,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
-pub(crate) use self::quota_store::QuotaStore;
+pub(crate) use self::quota_store::{QuotaReservation, QuotaStore, UserQuotaHandle};
 #[allow(unused_imports)]
 pub use self::replay::{ReplayChecker, ReplayStats};
 use self::telemetry::TelemetryPolicy;
 pub use self::tls_fingerprints::TlsFingerprintSnapshotRow;
+pub(crate) use self::users::UserConnectionObservation;
 use crate::config::MeWriterPickMode;
+use crate::proxy::user_connection_authority::UserConnectionAuthority;
 
 const ME_HANDSHAKE_ERROR_CODE_MAX: usize = 64;
 
@@ -148,6 +150,10 @@ pub struct Stats {
     conntrack_pressure_active_gauge: AtomicBool,
     conntrack_event_queue_depth_gauge: AtomicU64,
     conntrack_rule_apply_ok_gauge: AtomicBool,
+    conntrack_rule_reconcile_success_total: AtomicU64,
+    conntrack_rule_reconcile_error_total: AtomicU64,
+    conntrack_rule_rollback_success_total: AtomicU64,
+    conntrack_rule_rollback_error_total: AtomicU64,
     conntrack_delete_attempt_total: AtomicU64,
     conntrack_delete_success_total: AtomicU64,
     conntrack_delete_not_found_total: AtomicU64,
@@ -351,6 +357,7 @@ pub struct Stats {
     tls_fingerprints: tls_fingerprints::TlsFingerprintCollector,
     user_stats: DashMap<String, Arc<UserStats>>,
     quota_store: Arc<QuotaStore>,
+    connection_authority: Arc<UserConnectionAuthority>,
     user_stats_last_cleanup_epoch_secs: AtomicU64,
     start_time: parking_lot::RwLock<Option<Instant>>,
 }
@@ -392,11 +399,6 @@ impl UserStats {
         self.quota.used()
     }
 
-    #[inline]
-    pub(crate) fn refund_quota(&self, bytes: u64) {
-        self.quota.refund(bytes);
-    }
-
     /// Attempts one CAS reservation step against the quota counter.
     ///
     /// Callers control retry/yield policy. This primitive intentionally does
@@ -404,24 +406,60 @@ impl UserStats {
     /// with their own contention strategy.
     #[inline]
     pub fn quota_try_reserve(&self, bytes: u64, limit: u64) -> Result<u64, QuotaReserveError> {
+        self.quota
+            .try_reserve(bytes, limit)
+            .map(QuotaReservation::commit)
+    }
+
+    /// Reserves quota until a direct I/O attempt is settled.
+    #[inline]
+    pub(crate) fn quota_reserve(
+        &self,
+        bytes: u64,
+        limit: u64,
+    ) -> Result<QuotaReservation, QuotaReserveError> {
         self.quota.try_reserve(bytes, limit)
     }
 }
 
 impl Stats {
     pub fn new() -> Self {
-        Self::with_quota_store(Arc::new(QuotaStore::default()))
+        Self::with_process_authorities(
+            Arc::new(QuotaStore::default()),
+            Arc::new(UserConnectionAuthority::default()),
+        )
     }
 
+    #[cfg(test)]
     pub(crate) fn with_quota_store(quota_store: Arc<QuotaStore>) -> Self {
+        Self::with_process_authorities(quota_store, Arc::new(UserConnectionAuthority::default()))
+    }
+
+    /// Creates generation telemetry around process-owned enforcement authorities.
+    pub(crate) fn with_process_authorities(
+        quota_store: Arc<QuotaStore>,
+        connection_authority: Arc<UserConnectionAuthority>,
+    ) -> Self {
         let stats = Self {
             quota_store,
+            connection_authority,
             ..Self::default()
         };
         stats.apply_telemetry_policy(TelemetryPolicy::default());
         stats.refresh_cached_epoch_secs();
         *stats.start_time.write() = Some(Instant::now());
         stats
+    }
+
+    /// Returns the process-scoped quota authority for test runtime construction.
+    #[cfg(test)]
+    pub(crate) fn quota_store(&self) -> Arc<QuotaStore> {
+        Arc::clone(&self.quota_store)
+    }
+
+    /// Returns process-owned per-user connection admission.
+    pub(crate) fn connection_authority(&self) -> Arc<UserConnectionAuthority> {
+        Arc::clone(&self.connection_authority)
     }
 }
 

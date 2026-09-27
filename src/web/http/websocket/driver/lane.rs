@@ -5,9 +5,9 @@ use bytes::Bytes;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_util::sync::CancellationToken;
 
-use super::CarrierSocket;
 use super::io::{flush, process_lane, read_message, record_message, reserve_data, send};
-use crate::web::manager::{WebProcessRuntime, WebSocketBudgetLease, WebSocketConnection};
+use super::{CarrierSocket, DataPlaneEvent, DriverEvent, FairDataSelector};
+use crate::web::manager::{WebProcessRuntime, WebSocketConnection};
 use crate::web::session::{SessionCloseReason, WebSession, WebSocketLaneReservation};
 use crate::web::trace::{TraceDirection, TraceWebSocketContext};
 
@@ -35,25 +35,31 @@ pub(super) async fn run_lane(
     let write_timeout = Duration::from_secs(session.timeouts().websocket_write_secs);
     let maximum_message = session.limits().carrier_batch_bytes;
     let mut active = false;
+    let mut data_selector = FairDataSelector::default();
     loop {
         let down = session.poll_down_websocket_lane(reservation.lane_identity(), cursor);
-        tokio::pin!(down);
         let event = tokio::select! {
+            biased;
             _ = cancellation.cancelled() => return Err(()),
             _ = tokio::time::sleep_until(open_deadline.into()), if !active => return Err(()),
             _ = tokio::time::sleep_until(next_ping.into()) => DriverEvent::Liveness,
-            incoming = read_message(
-                socket,
-                runtime,
-                session.profile_key(),
-                &cancellation,
-                &mut read_budget,
-                maximum_message,
-                backpressure_timeout,
+            data = data_selector.select(
+                read_message(
+                    socket,
+                    runtime,
+                    session.profile_key(),
+                    &cancellation,
+                    &mut read_budget,
+                    maximum_message,
+                    backpressure_timeout,
+                ),
+                down,
             ) => {
-                DriverEvent::Incoming(incoming?)
+                match data {
+                    DataPlaneEvent::Incoming(incoming) => DriverEvent::Incoming(incoming?),
+                    DataPlaneEvent::Down(down) => DriverEvent::Down(down.map_err(|_| ())?),
+                }
             }
-            down = &mut down => DriverEvent::Down(down.map_err(|_| ())?),
         };
         match event {
             DriverEvent::Incoming((message, _budget)) => match message {
@@ -265,10 +271,4 @@ pub(super) async fn run_lane(
             }
         }
     }
-}
-
-enum DriverEvent {
-    Incoming((Message, Option<WebSocketBudgetLease>)),
-    Down(crate::web::session::PollResult),
-    Liveness,
 }

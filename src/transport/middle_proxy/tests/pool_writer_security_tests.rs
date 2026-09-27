@@ -15,7 +15,17 @@ use crate::crypto::SecureRandom;
 use crate::network::probe::NetworkDecision;
 use crate::stats::Stats;
 
-async fn make_pool() -> Arc<MePool> {
+/// Builds an isolated ME pool for writer-state tests.
+pub(super) async fn make_pool() -> Arc<MePool> {
+    make_pool_with_decision(NetworkDecision {
+        ipv4_me: true,
+        ..NetworkDecision::default()
+    })
+    .await
+}
+
+/// Builds an isolated ME pool with an explicit network-family policy.
+pub(super) async fn make_pool_with_decision(decision: NetworkDecision) -> Arc<MePool> {
     let general = GeneralConfig::default();
 
     MePool::new(
@@ -34,7 +44,7 @@ async fn make_pool() -> Arc<MePool> {
         HashMap::new(),
         HashMap::new(),
         None,
-        NetworkDecision::default(),
+        decision,
         None,
         Arc::new(SecureRandom::new()),
         Arc::new(Stats::new()),
@@ -152,6 +162,70 @@ async fn insert_writer(
         .register_writer(writer_id, tx, byte_budget)
         .await;
     pool.conn_count.fetch_add(1, Ordering::Relaxed);
+}
+
+#[tokio::test]
+async fn cancelled_writer_publication_leaves_no_ghost_state() {
+    let pool = make_pool().await;
+    let writer_id = 76_001;
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+    let (tx, mut rx) = mpsc::channel::<WriterCommand>(8);
+    let byte_budget = pool.new_writer_byte_budget();
+    let writer = MeWriter {
+        id: writer_id,
+        addr,
+        source_ip: addr.ip(),
+        writer_dc: 2,
+        generation: pool.current_generation(),
+        contour: Arc::new(AtomicU8::new(WriterContour::Active.as_u8())),
+        created_at: Instant::now(),
+        tx: tx.clone(),
+        byte_budget: byte_budget.clone(),
+        cancel: CancellationToken::new(),
+        degraded: Arc::new(AtomicBool::new(false)),
+        rtt_ema_ms_x10: Arc::new(AtomicU32::new(0)),
+        draining: Arc::new(AtomicBool::new(false)),
+        draining_started_at_epoch_secs: Arc::new(AtomicU64::new(0)),
+        drain_deadline_epoch_secs: Arc::new(AtomicU64::new(0)),
+        allow_drain_fallback: Arc::new(AtomicBool::new(false)),
+    };
+    let task_started = Arc::new(AtomicBool::new(false));
+    let task_started_writer = Arc::clone(&task_started);
+    let writer_task = async move {
+        task_started_writer.store(true, Ordering::Release);
+        let _ = rx.recv().await;
+    };
+    let task_registration = pool.lifecycle.try_register().unwrap();
+    let held_registration = pool.registry.prepare_writer_registration().await;
+
+    let publication =
+        pool.publish_prepared_writer(writer, tx, byte_budget, task_registration, writer_task);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), publication)
+            .await
+            .is_err()
+    );
+    drop(held_registration);
+
+    assert!(pool.writers.read().await.is_empty());
+    assert_eq!(pool.conn_count.load(Ordering::Relaxed), 0);
+    assert!(!task_started.load(Ordering::Acquire));
+    let (conn_id, _response_rx) = pool.registry.register().await;
+    assert!(
+        !pool
+            .registry
+            .bind_writer(
+                conn_id,
+                writer_id,
+                ConnMeta {
+                    target_dc: 2,
+                    client_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7300),
+                    our_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443),
+                    proto_flags: 0,
+                },
+            )
+            .await
+    );
 }
 
 async fn current_writer_ids(pool: &Arc<MePool>) -> HashSet<u64> {
