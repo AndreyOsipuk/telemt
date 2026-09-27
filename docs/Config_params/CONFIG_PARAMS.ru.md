@@ -10,10 +10,11 @@
 >
 > Параметры конфигурации, подробно описанные в этом документе, предназначены для опытных пользователей и для целей тонкой настройки. Изменение этих параметров без четкого понимания их функции может привести к нестабильности приложения или другому неожиданному поведению. Пожалуйста, действуйте осторожно и на свой страх и риск.
 
-> `Hot-Reload` показывает, применяет ли config watcher изменение без перезапуска процесса; `✘` означает, что для runtime-эффекта нужен перезапуск.
+> `Hot-Reload` показывает, применяет ли config watcher изменение напрямую. `✘` означает, что watcher его не применяет; в зависимости от поля для полного эффекта требуется in-process reload runtime generation либо перезапуск процесса.
 
 # Содержание
- - [Ключи верхнего уровня](#top-level-keys)
+ - [Ключи верхнего уровня](#ключи-верхнего-уровня)
+ - [logging](#logging)
  - [general](#general)
  - [general.modes](#generalmodes)
  - [general.links](#generallinks)
@@ -42,6 +43,7 @@
 | --- | ---- | ------- | ---------- |
 | [`include`](#include) | `String` (специальная директива) | — | `✔` |
 | [`show_link`](#show_link) | `"*"` or `String[]` | `[]` (`ShowLink::None`) | `✘` |
+| [`logging`](#logging) | Таблица | значения по умолчанию | `✘` |
 | [`dc_overrides`](#dc_overrides) | `Map<String, String or String[]>` | `{}` | `✘` |
 | [`default_dc`](#default_dc) | `u8` | — (эффективный резервный вариант: `2` в ME маршрутизации) | `✘` |
 | [`beobachten`](#beobachten) | `bool` | `true` | `✘` |
@@ -80,7 +82,7 @@
     "203" = ["149.154.175.100:443", "91.105.192.100:443"]
     ```
 ## default_dc
-  - **Ограничения / валидация**: целочисленное значение в диапазоне `1..=5`. Если значение выходит за пределы диапазона, клиент направляется к DC1; Middle-end маршрутизация направляет клиента к DC2, если DC1 не задан.
+  - **Ограничения / валидация**: Предполагаемый диапазон — `1..=5`. Явно заданное значение вне диапазона в Direct relay приводит к поведению DC1; при отсутствии значения Middle-End routing использует DC2.
   - **Описание**: DC по умолчанию, используемый для нестандартных DC. Когда клиент запрашивает неизвестный/нестандартный DC без переопределения, telemt направляет его в этот кластер по умолчанию.
   - **Пример**:
 
@@ -88,6 +90,84 @@
     # When a client requests an unknown/non-standard DC with no override,
     # route it to this default cluster (1..=5).
     default_dc = 2
+    ```
+
+# [logging]
+
+| Ключ | Тип | По умолчанию | Hot-Reload |
+| --- | --- | --- | --- |
+| [`destination`](#loggingdestination) | `"stderr"` / `"syslog"` / `"file"` | `"stderr"` | `✘` |
+| [`path`](#loggingpath) | `String` | — | `✘` |
+| [`rotation`](#loggingrotation) | `"never"` / `"minutely"` / `"hourly"` / `"daily"` / `"weekly"` | `"never"` | `✘` |
+| [`max_size_bytes`](#loggingmax_size_bytes) | `u64` | `0` | `✘` |
+| [`max_files`](#loggingmax_files) | `usize` | `0` | `✘` |
+| [`max_age_secs`](#loggingmax_age_secs) | `u64` | `0` | `✘` |
+
+## logging.destination
+  - **Ограничения / валидация**: Допустимы `stderr`, `syslog` или `file`. `syslog` поддерживается только на Unix. Для `file` требуется `logging.path`.
+  - **Описание**: Выбирает runtime log destination. CLI-флаги имеют приоритет.
+  - **Пример**:
+
+    ```toml
+    [logging]
+    destination = "file"
+    path = "/var/log/telemt.log"
+    ```
+## logging.path
+  - **Ограничения / валидация**: Обязателен при `logging.destination = "file"`; не может быть пустым.
+  - **Описание**: Путь для файлового логирования. При time-based rotation имя файла используется как rolling prefix.
+  - **Пример**:
+
+    ```toml
+    [logging]
+    destination = "file"
+    path = "/var/log/telemt.log"
+    ```
+## logging.rotation
+  - **Ограничения / валидация**: Допустимы `never`, `minutely`, `hourly`, `daily` или `weekly`.
+  - **Описание**: Интервал time-based file rotation. `weekly` выполняет ротацию на границе воскресенья по UTC. `never` пишет точно в `logging.path`, если size rotation не включена.
+  - **Пример**:
+
+    ```toml
+    [logging]
+    destination = "file"
+    path = "/var/log/telemt.log"
+    rotation = "daily"
+    ```
+## logging.max_size_bytes
+  - **Ограничения / валидация**: `0` отключает size rotation.
+  - **Описание**: Ротирует непустой активный файл перед записью следующей целой записи, если она превысит этот предел в байтах.
+  - **Пример**:
+
+    ```toml
+    [logging]
+    destination = "file"
+    path = "/var/log/telemt.log"
+    max_size_bytes = 104857600
+    ```
+## logging.max_files
+  - **Ограничения / валидация**: `0` отключает retention по количеству файлов.
+  - **Описание**: Сохраняет не более указанного числа совпадающих log files, включая активный файл и архивы. Активный файл retention cleanup не удаляет.
+  - **Пример**:
+
+    ```toml
+    [logging]
+    destination = "file"
+    path = "/var/log/telemt.log"
+    rotation = "daily"
+    max_files = 14
+    ```
+## logging.max_age_secs
+  - **Ограничения / валидация**: `0` отключает retention по возрасту.
+  - **Описание**: Удаляет ротированные log files старше указанного числа секунд по времени изменения. Активный файл retention cleanup не удаляет.
+  - **Пример**:
+
+    ```toml
+    [logging]
+    destination = "file"
+    path = "/var/log/telemt.log"
+    rotation = "daily"
+    max_age_secs = 1209600
     ```
 
 # [general]
@@ -124,6 +204,7 @@
 | [`me_keepalive_payload_random`](#me_keepalive_payload_random) | `bool` | `true` | `✘` |
 | [`rpc_proxy_req_every`](#rpc_proxy_req_every) | `u64` | `0` | `✘` |
 | [`me_writer_cmd_channel_capacity`](#me_writer_cmd_channel_capacity) | `usize` | `4096` | `✘` |
+| [`me_writer_byte_budget_bytes`](#me_writer_byte_budget_bytes) | `usize` | `33570816` | `✘` |
 | [`me_route_channel_capacity`](#me_route_channel_capacity) | `usize` | `768` | `✘` |
 | [`me_c2me_channel_capacity`](#me_c2me_channel_capacity) | `usize` | `1024` | `✘` |
 | [`me_c2me_send_timeout_ms`](#me_c2me_send_timeout_ms) | `u64` | `4000` | `✘` |
@@ -136,6 +217,7 @@
 | [`me_d2c_frame_buf_shrink_threshold_bytes`](#me_d2c_frame_buf_shrink_threshold_bytes) | `usize` | `262144` | `✔` |
 | [`direct_relay_copy_buf_c2s_bytes`](#direct_relay_copy_buf_c2s_bytes) | `usize` | `65536` | `✔` |
 | [`direct_relay_copy_buf_s2c_bytes`](#direct_relay_copy_buf_s2c_bytes) | `usize` | `262144` | `✔` |
+| [`direct_relay_buffer_budget_max_bytes`](#direct_relay_buffer_budget_max_bytes) | `usize` | `0` | `✘` |
 | [`crypto_pending_buffer`](#crypto_pending_buffer) | `usize` | `262144` | `✘` |
 | [`max_client_frame`](#max_client_frame) | `usize` | `16777216` | `✘` |
 | [`desync_all_full`](#desync_all_full) | `bool` | `false` | `✔` |
@@ -221,13 +303,14 @@
 | [`me_pool_drain_soft_evict_per_writer`](#me_pool_drain_soft_evict_per_writer) | `u8` | `2` | `✘` |
 | [`me_pool_drain_soft_evict_budget_per_core`](#me_pool_drain_soft_evict_budget_per_core) | `u16` | `16` | `✘` |
 | [`me_pool_drain_soft_evict_cooldown_ms`](#me_pool_drain_soft_evict_cooldown_ms) | `u64` | `1000` | `✘` |
-| [`me_bind_stale_mode`](#me_bind_stale_mode) | `"never"`, `"ttl"`, or `"always"` | `"ttl"` | `✔` |
+| [`me_bind_stale_mode`](#me_bind_stale_mode) | `"never"`, `"ttl"`, or `"always"` | `"never"` | `✔` |
 | [`me_bind_stale_ttl_secs`](#me_bind_stale_ttl_secs) | `u64` | `90` | `✔` |
 | [`me_pool_min_fresh_ratio`](#me_pool_min_fresh_ratio) | `f32` | `0.8` | `✔` |
 | [`me_reinit_drain_timeout_secs`](#me_reinit_drain_timeout_secs) | `u64` | `90` | `✔` |
 | [`proxy_secret_auto_reload_secs`](#proxy_secret_auto_reload_secs) | `u64` | `3600` | `✔` |
 | [`proxy_config_auto_reload_secs`](#proxy_config_auto_reload_secs) | `u64` | `3600` | `✔` |
 | [`me_reinit_singleflight`](#me_reinit_singleflight) | `bool` | `true` | `✔` |
+| [`me_reinit_max_concurrency`](#me_reinit_max_concurrency) | `usize` | `2` | `✔` |
 | [`me_reinit_trigger_channel`](#me_reinit_trigger_channel) | `usize` | `64` | `✘` |
 | [`me_reinit_coalesce_window_ms`](#me_reinit_coalesce_window_ms) | `u64` | `200` | `✔` |
 | [`me_deterministic_writer_sort`](#me_deterministic_writer_sort) | `bool` | `true` | `✔` |
@@ -266,6 +349,8 @@
     [general]
     config_strict = true
     ```
+
+  - **Известное ограничение**: В этой ревизии `config_strict = true` отклоняет иначе поддерживаемые ключи `access.user_source_deny` и `[[upstreams]].prefer`. Оставляйте strict mode выключенным, если используется любой из них.
 ## prefer_ipv6
   - **Ограничения / валидация**: Устарело. Используйте `network.prefer`.
   - **Описание**: Устаревший флаг предпочтения IPv6 перенесен в `network.prefer`.
@@ -402,8 +487,8 @@
     stun_nat_probe_concurrency = 8
     ```
 ## middle_proxy_pool_size
-  - **Ограничения / валидация**: `usize`.
-  - **Описание**: Размер пула записи ME.
+  - **Ограничения / валидация**: `usize`. Перед передачей в ME initialization значение нормализуется как `max(value, 1)`.
+  - **Описание**: Не влияющий на enforcement compatibility input, который сейчас выводится в ME initialization log. Active writer targets определяет DC-family floor policy, а не это значение.
   - **Пример**:
 
     ```toml
@@ -494,7 +579,7 @@
     rpc_proxy_req_every = 0
     ```
 ## me_writer_cmd_channel_capacity
-  - **Ограничения / валидация**: Должно быть `> 0`.
+  - **Ограничения / валидация**: Должно быть в пределах `1..=16384`.
   - **Описание**: Ёмкость (размер) канала команд для каждого отправителя.
   - **Пример**:
 
@@ -502,8 +587,17 @@
     [general]
     me_writer_cmd_channel_capacity = 4096
     ```
+## me_writer_byte_budget_bytes
+  - **Ограничения / валидация**: Должно быть кратно `16384` и находиться между динамическим минимумом и `268435456`. Минимум равен `2 * general.max_client_frame + 256` с округлением вверх до `16384`; при стандартном размере frame он равен `33570816`.
+  - **Описание**: Бюджет резидентной памяти для очереди данных каждого ME writer. File watcher не пересоздаёт существующие writer для этого поля; значение применяется при построении нового поколения ME/runtime через API либо после перезапуска.
+  - **Пример**:
+
+    ```toml
+    [general]
+    me_writer_byte_budget_bytes = 33570816
+    ```
 ## me_route_channel_capacity
-  - **Ограничения / валидация**: Должно быть `> 0`.
+  - **Ограничения / валидация**: Должно быть в пределах `1..=8192`.
   - **Описание**: Количество ответов от ME, которое может одновременно находиться “в пути” или в очереди для одного соединения.
   - **Пример**:
 
@@ -512,7 +606,7 @@
     me_route_channel_capacity = 768
     ```
 ## me_c2me_channel_capacity
-  - **Ограничения / валидация**: Должно быть `> 0`.
+  - **Ограничения / валидация**: Должно быть в пределах `1..=8192`.
   - **Описание**: Емкость очереди команд для каждого клиента (client reader -> ME sender).
   - **Пример**:
 
@@ -610,6 +704,15 @@
     [general]
     direct_relay_copy_buf_s2c_bytes = 262144
     ```
+## direct_relay_buffer_budget_max_bytes
+  - **Ограничения / валидация**: `0` либо значение, кратное `4096`, в диапазоне `16777216..=2147483648`.
+  - **Описание**: Process-wide жёсткий предел памяти Direct relay copy buffers; `0` вычисляет его при запуске по ограничениям памяти cgroup/хоста. Изменение откладывается до перезапуска процесса.
+  - **Пример**:
+
+    ```toml
+    [general]
+    direct_relay_buffer_budget_max_bytes = 0
+    ```
 ## crypto_pending_buffer
   - **Ограничения / валидация**: `usize` (байт).
   - **Описание**:Максимальный объём ожидающих (неотправленных) зашифрованных данных в буфере client writer (в байтах).
@@ -620,7 +723,7 @@
     crypto_pending_buffer = 262144
     ```
 ## max_client_frame
-  - **Ограничения / валидация**: `usize` (байт).
+  - **Ограничения / валидация**: Должно быть в пределах `4096..=16777216` (байт).
   - **Описание**: Максимально допустимый размер кадра MTProto клиента (в байтах).
   - **Пример**:
 
@@ -710,7 +813,7 @@
     me_warmup_step_jitter_ms = 300
     ```
 ## me_reconnect_max_concurrent_per_dc
-  - **Ограничения / валидация**: `u32`.
+  - **Ограничения / валидация**: `u32`. Runtime использует эффективное значение `max(value, 1)`, поэтому `0` работает как `1`.
   - **Описание**: Ограничить количество одновременно работающих процессов переподключения (reconnect workers) к DC во время восстановления работоспособности.
   - **Пример**:
 
@@ -737,7 +840,7 @@
     me_reconnect_backoff_cap_ms = 30000
     ```
 ## me_reconnect_fast_retry_count
-  - **Ограничения / валидация**: `u32`.
+  - **Ограничения / валидация**: `u32`. Runtime использует эффективное значение `max(value, 1)`, поэтому `0` работает как `1`.
   - **Описание**: Лимит немедленных повторных попыток подключения перед тем, как включается долгий backoff (увеличивающаяся задержка между попытками).
   - **Пример**:
 
@@ -1133,7 +1236,7 @@
     me_route_hybrid_max_wait_ms = 3000
     ```
 ## me_route_blocking_send_timeout_ms
-  - **Ограничения / валидация**: Должно быть в пределах `0..=5000` (миллисекунд). `0` - неограниченное время ожидания.
+  - **Ограничения / валидация**: Должно быть в пределах `1..=5000` (миллисекунд).
   - **Описание**: Максимальное время ожидания для блокировки отправки через канал маршрутизации при fallback.
   - **Пример**:
 
@@ -1316,7 +1419,7 @@
     ```
 ## me_pool_drain_ttl_secs
   - **Ограничения / валидация**: `u64` (секунды). `0` - отключает период drain-TTL и подавляет предупреждения drain-TTL для ненулевых (непустых) writer’ов, находящихся в состоянии **draining**.
-  - **Описание**: Временной интервал Drain-TTL для устаревших ME writer’ов после изменения карты endpoint’ов. В течение TTL устаревшие writer’ы могут использоваться только как fallback для новых биндов (в зависимости от политики биндов).
+  - **Описание**: Возрастной порог предупреждений о долгом drain после изменения endpoint map и нижняя граница нормализации force-close timeout. Разрешение stale binds отдельно задают `me_bind_stale_mode` и `me_bind_stale_ttl_secs`.
   - **Пример**:
 
     ```toml
@@ -1396,7 +1499,7 @@
     ```
 ## me_bind_stale_mode
   - **Ограничения / валидация**: `"never"`, `"ttl"` или `"always"`.
-  - **Описание**: Политика разрешения новых биндов к устаревшим writer’ам.
+  - **Описание**: Политика новых binds на stale draining writers в непокрытых DC-family groups. Значение по умолчанию `never` требует полного покрытия groups перед частичным hardswap commit; `ttl` и `always` разрешают ограниченный policy fallback.
   - **Пример**:
 
     ```toml
@@ -1406,7 +1509,7 @@
     ```
 ## me_bind_stale_ttl_secs
   - **Ограничения / валидация**: `u64`.
-  - **Описание**: TTL для разрешения биндов к устаревшим writer’ам при режиме `ttl`.
+  - **Описание**: TTL для разрешения binds к stale writers в режиме `ttl`; `0` отключает TTL expiry для разрешённых draining writers.
   - **Пример**:
 
     ```toml
@@ -1416,7 +1519,7 @@
     ```
 ## me_pool_min_fresh_ratio
   - **Ограничения / валидация**: Должно быть в пределах `[0.0, 1.0]`.
-  - **Описание**: Минимальный коэффициент актуального (fresh) покрытия DC перед началом удаления устаревших writer’ов.
+  - **Описание**: Минимальная доля fresh DC-family coverage при generation commit. При `me_bind_stale_mode = "never"` отсутствующие groups блокируют commit, даже если эта доля достигнута.
   - **Пример**:
 
     ```toml
@@ -1425,8 +1528,8 @@
     me_pool_min_fresh_ratio = 0.9
     ```
 ## me_reinit_drain_timeout_secs
-  - **Ограничения / валидация**: `u64`. `0` - используется безопасный системный fallback. Если значение `> 0` и `< me_pool_drain_ttl_secs`, повышает его до значения TTL.
-  - **Описание**: Таймаут принудительного закрытия устаревших writer’ов при очистке/повторной инициализации. При `0` используется безопасный системный fallback (300 секунд).
+  - **Ограничения / валидация**: `u64`. `0` сначала выбирает runtime safety fallback 300 секунд; затем effective timeout повышается как минимум до `me_pool_drain_ttl_secs`.
+  - **Описание**: Таймаут принудительного закрытия draining stale writers. Effective value равен максимуму из заданного ненулевого значения (или 300 секунд при `0`) и drain TTL.
   - **Пример**:
 
     ```toml
@@ -1467,9 +1570,18 @@
     [general]
     me_reinit_singleflight = true
     ```
+## me_reinit_max_concurrency
+  - **Ограничения / валидация**: Должно быть в пределах `[1, 8]`. Эффективное значение равно `1`, пока `me_reinit_singleflight = true`.
+  - **Описание**: Ограничивает число одновременных прогревов поколений ME; лишние триггеры объединяются в один ожидающий повторный запуск.
+  - **Пример**:
+
+    ```toml
+    [general]
+    me_reinit_max_concurrency = 2
+    ```
 ## me_reinit_trigger_channel
-  - **Ограничения / валидация**: Должно быть `> 0`.
-  - **Описание**: Емкость очереди триггеров для планировщика повторной инициализации.
+  - **Ограничения / валидация**: Должно быть в пределах `[1, 4096]`.
+  - **Описание**: Ёмкость очереди triggers для reinit scheduler. Новая runtime generation создаёт канал из этого значения; один file watcher не изменяет размер активного канала.
   - **Пример**:
 
     ```toml
@@ -2487,6 +2599,8 @@ WEB-режим переносит MTProxy-трафик Telegram Desktop внут
 | `carriers` | `false` или непустой массив уникальных carrier | `false` | `✔` |
 | `carrier_learning` | `bool` | `true` | `✔` |
 | `carrier_negotiation_aggressiveness` | `"conservative"`, `"balanced"` или `"aggressive"` | `"conservative"` | `✔` |
+| `decoy_fasttrack_mode` | `"off"`, `"shadow"` или `"enforce"` | `"off"` | `✘` |
+| `http_connection_capacity_action` | `"drop"`, `"wait"` или `"respond"` | `"drop"` | `✔` |
 | `debug` | таблица | выключено, ограниченные defaults | `✔` |
 | `limits` | таблица | ограниченные defaults | `✘` |
 | `timeouts` | таблица | ограниченные defaults | `✔` |
@@ -2495,6 +2609,10 @@ WEB-режим переносит MTProxy-трафик Telegram Desktop внут
 Для `enabled = true` нужен как минимум один доступный по сетевой политике WEB-listener, один vhost и один профиль в каждом vhost. `https` сохраняет сериализованный HTTPS transport и требует `max_http_handlers >= 2`. В `https-lanes` stream zero и каждый logical stream получают независимые uplink sequence, downlink cursor, retry и long poll; carrier требует `max_http_handlers >= 4` и публичного HTTP/2 на TLS-терминаторе. `websocket` переносит все logical streams через одно упорядоченное RFC 6455 connection, а `websocket-lanes` выделяет отдельное connection каждому ненулевому stream и изолирует сбои lane. Оба WebSocket carrier используют `GET /api/v1/ws` после создания HTTPS-сессии и требуют от TLS-терминатора сохранять HTTP/1.1 Upgrade headers.
 
 Если `carriers` отсутствует или равен `false`, auto-negotiation и обучение выключены, а `carrier` задаёт единственный режим. Непустой массив `carriers` включает стартовый перебор в заданном порядке; `carrier` ровно один раз добавляется последним fallback-вариантом. Пустой массив, дубликаты и `true` запрещены. Клиент может перейти к следующему кандидату только до commit carrier; для смены carrier после commit нужна новая сессия. Native-клиент без метаданных, включая Telegram iOS, всегда использует настроенный фиксированный `carrier`, даже при включённом auto-negotiation. Текущий iOS поддерживает только `https`, поэтому такой deployment должен задавать `carrier = "https"`. Классификация User-Agent CFNetwork и Darwin не определяет поддержку carrier. Явные capabilities нативного iOS пересекаются с `{https}`; capabilities остальных явных клиентов применяются как переданы.
+
+`http_connection_capacity_action` применяется только после того, как Telemt принял приватное WEB TCP connection и исчерпал `max_http_connections`. `drop` сохраняет немедленное закрытие. `respond` отправляет пустой повторяемый `503 Service Unavailable` с `Retry-After: 1`, `Cache-Control: no-store` и `Connection: close`. `wait` ожидает обычную capacity не более `http_overload_timeout_ms`, затем переходит к нормальной HTTP-обработке; по timeout отправляется тот же ограниченный `503`. Вне обычной capacity могут ожидать или отвечать не более `max_http_overload_connections` принятых sockets.
+
+`decoy_fasttrack_mode` требует перезапуска и управляет только capability work для `GET/HEAD` на настроенном base root. `off` сохраняет полный scan, `shadow` считает подходящие requests, но не пропускает scan, а `enforce` пропускает его только для `HEAD` или отсутствующего/неканонического параметра `bridge`. Канонический bridge-shaped `GET` всегда сканирует все профили выбранного vhost. Оптимизация не ограничивает враждебные канонические probes; `enforce` необходимо проверять на различимость timing за production TLS-терминатором.
 
 `carrier_learning` действует только при включённом auto-negotiation. Обучение локально для процесса, хранится в памяти, ограничено и учитывает только положительный результат: evidence добавляет лишь carrier, достигший определённого сервером состояния healthy. `conservative` требует наиболее широкой выборки и отключает ранжирование по IP, `balanced` использует умеренные пороги для User-Agent/профиля и допустимый публичный IP только для разрешения равенства, а `aggressive` реагирует на первые ограниченные samples. Сообщённые клиентом ошибки остаются только диагностикой и не создают отрицательный evidence. Reload применяет новую policy к новым цепочкам negotiation и инвалидирует несовместимый сохранённый evidence. Отключение WEB прекращает выдачу новых bridge- и session-credentials; для отзыва активных сессий отдельного пользователя используйте users API.
 
@@ -2506,6 +2624,7 @@ WEB-режим переносит MTProxy-трафик Telegram Desktop внут
 | --- | --- | --- | --- |
 | `enabled` | `bool` | `false` | Включает WEB HTTP, WebSocket-message, frame и lifecycle debug records. |
 | `capture_lifecycle` | `bool` | `true` | Записывает типизированные события bridge, session, stream, handshake, relay и close. |
+| `sideband` | `bool` | `false` | Включает lifecycle diagnostics из сгенерированного bridge; действует только вместе с `enabled` и `capture_lifecycle`. |
 | `capture_headers` | `bool` | `true` | Сохраняет имена headers и только разрешённые значения без credentials. |
 | `capture_timings` | `bool` | `true` | Сохраняет timing points для request body, готового response, response body и обработки WebSocket messages. |
 | `capture_frames` | `bool` | `true` | Разбирает bounded carrier bodies в тип frame, stream ID, длину, WINDOW и метаданные ошибок, не сохраняя frame payload отдельно. |
@@ -2516,6 +2635,8 @@ WEB-режим переносит MTProxy-трафик Telegram Desktop внут
 | `max_window_secs` | `u64` | `3600` | Максимальное окно наблюдения, принимаемое `/web-status`; при валидации ограничено значением 86400. |
 
 Изменение `enabled` или любого поля capture очищает сохранённые записи и отклоняет commits, начатые в предыдущую policy epoch. Изменение только стандартного или максимального окна наблюдения сохраняет совместимые записи. `full` сохраняет полное тело распознанного carrier только до `web.limits.max_body_bytes`; decoy bodies всегда остаются ограничены настроенным prefix. Prefix, который помещается только в одновременно увеличенную restart-only ёмкость, откладывается вместе с `web.debug` до перезапуска. URI queries никогда не сохраняются, значения credential headers исключаются, копии body очищаются от известных WEB capabilities и bearer tokens, а ключи профилей представлены только domain-separated fingerprint из 16 hex-символов.
+
+Когда `enabled`, `sideband` и `capture_lifecycle` одновременно включены, новые сгенерированные bridge pages отправляют ограниченные одноразовые lifecycle events по точному настроенному base плюс `api/v1/diagnostic`. Это внутренний route Telemt, а не публичный Control API. Уже выданные bridge documents не получают sideband после reload.
 
 Аутентифицированное JSON-управление может явно очистить ring через `POST /v1/runtime/web/debug/clear`: обязательный process `runtime_instance` защищает от устаревшего controller, возвращаемый epoch отсекает in-flight writers, а `leased_bytes` показывает память, всё ещё удерживаемую уже отрисовываемыми snapshots.
 
@@ -2531,6 +2652,7 @@ WEB-режим переносит MTProxy-трафик Telegram Desktop внут
 | `carrier_batch_bytes` | `usize` | `2097152` | Максимальный закодированный downlink batch. |
 | `max_frames_per_body` | `usize` | `4096` | Максимальное число frames в одном carrier body. |
 | `max_http_connections` | `usize` | `1024` | Принятые WEB HTTP connections на весь процесс. |
+| `max_http_overload_connections` | `usize` | `64` | Принятые перегруженные sockets, которым разрешено ожидать или отправить ограниченный повторяемый ответ вне обычной HTTP capacity. |
 | `max_http_handlers` | `usize` | `512` | Одновременно выполняемые HTTP handlers на весь процесс; HTTPS lanes могут занять long polls не более половины лимита, оставляя остаток для session, uplink и control work. |
 | `max_lane_open_waits_per_session` | `usize` | `16` | Канонические downlink polls с cursor zero, которые могут ожидать конкурирующий lane `OPEN` в одной сессии. |
 | `pending_bytes_per_lane` | `usize` | `8388608` | Байты queued и resident `DATA`, разрешённые одной независимой HTTPS- или WebSocket-lane. |
@@ -2585,6 +2707,7 @@ WEB-режим переносит MTProxy-трафик Telegram Desktop внут
 | `long_poll_secs` | `u64` | `25` | `✔` | Максимальная длительность пустого downlink long poll. |
 | `bridge_request_secs` | `u64` | `10` | `✔` | Deadline одной HTTP attempt в bridge до полного чтения response body; для `/down` дополнительно разрешён `long_poll_secs`. Диапазон `1..=60`. |
 | `bridge_retry_secs` | `u64` | `90` | `✔` | Абсолютное окно повторов bridge, включая attempts и backoff; диапазон `1..=300`, не меньше `bridge_request_secs`. |
+| `bridge_recovery_secs` | `u64` | `15` | `✔` | Абсолютное окно recovery после commit для сохранившегося bridge document; диапазон `1..=60`, фиксируется при начале recovery. |
 | `carrier_probe_coalesce_ms` | `u64` | `0` | `✔` | Опциональное ожидание bridge после `OPEN` для соответствующего `DATA`; миллисекунды в диапазоне `0..=10`, где `0` сохраняет немедленный probe. |
 | `lane_open_wait_secs` | `u64` | `2` | `✔` | Ожидание канонического downlink с cursor zero, опередившего свой lane `OPEN`; не больше `long_poll_secs`. |
 | `carrier_health_secs` | `u64` | `30` | `✔` | Интервал наблюдения после commit, необходимый для добавления carrier-learning evidence. |
@@ -2598,6 +2721,7 @@ WEB-режим переносит MTProxy-трафик Telegram Desktop внут
 | `bootstrap_lifetime_secs` | `u64` | `120` | `✔` | Срок неиспользованного bootstrap и replay-marker закрытого token. |
 | `reconnect_grace_secs` | `u64` | `120` | `✔` | Максимальная неактивность carrier до закрытия сессии. |
 | `http_idle_secs` | `u64` | `75` | `✔` | Лимит простоя между HTTP-обменами и при отсутствии прогресса уже выданного response body. Явно ограниченные фазы request body, long poll, decoy и ожидания Upgrade сохраняют собственные deadlines и не обрываются этим таймером. Значение фиксируется при приёме connection. |
+| `http_overload_timeout_ms` | `u64` | `250` | `✔` | Deadline каждой фазы в миллисекундах для ожидания capacity или записи повторяемого ответа после принятия перегруженного socket; диапазон `1..=60000`. Timeout ожидания и запись ответа получают не более одного бюджета фазы каждый. |
 | `shutdown_secs` | `u64` | `15` | `✔` | Один абсолютный бюджет завершения процесса, общий для всех listener acceptors и connections, а также для WEB sessions и auxiliary tasks. Активное значение фиксируется один раз при начале shutdown. |
 | `decoy_header_secs` | `u64` | `30` | `✔` | Deadline подключения и получения response head от HTTP decoy. |
 
@@ -2606,11 +2730,12 @@ WEB-режим переносит MTProxy-трафик Telegram Desktop внут
 | Ключ | Тип | Обязательный | Hot-Reload | Описание |
 | --- | --- | --- | --- | --- |
 | `host` | `String` | да | `✔` | Уникальный канонический lowercase ACE FQDN без порта, пути, credentials и завершающей точки. |
+| `base_path` | `String` | нет | `✔` | Точный регистрозависимый WEB-prefix без начального и завершающего слеша; по умолчанию пуст. Не более 128 ASCII-байт в разделённых слешами сегментах `[A-Za-z0-9][A-Za-z0-9_-]*`. |
 | `public_addr` | `SocketAddr` | да | `✔` | Конкретный публичный IP на порту `443`, используемый во внутреннем destination tuple relay. |
 | `decoy` | таблица | да | `✔` | Обычный сайт для неаутентифицированного или некорректного трафика. |
 | `profiles` | массив таблиц | при включённом WEB | `✔` | Явные пользователи и client secret modes для этого hostname. |
 
-Hostname нормализуется при валидации и должен приниматься Telegram Desktop. Bootstrap является bearer credential: адрес клиента и его IP-семейство могут измениться до создания session. Неиспользованный bootstrap остаётся действительным после reload конфигурации, только пока активен профиль с той же identity.
+Hostname нормализуется при валидации и должен приниматься Telegram Desktop. Пустой `base_path` сохраняет root-capability v1 и прежний шестнадцатеричный secret ссылки. Непустой путь использует capability v2 по host/path и Telegram Desktop path-ссылку с percent-encoded `HOST/BASE` и base64url-маркером secret `0x70`. Маршрутизация требует точного prefix с завершающим слешем и никогда не перенаправляет, не нормализует и не удаляет его. Bootstrap является bearer credential: адрес клиента и его IP-семейство могут измениться до создания session. Неиспользованный bootstrap остаётся действительным после reload конфигурации, только пока активен профиль с той же identity.
 
 # [web.vhosts.decoy]
 
@@ -2636,6 +2761,7 @@ Hostname нормализуется при валидации и должен п
 ## Lifecycle WEB и управление через API
 
 - Config watcher и generation reload применяют `web.enabled`, policy carrier/negotiation, `web.debug`, `web.timeouts`, vhosts, profiles и decoy snapshots без перезапуска процесса. Валидируется и активируется один immutable expanded source snapshot; watcher candidate generation запускается только после активации этого поколения. Существующие сессии и начатые negotiation chains сохраняют issuance-time carrier candidates, limits, timeouts и абсолютные deadlines; новые bridge sessions используют одно зафиксированное активное поколение.
+- Изменение `base_path` атомарно заменяет и маршрут новых запросов, и производную capability. Сначала выпустите новые ссылки и завершите затронутые активные sessions: установленные WebSockets и уже маршрутизированные обмены продолжаются; последующие запросы к старому base с подлинным для процесса bootstrap- или session-token получают локальный no-store `404`, а ставшая неактивной прежняя capability обрабатывается как обычный decoy traffic.
 - Состав WEB-listeners и их trust policy в `server.listeners`, а также все значения `web.limits` принадлежат процессу и требуют перезапуска.
 - `GET /v1/config` возвращает полное авторское дерево `[web]`, кроме производного snapshot `web.runtime`. `PATCH /v1/config` принимает sparse object `web`, глубоко сливает tables, целиком заменяет arrays, валидирует полный candidate и указывает `web.limits` в `deferred_process_fields` до перезапуска.
 - `GET /v1/runtime/web/status`, `/sessions`, `/sessions/{session_ref}` и `/operations/{operation_id}` предоставляют bounded несекретное runtime-состояние. POST controls закрывают выбранные сессии, очищают debug или сбрасывают carrier learning и требуют текущий случайный `runtime_instance`.
@@ -2763,8 +2889,10 @@ Hostname нормализуется при валидации и должен п
 | [`tls_fetch_scope`](#tls_fetch_scope) | `String` | `""` | `✘` |
 | [`tls_fetch`](#tls_fetch) | `Table` | built-in defaults | `✘` |
 | [`mask`](#mask) | `bool` | `true` | `✘` |
+| [`mask_dynamic`](#mask_dynamic) | `bool` | `true` | `✘` |
 | [`mask_host`](#mask_host) | `String` | — | `✘` |
 | [`mask_port`](#mask_port) | `u16` | `443` | `✘` |
+| [`exclusive_mask`](#exclusive_mask) | `Map<String, String>` | `{}` | `✘` |
 | [`mask_unix_sock`](#mask_unix_sock) | `String` | — | `✘` |
 | [`fake_cert_len`](#fake_cert_len) | `usize` | `2048` | `✘` |
 | [`tls_emulation`](#tls_emulation) | `bool` | `true` | `✘` |
@@ -2783,8 +2911,8 @@ Hostname нормализуется при валидации и должен п
 | [`mask_shape_above_cap_blur`](#mask_shape_above_cap_blur) | `bool` | `false` | `✘` |
 | [`mask_shape_above_cap_blur_max_bytes`](#mask_shape_above_cap_blur_max_bytes) | `usize` | `512` | `✘` |
 | [`mask_relay_max_bytes`](#mask_relay_max_bytes) | `usize` | `5242880` | `✘` |
-| [`mask_relay_timeout_ms`](mask_relay_timeout_ms) | `u64` | `60_000` | `✘` |
-| [`mask_relay_idle_timeout_ms`](mask_relay_idle_timeout_ms) | `u64` | `5_000` | `✘` |
+| [`mask_relay_timeout_ms`](#mask_relay_timeout_ms) | `u64` | `60_000` | `✘` |
+| [`mask_relay_idle_timeout_ms`](#mask_relay_idle_timeout_ms) | `u64` | `5_000` | `✘` |
 | [`mask_classifier_prefetch_timeout_ms`](#mask_classifier_prefetch_timeout_ms) | `u64` | `5` | `✘` |
 | [`mask_timing_normalization_enabled`](#mask_timing_normalization_enabled) | `bool` | `false` | `✘` |
 | [`mask_timing_normalization_floor_ms`](#mask_timing_normalization_floor_ms) | `u64` | `0` | `✘` |
@@ -2831,9 +2959,9 @@ Hostname нормализуется при валидации и должен п
     [censorship]
     tls_fetch_scope = "fetch"
     ```
-# censorship.tls_fetch
+## tls_fetch
   - **Ограничения / валидация**: Таблица, см. секцию `[censorship.tls_fetch]` ниже.
-  - **Описание**: Настройки стратегии получения TLS-front метаданных (поведение загрузки и обновления bootstrap и данных эмуляции TLS)..
+  - **Описание**: Настройки стратегии получения TLS-front метаданных (поведение загрузки и обновления bootstrap и данных эмуляции TLS).
   - **Пример**:
 
     ```toml
@@ -2844,18 +2972,27 @@ Hostname нормализуется при валидации и должен п
     ```
 ## mask
   - **Ограничения / валидация**: `bool`.
-  - **Описание**: Включает режим маскировки/верхнего уровня. Принимаются все SNI, которые похожи на заданный в `tls_domain`.
+  - **Описание**: Включает режим masking/fronting relay.
   - **Пример**:
 
     ```toml
     [censorship]
     mask = true
     ```
+## mask_dynamic
+  - **Ограничения / валидация**: `bool`.
+  - **Описание**: Когда не заданы ни `mask_host`, ни `mask_unix_sock`, совпадающий с `tls_domain`/`tls_domains` SNI из ClientHello используется как TCP mask target; при отсутствии совпадения применяется основной `tls_domain`. Совпавший `exclusive_mask` всегда имеет приоритет над обычными целями.
+  - **Пример**:
+
+    ```toml
+    [censorship]
+    mask_dynamic = true
+    ```
 ## mask_host
   - **Ограничения / валидация**: `String` (необязательный параметр).
     - Если задан параметр `mask_unix_sock`, `mask_host` не должен быть задан.
-    - Если не задан параметр `mask_host` и `mask_unix_sock` не задан, Telemt по умолчанию устанавливает для `mask_host` значение `tls_domain`.
-  - **Описание**: Хост, используемый для маскировки при TLS-fronting.
+    - Если не заданы ни `mask_host`, ни `mask_unix_sock`, `mask_dynamic` может выбрать совпадающий настроенный SNI; иначе Telemt использует `tls_domain`.
+  - **Описание**: Явный upstream host для TLS-fronting relay. Если он задан, dynamic SNI target selection отключён, кроме переопределений `exclusive_mask`.
   - **Пример**:
 
     ```toml
@@ -3303,6 +3440,7 @@ Hostname нормализуется при валидации и должен п
 | Ключ | Тип | По умолчанию | Hot-Reload |
 | --- | ---- | ------- | ---------- |
 | [`users`](#users) | `Map<String, String>` | `{"default": "000…000"}` | `✔` |
+| [`user_enabled`](#user_enabled-1) | `Map<String, bool>` | `{}` | `✔` |
 | [`user_ad_tags`](#user_ad_tags) | `Map<String, String>` | `{}` | `✔` |
 | [`user_max_tcp_conns`](#user_max_tcp_conns) | `Map<String, usize>` | `{}` | `✔` |
 | [`user_max_tcp_conns_global_each`](#user_max_tcp_conns_global_each) | `usize` | `0` | `✔` |
@@ -3328,6 +3466,16 @@ Hostname нормализуется при валидации и должен п
     [access.users]
     alice = "00112233445566778899aabbccddeeff"
     bob   = "0123456789abcdef0123456789abcdef"
+    ```
+## user_enabled
+  - **Ограничения / валидация**: `Map<String, bool>`.
+  - **Описание**: Необязательные per-user overrides. Пользователь без записи включён. `false` запрещает новые sessions; `true` допустим, но эквивалентен удалению override. API enable удаляет override, а disable записывает `false`.
+  - **Runtime-поведение**: Hot reload применяет карту немедленно. После успешной аутентификации отключённому пользователю отказывают, а его активные runtime sessions отменяются.
+  - **Пример**:
+
+    ```toml
+    [access.user_enabled]
+    alice = false
     ```
 ## user_ad_tags
   - **Ограничения / валидация**: Каждое значение должно содержать **ровно 32 шестнадцатеричных символа** (тот же формат, что и в `general.ad_tag`). Тег со всеми нулями разрешен, но в логи будет записано предупреждение.
@@ -3360,8 +3508,9 @@ Hostname нормализуется при валидации и должен п
     user_max_tcp_conns_global_each = 200
 
     [access.user_max_tcp_conns]
-    alice = 500   # uses 500, not the global cap
-    # bob has no entry > uses 200
+    # Alice uses 500 rather than the global cap.
+    alice = 500
+    # Bob has no entry and therefore uses 200.
     ```
 ## user_expirations
   - **Ограничения / валидация**: `Map<String, DateTime<Utc>>`. Каждое значение должно быть валидной датой и временем в формате RFC3339/ISO-8601.
@@ -3379,7 +3528,8 @@ Hostname нормализуется при валидации и должен п
 
     ```toml
     [access.user_data_quota]
-    alice = 1073741824 # 1 GiB
+    # Alice receives a 1 GiB quota.
+    alice = 1073741824
     ```
 ## user_max_unique_ips
   - **Ограничения / валидация**: `Map<String, usize>`.
@@ -3461,7 +3611,7 @@ Hostname нормализуется при валидации и должен п
 
 
 ## user_rate_limits
-  - **Ограничения / валидация**: Таблица `username -> { up_bps, down_bps }`. Должно быть ненулевое значение хотя бы в одном направлении.
+  - **Ограничения / валидация**: Таблица `username -> { up_bps, down_bps }`. Каждое направление должно быть в диапазоне `0..=100000000000`; `0` означает отсутствие лимита в этом направлении, при этом хотя бы одно направление должно быть ненулевым.
   - **Описание**: Персональные лимиты скорости по пользователям в битах/сек для отправки (`up_bps`) и получения (`down_bps`).
   - **Example**:
 
@@ -3470,7 +3620,7 @@ Hostname нормализуется при валидации и должен п
     alice = { up_bps = 1048576, down_bps = 2097152 }
     ```
 ## cidr_rate_limits
-  - **Ограничения / валидация**: Таблица `CIDR или auto-template -> { up_bps, down_bps }`. Explicit CIDR-ключи должны корректно разбираться как `IpNetwork`; auto-template ключи должны иметь вид `*4/N` (`N=0..32`), `*6/N` (`N=0..128`) или `*/N` (`N=0..32`). Хотя бы одно направление должно быть ненулевым. Дублирующиеся нормализованные auto-template отклоняются.
+  - **Ограничения / валидация**: Таблица `CIDR или auto-template -> { up_bps, down_bps }`. Каждое направление должно быть в диапазоне `0..=100000000000`; `0` означает отсутствие лимита в этом направлении, при этом хотя бы одно направление должно быть ненулевым. Explicit CIDR-ключи должны корректно разбираться как `IpNetwork`; auto-template ключи должны иметь вид `*4/N` (`N=0..32`), `*6/N` (`N=0..128`) или `*/N` (`N=0..32`). Дублирующиеся нормализованные auto-template отклоняются.
   - **Описание**: Лимиты скорости для подсетей источников, применяются поверх пользовательских ограничений. Explicit CIDR-правила используют longest-prefix-wins и имеют приоритет над auto-template. Auto-template создают bucket’ы лениво по matched source subnet: `*4/N` для IPv4, `*6/N` для IPv6, а `*/N` является dual-stack shorthand, где IPv4 использует `/N`, а IPv6 — `/(N * 4)`.
   - **Example**:
 
@@ -3599,7 +3749,8 @@ Hostname нормализуется при валидации и должен п
     [[upstreams]]
     type = "socks5"
     address = "203.0.113.10:1080"
-    interface = "192.0.2.10" # explicit local bind IP
+    # Use an explicit local bind IP.
+    interface = "192.0.2.10"
     ```
 ## bind_addresses
   - **Ограничения / валидация**: `String[]` (необязательный параметр). Применяется в случае, если `type = "direct"`.

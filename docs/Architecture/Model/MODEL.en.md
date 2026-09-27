@@ -57,12 +57,14 @@ Refill works asynchronously and should not block hot routing paths.
 `Registry` is the routing index between ME and client sessions:
 - `conn_id -> client response channel`
 - `conn_id <-> writer_id` binding map
+- writer send routes and their replacement state
 - writer activity snapshots and idle tracking
 
 Main invariants:
 - A `conn_id` routes to at most one active response channel.
 - Writer loss triggers safe unbind/cleanup and close propagation.
 - Registry state is the source of truth for active ME-bound session mapping.
+- The registry binding lock linearizes client binds, writer publication, and the transition that closes a replacement victim to new binds.
 
 ## Adaptive Floor
 
@@ -100,7 +102,9 @@ Goals:
 ### Transition intent
 - `Warm -> Active`: when coverage/readiness conditions are satisfied.
 - `Active -> Draining`: on generation swap, endpoint replacement, or controlled retirement.
-- `Draining -> removed`: after drain TTL/force-close policy (or when naturally empty).
+- `Draining -> removed`: when naturally empty, at the effective force-close deadline, or through threshold/control-path eviction. `me_pool_drain_ttl_secs` is a warning threshold and force-close lower bound, not a removal deadline by itself.
+
+Writer replacement is a separate registry-local lifecycle: `Open -> Preparing -> Retiring`. `Preparing` excludes duplicate replacement work but intentionally permits new client binds. Commit revalidates the victim under the binding lock; `Retiring` rejects new binds. Dropping an uncommitted reservation restores `Open`, while the writer's contour remains independently `Warm`, `Active`, or `Draining`.
 
 This separation reduces SPOF and keeps cutovers predictable.
 
@@ -111,14 +115,17 @@ Generation isolates pool epochs during reinit/reconfiguration.
 ### Lifecycle phases
 1. `Bootstrap`: initial writers are established.
 2. `Warmup`: next generation writers are created and validated.
-3. `Activation`: generation promoted to active when coverage gate passes.
-4. `Drain`: previous generation becomes draining, existing sessions are allowed to finish.
-5. `Retire`: old generation writers are removed after graceful rules.
+3. `Activation`: generation is promoted atomically when the configured coverage ratio and stale-binding policy pass commit-time revalidation.
+4. `Drain`: policy-eligible old writers remain as bounded stale fallback; covered old writers become ineligible and enter retirement during the commit, then may close immediately after it returns.
+5. `Retire`: draining writers are removed when empty or by force-close, threshold, or explicit control policy.
 
 ### Operational guarantees
-- No partial generation activation without minimum coverage.
-- Existing healthy client sessions should not be dropped just because a new generation appears.
-- Draining generation exists to absorb in-flight traffic during swap.
+- Activation is atomic, but the committed topology may still have missing DC-family groups when `me_pool_min_fresh_ratio` passes and `me_bind_stale_mode` permits bounded stale fallback. Mode `never` rejects any missing group.
+- Generation handover is policy-bound, not universally zero-drop: covered old writers may be retired and their bound sessions closed immediately after commit, while only selected stale writers remain available for uncovered groups.
+- A pending generation owns only writers accepted for its generation and current endpoint map; stale tasks cannot publish into a newer generation.
+- A pending generation is keyed by desired-map hash and endpoint revision and may be reused for up to 1800 seconds before expiring.
+- Writer replacement prepares a successor; under one binding guard, commit first moves the predecessor to `Retiring` and then registers the successor before releasing the guard. Failed or cancelled preparation before that boundary preserves the predecessor and releases the reservation.
+- Pool-state telemetry exposes pending writer count and deficit, missing DC-family groups, map currency, orphan warm writers, and replacement `preparing`/`retiring` counts.
 
 ### Readiness and admission
 Pool readiness is not equivalent to “all endpoints fully saturated”.
@@ -149,8 +156,9 @@ Architectural rule:
 
 ### Ownership Model
 Ownership is centered around explicit state domains:
-- `MePool` owns writer lifecycle and policy state.
-- `Registry` owns per-connection routing bindings.
+- `MePool` owns writer inventory, contour lifecycle, and runtime policy state.
+- The reinit coordinator owns active/pending generation authority keyed by map hash and endpoint revision.
+- `Registry` owns per-connection routing bindings, writer send routes, and writer replacement state.
 - `Writer task` owns outbound ME socket send progression.
 - `Reader task` owns inbound ME socket parsing and event dispatch.
 
@@ -188,6 +196,8 @@ Data Plane should avoid waiting on operations that are not strictly required for
 - Shared maps use fine-grained, short-lived locking.
 - Read-mostly paths avoid broad write-lock windows.
 - Backpressure decisions are localized at route/channel boundary.
+- Generation and replacement commits use the lock order `writers -> registry binding -> reinit coordinator`.
+- After acquiring the registry publication guard, a commit has no cancellation point before publication and retirement state are made consistent.
 
 Design target:
 - A slow consumer should degrade only itself (or its route), not global writer progress.
@@ -196,6 +206,7 @@ Design target:
 Writer and reader loops are cancellation-aware:
 - explicit cancel token / close command support;
 - safe unbind and cleanup via registry;
+- RAII replacement reservations restore `Preparing` to `Open` when preparation is cancelled before commit;
 - deterministic order: stop admission -> drain/close -> release resources.
 
 ## Consistency Model
@@ -208,9 +219,10 @@ For one `conn_id`:
 
 ### Generation Consistency
 Generational consistency guarantees:
-- New generation is not promoted before minimum coverage gate.
-- Previous generation remains available in `draining` state during handover.
-- Forced retirement is policy-bound (`drain ttl`, optional force-close), not immediate.
+- Commit revalidates generation, desired-map hash, endpoint revision, and fresh coverage while holding the publication barriers.
+- Promotion requires `me_pool_min_fresh_ratio`; missing DC-family groups additionally require a stale-binding mode other than `never`.
+- Previous-generation writers are retained only where the selected stale-fallback policy requires them. Covered writers become ineligible at commit and may close immediately afterward.
+- Draining writers are removed when empty, at the effective force-close deadline (`0` first selects the 300-second safety fallback, then the drain TTL remains a lower bound), or by threshold/control-path eviction; drain TTL alone only triggers warnings.
 
 ### Policy Consistency
 Policy changes (`adaptive/static floor`, fallback mode, retries) should apply without violating established active-session routing invariants.

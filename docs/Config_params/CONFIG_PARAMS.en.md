@@ -10,7 +10,7 @@ This document lists all configuration keys accepted by `config.toml`.
 >
 > The configuration parameters detailed in this document are intended for advanced users and fine-tuning purposes. Modifying these settings without a clear understanding of their function may lead to application instability or other unexpected behavior. Please proceed with caution and at your own risk.
 
-> `Hot-Reload` marks whether a changed value is applied by the config watcher without restarting the process; `✘` means restart is required for runtime effect.
+> `Hot-Reload` marks whether a changed value is applied directly by the config watcher. `✘` means the watcher does not apply it; depending on the field, full effect requires an in-process runtime-generation reload or a process restart.
 
 # Table of contents
  - [Top-level keys](#top-level-keys)
@@ -204,6 +204,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`me_keepalive_payload_random`](#me_keepalive_payload_random) | `bool` | `true` | `✘` |
 | [`rpc_proxy_req_every`](#rpc_proxy_req_every) | `u64` | `0` | `✘` |
 | [`me_writer_cmd_channel_capacity`](#me_writer_cmd_channel_capacity) | `usize` | `4096` | `✘` |
+| [`me_writer_byte_budget_bytes`](#me_writer_byte_budget_bytes) | `usize` | `33570816` | `✘` |
 | [`me_route_channel_capacity`](#me_route_channel_capacity) | `usize` | `768` | `✘` |
 | [`me_c2me_channel_capacity`](#me_c2me_channel_capacity) | `usize` | `1024` | `✘` |
 | [`me_c2me_send_timeout_ms`](#me_c2me_send_timeout_ms) | `u64` | `4000` | `✘` |
@@ -216,6 +217,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`me_d2c_frame_buf_shrink_threshold_bytes`](#me_d2c_frame_buf_shrink_threshold_bytes) | `usize` | `262144` | `✔` |
 | [`direct_relay_copy_buf_c2s_bytes`](#direct_relay_copy_buf_c2s_bytes) | `usize` | `65536` | `✔` |
 | [`direct_relay_copy_buf_s2c_bytes`](#direct_relay_copy_buf_s2c_bytes) | `usize` | `262144` | `✔` |
+| [`direct_relay_buffer_budget_max_bytes`](#direct_relay_buffer_budget_max_bytes) | `usize` | `0` | `✘` |
 | [`crypto_pending_buffer`](#crypto_pending_buffer) | `usize` | `262144` | `✘` |
 | [`max_client_frame`](#max_client_frame) | `usize` | `16777216` | `✘` |
 | [`desync_all_full`](#desync_all_full) | `bool` | `false` | `✔` |
@@ -301,7 +303,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`me_pool_drain_soft_evict_per_writer`](#me_pool_drain_soft_evict_per_writer) | `u8` | `2` | `✘` |
 | [`me_pool_drain_soft_evict_budget_per_core`](#me_pool_drain_soft_evict_budget_per_core) | `u16` | `16` | `✘` |
 | [`me_pool_drain_soft_evict_cooldown_ms`](#me_pool_drain_soft_evict_cooldown_ms) | `u64` | `1000` | `✘` |
-| [`me_bind_stale_mode`](#me_bind_stale_mode) | `"never"`, `"ttl"`, or `"always"` | `"ttl"` | `✔` |
+| [`me_bind_stale_mode`](#me_bind_stale_mode) | `"never"`, `"ttl"`, or `"always"` | `"never"` | `✔` |
 | [`me_bind_stale_ttl_secs`](#me_bind_stale_ttl_secs) | `u64` | `90` | `✔` |
 | [`me_pool_min_fresh_ratio`](#me_pool_min_fresh_ratio) | `f32` | `0.8` | `✔` |
 | [`me_reinit_drain_timeout_secs`](#me_reinit_drain_timeout_secs) | `u64` | `90` | `✔` |
@@ -347,6 +349,8 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     config_strict = true
     ```
+
+  - **Known limitation**: In this revision, `config_strict = true` rejects the otherwise supported `access.user_source_deny` and `[[upstreams]].prefer` keys. Keep strict mode disabled when either key is present.
 ## prefer_ipv6
   - **Constraints / validation**: Deprecated. Use `network.prefer`.
   - **Description**: Deprecated legacy IPv6 preference flag migrated to `network.prefer`.
@@ -483,8 +487,8 @@ This document lists all configuration keys accepted by `config.toml`.
     stun_nat_probe_concurrency = 8
     ```
 ## middle_proxy_pool_size
-  - **Constraints / validation**: `usize`. Effective value is `max(value, 1)` at runtime (so `0` behaves as `1`).
-  - **Description**: Target size of active ME writer pool.
+  - **Constraints / validation**: `usize`. The value passed to ME initialization is normalized as `max(value, 1)`.
+  - **Description**: Non-enforcing compatibility input currently emitted in the ME initialization log. Active writer targets are derived from the DC-family floor policy, not this value.
   - **Example**:
 
     ```toml
@@ -575,7 +579,7 @@ This document lists all configuration keys accepted by `config.toml`.
     rpc_proxy_req_every = 0
     ```
 ## me_writer_cmd_channel_capacity
-  - **Constraints / validation**: Must be `> 0`.
+  - **Constraints / validation**: Must be within `1..=16384`.
   - **Description**: Capacity of per-writer command channel.
   - **Example**:
 
@@ -583,8 +587,17 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_writer_cmd_channel_capacity = 4096
     ```
+## me_writer_byte_budget_bytes
+  - **Constraints / validation**: Must be a multiple of `16384` within the dynamic minimum and `268435456`. The minimum is `2 * general.max_client_frame + 256`, rounded up to `16384`; with the default frame size it is `33570816`.
+  - **Description**: Resident byte budget for each ME writer data queue. The file watcher does not rebuild existing writers for this field; it takes effect when a new ME/runtime generation is built through the API or after restart.
+  - **Example**:
+
+    ```toml
+    [general]
+    me_writer_byte_budget_bytes = 33570816
+    ```
 ## me_route_channel_capacity
-  - **Constraints / validation**: Must be `> 0`.
+  - **Constraints / validation**: Must be within `1..=8192`.
   - **Description**: Capacity of per-connection ME response route channel.
   - **Example**:
 
@@ -593,7 +606,7 @@ This document lists all configuration keys accepted by `config.toml`.
     me_route_channel_capacity = 768
     ```
 ## me_c2me_channel_capacity
-  - **Constraints / validation**: Must be `> 0`.
+  - **Constraints / validation**: Must be within `1..=8192`.
   - **Description**: Capacity of per-client command queue (client reader -> ME sender).
   - **Example**:
 
@@ -691,6 +704,15 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     direct_relay_copy_buf_s2c_bytes = 262144
     ```
+## direct_relay_buffer_budget_max_bytes
+  - **Constraints / validation**: `0`, or a multiple of `4096` within `16777216..=2147483648`.
+  - **Description**: Process-wide hard ceiling for Direct relay copy buffers. `0` derives the ceiling at process startup from cgroup or host memory limits. This field is process-owned and restart-deferred.
+  - **Example**:
+
+    ```toml
+    [general]
+    direct_relay_buffer_budget_max_bytes = 0
+    ```
 ## crypto_pending_buffer
   - **Constraints / validation**: `usize` (bytes).
   - **Description**: Max pending ciphertext buffer per client writer (bytes).
@@ -701,7 +723,7 @@ This document lists all configuration keys accepted by `config.toml`.
     crypto_pending_buffer = 262144
     ```
 ## max_client_frame
-  - **Constraints / validation**: `usize` (bytes).
+  - **Constraints / validation**: Must be within `4096..=16777216` (bytes).
   - **Description**: Maximum allowed client MTProto frame size (bytes).
   - **Example**:
 
@@ -1214,7 +1236,7 @@ This document lists all configuration keys accepted by `config.toml`.
     me_route_hybrid_max_wait_ms = 3000
     ```
 ## me_route_blocking_send_timeout_ms
-  - **Constraints / validation**: Must be within `0..=5000` (milliseconds). `0` keeps legacy unbounded wait behavior.
+  - **Constraints / validation**: Must be within `1..=5000` (milliseconds).
   - **Description**: Maximum wait for blocking route-channel send fallback.
   - **Example**:
 
@@ -1397,7 +1419,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 ## me_pool_drain_ttl_secs
   - **Constraints / validation**: `u64` (seconds). `0` disables the drain-TTL window (and suppresses drain-TTL warnings for non-empty draining writers).
-  - **Description**: Drain-TTL time window for stale ME writers after endpoint map changes. During the TTL, stale writers may be used only as fallback for new bindings (depending on bind policy).
+  - **Description**: Age threshold for prolonged-drain warnings after endpoint map changes and the lower bound used when normalizing the force-close timeout. Stale-bind eligibility is controlled separately by `me_bind_stale_mode` and `me_bind_stale_ttl_secs`.
   - **Example**:
 
     ```toml
@@ -1477,7 +1499,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 ## me_bind_stale_mode
   - **Constraints / validation**: `"never"`, `"ttl"`, or `"always"`.
-  - **Description**: Policy for new binds on stale draining writers.
+  - **Description**: Policy for new binds on stale draining writers in uncovered DC-family groups. The default `never` requires complete group coverage before a partial hardswap can commit; `ttl` and `always` permit policy-bounded fallback.
   - **Example**:
 
     ```toml
@@ -1487,7 +1509,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 ## me_bind_stale_ttl_secs
   - **Constraints / validation**: `u64`.
-  - **Description**: TTL for stale bind allowance when stale mode is `ttl`.
+  - **Description**: TTL for stale bind allowance when stale mode is `ttl`; `0` disables TTL expiry for eligible draining writers.
   - **Example**:
 
     ```toml
@@ -1497,7 +1519,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 ## me_pool_min_fresh_ratio
   - **Constraints / validation**: Must be within `[0.0, 1.0]`.
-  - **Description**: Minimum fresh desired-DC coverage ratio before stale writers are drained.
+  - **Description**: Minimum fresh DC-family coverage ratio required at generation commit. Missing groups still block commit under `me_bind_stale_mode = "never"` even when this ratio is satisfied.
   - **Example**:
 
     ```toml
@@ -1506,8 +1528,8 @@ This document lists all configuration keys accepted by `config.toml`.
     me_pool_min_fresh_ratio = 0.9
     ```
 ## me_reinit_drain_timeout_secs
-  - **Constraints / validation**: `u64`. `0` uses the runtime safety fallback force-close timeout. If `> 0` and `< me_pool_drain_ttl_secs`, runtime bumps it to TTL.
-  - **Description**: Force-close timeout for draining stale writers. When set to `0`, the effective timeout is the runtime safety fallback (300 seconds).
+  - **Constraints / validation**: `u64`. `0` first selects the 300-second runtime safety fallback; the effective timeout is then raised to at least `me_pool_drain_ttl_secs`.
+  - **Description**: Force-close timeout for draining stale writers. The effective value is the greater of the configured non-zero value (or 300 seconds for `0`) and the drain TTL.
   - **Example**:
 
     ```toml
@@ -1559,7 +1581,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 ## me_reinit_trigger_channel
   - **Constraints / validation**: Must be within `[1, 4096]`.
-  - **Description**: Trigger queue capacity for reinit scheduler.
+  - **Description**: Trigger queue capacity for the reinit scheduler. A new runtime generation constructs its channel from this value; the file watcher alone does not resize the active channel.
   - **Example**:
 
     ```toml
@@ -2596,6 +2618,7 @@ This hot-reloadable table controls the process-owned server-side WEB debug recor
 | --- | --- | --- | --- |
 | `enabled` | `bool` | `false` | Enables WEB HTTP, WebSocket-message, frame, and lifecycle debug records. |
 | `capture_lifecycle` | `bool` | `true` | Records typed bridge, session, stream, handshake, relay, and close events. |
+| `sideband` | `bool` | `false` | Enables generated-bridge lifecycle diagnostics; effective only when `enabled` and `capture_lifecycle` are also true. |
 | `capture_headers` | `bool` | `true` | Retains header names and only allowlisted non-credential values. |
 | `capture_timings` | `bool` | `true` | Retains request-body, response-ready, response-body, and WebSocket message-processing timing points. |
 | `capture_frames` | `bool` | `true` | Parses bounded carrier bodies into frame type, stream ID, length, WINDOW, and error metadata without retaining frame payload separately. |
@@ -2606,6 +2629,8 @@ This hot-reloadable table controls the process-owned server-side WEB debug recor
 | `max_window_secs` | `u64` | `3600` | Largest observation window accepted by `/web-status`; validated at no more than 86400. |
 
 Changing `enabled` or any capture field clears retained records and rejects commits started under the previous policy epoch. Changing only the default or maximum observation window preserves compatible retained records. `full` retains a complete recognized carrier body only up to `web.limits.max_body_bytes`; decoy bodies always remain prefix-bounded. A prefix that depends on a simultaneously increased restart-only capacity is deferred with `web.debug` until restart. URI queries are never retained, credential header values are omitted, body copies are scrubbed for known WEB capabilities and bearer tokens, and profile keys are represented only by a domain-separated 16-hex fingerprint.
+
+When `enabled`, `sideband`, and `capture_lifecycle` are all true, newly generated bridge pages send bounded one-shot lifecycle events to the exact configured base plus `api/v1/diagnostic`. The route is internal to Telemt and does not expose a public control API. Existing bridge documents do not acquire sideband behavior after reload.
 
 Authenticated JSON control may clear the ring explicitly with `POST /v1/runtime/web/debug/clear`; the required process `runtime_instance` fences stale controllers, the returned epoch fences in-flight writers, and `leased_bytes` reports memory still owned by already rendered snapshots.
 
@@ -2699,11 +2724,12 @@ Unless a row states otherwise, timeouts are measured in seconds and must be with
 | Key | Type | Required | Hot-Reload | Description |
 | --- | --- | --- | --- | --- |
 | `host` | `String` | yes | `✔` | Unique, canonical lowercase ACE FQDN without port, path, credentials, or trailing dot. |
+| `base_path` | `String` | no | `✔` | Exact case-sensitive WEB prefix without leading or trailing slash; empty by default. At most 128 ASCII bytes in slash-separated `[A-Za-z0-9][A-Za-z0-9_-]*` segments. |
 | `public_addr` | `SocketAddr` | yes | `✔` | Concrete public IP on port `443`; used in the inner relay destination tuple. |
 | `decoy` | table | yes | `✔` | Ordinary-site fallback for unauthenticated or invalid traffic. |
 | `profiles` | array of tables | when enabled | `✔` | Explicit users and client secret modes exposed by this hostname. |
 
-The hostname must be accepted by Telegram Desktop and is normalized during validation. A bootstrap is a bearer credential: its client address and address family may change before session creation. An unused bootstrap remains valid across a configuration reload only while the same profile identity is still active.
+The hostname must be accepted by Telegram Desktop and is normalized during validation. An empty `base_path` keeps the root v1 capability and legacy hexadecimal link secret. A non-empty path uses the v2 host/path capability and a Telegram Desktop path link with percent-encoded `HOST/BASE` plus the `0x70` base64url secret marker. Routing requires the exact slash-terminated prefix and never redirects, normalizes, or strips it. A bootstrap is a bearer credential: its client address and address family may change before session creation. An unused bootstrap remains valid across a configuration reload only while the same profile identity is still active.
 
 # [web.vhosts.decoy]
 
@@ -2729,6 +2755,7 @@ Profile limits must be non-zero and no greater than their corresponding global l
 ## WEB lifecycle and API management
 
 - The config watcher and generation reload apply `web.enabled`, carrier and negotiation policy, `web.debug`, `web.timeouts`, vhosts, profiles, and decoy snapshots without a process restart. One immutable expanded source snapshot is validated and activated; a candidate generation's watcher starts only after that generation becomes active. Existing sessions and in-flight negotiation chains keep their issuance-time carrier candidates, limits, timeouts, and absolute deadlines; newly issued bridge sessions use one pinned active generation.
+- Changing `base_path` atomically replaces both the new-request route and derived capability. Reissue links and drain affected live sessions first: established WebSockets and already routed exchanges continue; later old-base requests carrying a process-authentic bootstrap or session token receive a local no-store `404`, while the now-inactive old capability follows ordinary decoy handling.
 - WEB listener inventory and trust policy under `server.listeners`, and every `web.limits` value, are process-owned and restart-required.
 - `GET /v1/config` returns the complete authored `[web]` tree except the derived `web.runtime` snapshot. `PATCH /v1/config` accepts a sparse `web` object, deep-merges tables, replaces arrays wholesale, validates the complete candidate, and reports `web.limits` in `deferred_process_fields` until restart.
 - `GET /v1/runtime/web/status`, `/sessions`, `/sessions/{session_ref}`, and `/operations/{operation_id}` expose bounded non-secret runtime state. POST controls close selected sessions, clear debug data, or reset carrier learning and require the current random `runtime_instance`.
@@ -2856,8 +2883,10 @@ Profile limits must be non-zero and no greater than their corresponding global l
 | [`tls_fetch_scope`](#tls_fetch_scope) | `String` | `""` | `✘` |
 | [`tls_fetch`](#tls_fetch) | `Table` | built-in defaults | `✘` |
 | [`mask`](#mask) | `bool` | `true` | `✘` |
+| [`mask_dynamic`](#mask_dynamic) | `bool` | `true` | `✘` |
 | [`mask_host`](#mask_host) | `String` | — | `✘` |
 | [`mask_port`](#mask_port) | `u16` | `443` | `✘` |
+| [`exclusive_mask`](#exclusive_mask) | `Map<String, String>` | `{}` | `✘` |
 | [`mask_unix_sock`](#mask_unix_sock) | `String` | — | `✘` |
 | [`fake_cert_len`](#fake_cert_len) | `usize` | `2048` | `✘` |
 | [`tls_emulation`](#tls_emulation) | `bool` | `true` | `✘` |
@@ -2945,11 +2974,20 @@ Profile limits must be non-zero and no greater than their corresponding global l
     [censorship]
     mask = true
     ```
+## mask_dynamic
+  - **Constraints / validation**: `bool`.
+  - **Description**: When neither `mask_host` nor `mask_unix_sock` is configured, use a matching ClientHello SNI from `tls_domain`/`tls_domains` as the TCP mask target; if none matches, fall back to the primary `tls_domain`. A matching `exclusive_mask` entry always takes precedence over ordinary targets.
+  - **Example**:
+
+    ```toml
+    [censorship]
+    mask_dynamic = true
+    ```
 ## mask_host
   - **Constraints / validation**: `String` (optional).
     - If `mask_unix_sock` is set, `mask_host` must be omitted (mutually exclusive).
-    - If `mask_host` is not set and `mask_unix_sock` is not set, Telemt defaults `mask_host` to `tls_domain`.
-  - **Description**: Upstream mask host for TLS fronting relay.
+    - If neither `mask_host` nor `mask_unix_sock` is set, `mask_dynamic` may select a matching configured SNI; otherwise Telemt falls back to `tls_domain`.
+  - **Description**: Explicit upstream mask host for TLS fronting relay. When present, it disables dynamic SNI target selection except for `exclusive_mask` overrides.
   - **Example**:
 
     ```toml
@@ -3463,8 +3501,9 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     user_max_tcp_conns_global_each = 200
 
     [access.user_max_tcp_conns]
-    alice = 500   # uses 500, not the global cap
-    # bob has no entry → uses 200
+    # Alice uses 500 rather than the global cap.
+    alice = 500
+    # Bob has no entry and therefore uses 200.
     ```
 ## user_expirations
   - **Constraints / validation**: `Map<String, DateTime<Utc>>`. Each value must be a valid RFC3339 / ISO-8601 datetime.
@@ -3482,7 +3521,8 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
 
     ```toml
     [access.user_data_quota]
-    alice = 1073741824 # 1 GiB
+    # Alice receives a 1 GiB quota.
+    alice = 1073741824
     ```
 ## user_max_unique_ips
   - **Constraints / validation**: `Map<String, usize>`.
@@ -3564,7 +3604,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
 
 
 ## user_rate_limits
-  - **Constraints / validation**: Table `username -> { up_bps, down_bps }`. At least one direction must be non-zero.
+  - **Constraints / validation**: Table `username -> { up_bps, down_bps }`. Each direction must be within `0..=100000000000`; `0` means unlimited for that direction, and at least one direction must be non-zero.
   - **Description**: Per-user bandwidth caps in bits/sec for upload (`up_bps`) and download (`down_bps`).
   - **Example**:
 
@@ -3573,7 +3613,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     alice = { up_bps = 1048576, down_bps = 2097152 }
     ```
 ## cidr_rate_limits
-  - **Constraints / validation**: Table `CIDR or auto-template -> { up_bps, down_bps }`. Explicit CIDR keys must parse as `IpNetwork`; auto-template keys must be `*4/N` (`N=0..32`), `*6/N` (`N=0..128`), or `*/N` (`N=0..32`). At least one direction must be non-zero. Duplicate normalized auto-templates are rejected.
+  - **Constraints / validation**: Table `CIDR or auto-template -> { up_bps, down_bps }`. Each direction must be within `0..=100000000000`; `0` means unlimited for that direction, and at least one direction must be non-zero. Explicit CIDR keys must parse as `IpNetwork`; auto-template keys must be `*4/N` (`N=0..32`), `*6/N` (`N=0..128`), or `*/N` (`N=0..32`). Duplicate normalized auto-templates are rejected.
   - **Description**: Source-subnet bandwidth caps applied alongside per-user limits. Explicit CIDR rules use longest-prefix-wins and take priority over auto-templates. Auto-templates create buckets lazily per matched source subnet: `*4/N` for IPv4, `*6/N` for IPv6, and `*/N` as a dual-stack shorthand where IPv4 uses `/N` and IPv6 uses `/(N * 4)`.
   - **Example**:
 
@@ -3702,7 +3742,8 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     [[upstreams]]
     type = "socks5"
     address = "203.0.113.10:1080"
-    interface = "192.0.2.10" # explicit local bind IP
+    # Use an explicit local bind IP.
+    interface = "192.0.2.10"
     ```
 ## bind_addresses
   - **Constraints / validation**: `String[]` (optional). Applies only to `type = "direct"`.

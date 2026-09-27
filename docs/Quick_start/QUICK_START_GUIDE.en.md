@@ -13,6 +13,7 @@ curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh
 
 After starting, the script will prompt for:
  - Your language (1 - English, 2 - Russian);
+ - Your server port (press Enter for 443);
  - Your TLS domain (press Enter for petrovich.ru).
 
 The script checks if the port (default **443**) is free. If the port is already in use, installation will fail. You need to free up the port or use the **-p** flag with a different port to retry the installation.
@@ -22,7 +23,7 @@ To modify the script’s startup parameters, you can use the following flags:
  - **-p, --port** - server port (1–65535);
  - **-s, --secret** - 32 hex secret;
  - **-a, --ad-tag** - ad_tag;
- - **-l, --lan**g - language (1/en or 2/ru);
+ - **-l, --lang** - language (1/en or 2/ru);
 
 Providing all options skips interactive prompts.
 
@@ -33,7 +34,8 @@ tg://proxy?server=IP&port=PORT&secret=SECRET
 
 ### Installing a specific version
 ```bash
-curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh -s -- 3.3.39
+TELEMT_VERSION=3.5.7
+curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh -s -- "$TELEMT_VERSION"
 ```
 
 ### Uninstall with full cleanup
@@ -64,7 +66,7 @@ chmod +x /bin/telemt
 
 **This guide "assumes" that you:**
 - logged in as root or executed `su -` / `sudo su`
-- Already have the "telemt" executable file in the /bin folder. Read the **[Installation](#Installation)** section.
+- Already have the "telemt" executable file in the /bin folder. Read the **[Installation](#installation)** section.
 
 ---
 
@@ -105,18 +107,18 @@ nano /etc/telemt/telemt.toml
 Insert your configuration:
 
 ```toml
-### Telemt Based Config.toml
-# We believe that these settings are sufficient for most scenarios 
-# where cutting-egde methods and parameters or special solutions are not needed
+# Minimal Telemt configuration
+# These settings are sufficient for most deployments that do not require
+# advanced methods, parameters, or specialized solutions.
 
-# === General Settings ===
+# General settings
 [general]
 use_middle_proxy = true
 # Global ad_tag fallback when user has no per-user tag in [access.user_ad_tags]
 # ad_tag = "00000000000000000000000000000000"
 # Per-user ad_tag in [access.user_ad_tags] (32 hex from @MTProxybot)
 
-# === Log Level ===
+# Logging
 # Log level: debug | verbose | normal | silent
 # Can be overridden with --silent or --log-level CLI flags
 # RUST_LOG env var takes absolute priority over all of these
@@ -129,17 +131,23 @@ tls = true
 
 [general.links]
 show = "*"
-# show = ["alice", "bob"] # Only show links for alice and bob
-# show = "*"              # Show links for all users
-# public_host = "proxy.example.com"  # Host (IP or domain) for tg:// links
-# public_port = 443                  # Port for tg:// links (default: server.port)
+# Only show links for alice and bob
+# show = ["alice", "bob"]
+# Show links for all users
+# show = "*"
+# Host (IP or domain) for tg:// links
+# public_host = "proxy.example.com"
+# Port for tg:// links; defaults to server.port
+# public_port = 443
 
-# === Server Binding ===
+# Server binding
 [server]
 port = 443
-# proxy_protocol = false            # Enable if behind HAProxy/nginx with PROXY protocol
+# Enable behind HAProxy/nginx with PROXY protocol
+# proxy_protocol = false
 # metrics_port = 9090
-# metrics_listen = "127.0.0.1:9090" # Listen address for metrics (overrides metrics_port)
+# Listen address for metrics; overrides metrics_port
+# metrics_listen = "127.0.0.1:9090"
 # metrics_whitelist = ["127.0.0.1/32", "::1/128"]
 
 [server.api]
@@ -153,12 +161,15 @@ minimal_runtime_cache_ttl_ms = 1000
 [[server.listeners]]
 ip = "0.0.0.0"
 
-# === Anti-Censorship & Masking ===
+# Anti-censorship and masking
 [censorship]
-tls_domain = "petrovich.ru"  # Fake-TLS / SNI masking domain used in generated ee-links
+# Fake-TLS/SNI masking domain used in generated ee links.
+tls_domain = "petrovich.ru"
 mask = true
-tls_emulation = true         # Fetch real cert lengths and emulate TLS records
-tls_front_dir = "tlsfront"   # Cache directory for TLS emulation
+# Fetch real certificate lengths and emulate TLS records.
+tls_emulation = true
+# Cache directory for TLS emulation.
+tls_front_dir = "tlsfront"
 
 [access.users]
 # format: "username" = "32_hex_chars_secret"
@@ -237,8 +248,12 @@ curl -s http://127.0.0.1:9091/v1/users | jq -r '.data[] | "[\(.username)]", (.li
 
 # Telemt via Docker Compose
 
-**1. Edit `config.toml` in repo root (at least: port, users secrets, tls_domain)**  
-**2. Start container:**
+**1. Create `config/` in the repository root and place the edited `config.toml` there (at least: port, user secrets, and `tls_domain`):**
+```bash
+mkdir -p config
+mv config.toml config/
+```
+**2. Start the container:**
 ```bash
 docker compose up -d --build
 ```
@@ -251,34 +266,26 @@ docker compose logs -f telemt
 docker compose down
 ```
 > [!NOTE]
-> - `docker-compose.yml` maps `./config.toml` to `/app/config.toml` (read-only)
-> - By default it publishes `443:443` and runs with dropped capabilities (only `NET_BIND_SERVICE` is added)
-> - If you really need host networking (usually only for some IPv6 setups) uncomment `network_mode: host`
-> - If you enable mutating Control API endpoints, mount a writable config directory instead of a single `config.toml` file. Telemt persists config changes with atomic `tmp + rename` writes, and a single bind-mounted file can fail with `Device or resource busy`.
-
-Example writable config mount for Control API mutations:
-```yaml
-services:
-  telemt:
-    working_dir: /run/telemt
-    volumes:
-      - ./config:/etc/telemt:rw
-    tmpfs:
-      - /run/telemt:rw,mode=1777,size=4m
-    command: /usr/local/bin/telemt /etc/telemt/config.toml
-```
+> - `docker-compose.yml` mounts `./config/` at `/etc/telemt/` read-write and starts Telemt with `/etc/telemt/config.toml`.
+> - The directory mount is required for mutating Control API endpoints: Telemt persists the complete configuration source graph with same-directory temporary files and atomic renames. Do not replace it with a single-file bind mount.
+> - The host `./config/` directory and its source files must be writable by the container user (UID/GID `65532` in the production image) when configuration mutations are enabled.
+> - `/run/telemt` is a small writable `tmpfs`; the rest of the container filesystem remains read-only.
+> - By default only `443:443` is public. The published Metrics and Control API ports are restricted to host loopback, and all capabilities except `NET_BIND_SERVICE` are dropped.
+> - Port publishing does not enable a service or make a container-loopback listener reachable. The bundled `config.toml` leaves Metrics disabled and binds the Control API to `127.0.0.1` inside the container. To use either host mapping, explicitly bind that service to a container-reachable address and whitelist only the immediate Docker peer/network; keep the host-side mapping on loopback.
 
 **Run without Compose**
 ```bash
 docker build -t telemt:local .
 docker run --name telemt --restart unless-stopped \
   -p 443:443 \
-  -p 9090:9090 \
-  -p 9091:9091 \
+  -p 127.0.0.1:9090:9090 \
+  -p 127.0.0.1:9091:9091 \
   -e RUST_LOG=info \
-  -v "$PWD/config.toml:/app/config.toml:ro" \
+  -v "$PWD/config:/etc/telemt:rw" \
+  --tmpfs /run/telemt:rw,mode=1777,size=4m \
+  -w /run/telemt \
   --read-only \
   --cap-drop ALL --cap-add NET_BIND_SERVICE \
   --ulimit nofile=65536:65536 \
-  telemt:local
+  telemt:local /etc/telemt/config.toml
 ```
