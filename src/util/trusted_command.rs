@@ -1,5 +1,7 @@
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const TRUSTED_HELPER_DIRS: [&str; 4] = ["/usr/sbin", "/usr/bin", "/sbin", "/bin"];
 const TRUSTED_HELPERS: [&str; 12] = [
@@ -27,6 +29,19 @@ pub(crate) fn resolve_trusted_helper(binary: &str) -> Option<PathBuf> {
         .iter()
         .map(|directory| Path::new(directory).join(binary))
         .find_map(|candidate| trusted_executable(&candidate))
+}
+
+/// Builds a trusted helper command with its allowlisted invocation name.
+pub(crate) fn trusted_helper_command(binary: &str) -> Option<Command> {
+    let command_path = resolve_trusted_helper(binary)?;
+    Some(command_for_resolved_helper(binary, command_path))
+}
+
+fn command_for_resolved_helper(binary: &str, command_path: PathBuf) -> Command {
+    let mut command = Command::new(command_path);
+    // Multi-call helpers dispatch from argv[0], which canonical path resolution discards.
+    command.arg0(binary);
+    command
 }
 
 fn trusted_executable(candidate: &Path) -> Option<PathBuf> {
@@ -76,6 +91,24 @@ mod tests {
         assert!(TRUSTED_HELPERS.contains(&"iptables-restore"));
         assert!(TRUSTED_HELPERS.contains(&"ip6tables-restore"));
         assert!(!TRUSTED_HELPERS.contains(&"iptables-restore-wrapper"));
+    }
+
+    #[test]
+    fn trusted_multicall_command_preserves_logical_argv0() {
+        let command_path = std::fs::canonicalize("/bin/sh").unwrap();
+        for binary in [
+            "iptables",
+            "ip6tables",
+            "iptables-restore",
+            "ip6tables-restore",
+        ] {
+            let mut command = command_for_resolved_helper(binary, command_path.clone());
+            assert_eq!(command.get_program(), command_path.as_os_str());
+
+            let output = command.args(["-c", "printf '%s' \"$0\""]).output().unwrap();
+            assert!(output.status.success());
+            assert_eq!(String::from_utf8(output.stdout).unwrap(), binary);
+        }
     }
 
     #[test]

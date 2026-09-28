@@ -1,7 +1,7 @@
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use crate::util::trusted_command::resolve_trusted_helper;
+use crate::util::trusted_command::trusted_helper_command;
 
 const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -10,10 +10,10 @@ pub(super) async fn run_command(
     args: &[&str],
     stdin: Option<String>,
 ) -> Result<(), String> {
-    let Some(command_path) = resolve_trusted_helper(binary) else {
+    let Some(command) = trusted_helper_command(binary) else {
         return Err(format!("{binary} is not available"));
     };
-    let mut command = Command::new(command_path);
+    let mut command = Command::from(command);
     command.args(args);
     if stdin.is_some() {
         command.stdin(std::process::Stdio::piped());
@@ -52,10 +52,10 @@ pub(super) async fn run_command(
 }
 
 pub(super) async fn run_command_stdout(binary: &str, args: &[&str]) -> Result<String, String> {
-    let Some(command_path) = resolve_trusted_helper(binary) else {
+    let Some(command) = trusted_helper_command(binary) else {
         return Err(format!("{binary} is not available"));
     };
-    let mut command = Command::new(command_path);
+    let mut command = Command::from(command);
     command.args(args).kill_on_drop(true);
     let output = tokio::time::timeout(COMMAND_TIMEOUT, command.output())
         .await
