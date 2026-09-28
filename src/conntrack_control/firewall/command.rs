@@ -6,7 +6,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 #[cfg(unix)]
-use crate::util::trusted_command::resolve_trusted_helper;
+use crate::util::trusted_command::{resolve_trusted_helper, trusted_helper_command};
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -133,13 +133,13 @@ impl FirewallCommandRunner for SystemCommandRunner {
         }
         #[cfg(unix)]
         {
-            let Some(command_path) = resolve_trusted_helper(spec.binary) else {
+            let Some(command) = trusted_helper_command(spec.binary) else {
                 return Err(CommandError {
                     kind: CommandErrorKind::Missing,
                     message: format!("{} is not available", spec.binary),
                 });
             };
-            let mut command = Command::new(command_path);
+            let mut command = Command::from(command);
             command.args(&spec.args);
             command.env("LC_ALL", "C");
             if spec.stdin.is_some() {
