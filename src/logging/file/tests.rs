@@ -34,6 +34,115 @@ fn matching_logs(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+#[cfg(unix)]
+#[test]
+fn compatibility_appender_accepts_writable_log_directories() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for mode in [0o770, 0o777, 0o1777] {
+        let dir = tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(mode)).unwrap();
+        let path = dir.path().join("telemt.log");
+        assert!(
+            BoundedFileAppender::with_now(options(path.clone()), Box::new(fixed_now), true)
+                .is_err()
+        );
+        assert!(!path.exists());
+        let mut appender =
+            BoundedFileAppender::with_now(options(path.clone()), Box::new(fixed_now), false)
+                .unwrap();
+        appender.write_all(b"compatibility\n").unwrap();
+        appender.flush().unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"compatibility\n");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn compatibility_appender_follows_symlinked_parents() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().unwrap();
+    let real = dir.path().join("real");
+    let linked = dir.path().join("linked");
+    fs::create_dir(&real).unwrap();
+    symlink(&real, &linked).unwrap();
+    let path = linked.join("nested/telemt.log");
+    assert!(
+        BoundedFileAppender::with_now(options(path.clone()), Box::new(fixed_now), true).is_err()
+    );
+    assert!(!real.join("nested").exists());
+    let mut appender =
+        BoundedFileAppender::with_now(options(path), Box::new(fixed_now), false).unwrap();
+    appender.write_all(b"compatibility\n").unwrap();
+    appender.flush().unwrap();
+
+    assert_eq!(
+        fs::read(real.join("nested/telemt.log")).unwrap(),
+        b"compatibility\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn appender_rejects_final_symlinks_and_hard_links_in_both_modes() {
+    use std::os::unix::fs::symlink;
+
+    for strict_runtime_paths in [false, true] {
+        for hard_link in [false, true] {
+            let dir = tempdir().unwrap();
+            let target = dir.path().join("sentinel");
+            let path = dir.path().join("telemt.log");
+            fs::write(&target, b"preserve\n").unwrap();
+            if hard_link {
+                fs::hard_link(&target, &path).unwrap();
+            } else {
+                symlink(&target, &path).unwrap();
+            }
+
+            assert!(
+                BoundedFileAppender::with_now(
+                    options(path),
+                    Box::new(fixed_now),
+                    strict_runtime_paths
+                )
+                .is_err()
+            );
+            assert_eq!(fs::read(&target).unwrap(), b"preserve\n");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn time_rotation_and_retention_work_through_compatible_parent_alias() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let root = tempdir().unwrap();
+    let real = root.path().join("logs");
+    let linked = root.path().join("linked");
+    fs::create_dir(&real).unwrap();
+    fs::set_permissions(&real, fs::Permissions::from_mode(0o777)).unwrap();
+    symlink(&real, &linked).unwrap();
+    let mut options = options(linked.join("telemt.log"));
+    options.rotation = LogRotation::Daily;
+    options.max_files = 1;
+    let mut appender = BoundedFileAppender::with_now(options, Box::new(fixed_now), false).unwrap();
+    appender.write_all(b"first\n").unwrap();
+    appender.now = Box::new(|| fixed_now() + ChronoDuration::days(1));
+    appender.write_all(b"second\n").unwrap();
+    appender.flush().unwrap();
+
+    let remaining = matching_logs(&real);
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(fs::read(&remaining[0]).unwrap(), b"second\n");
+}
+
 #[test]
 fn size_rotation_keeps_latest_write_in_active_file() {
     let dir = tempdir().unwrap();
@@ -41,7 +150,7 @@ fn size_rotation_keeps_latest_write_in_active_file() {
     let mut options = options(path.clone());
     options.max_size_bytes = 6;
 
-    let mut appender = BoundedFileAppender::with_now(options, Box::new(fixed_now)).unwrap();
+    let mut appender = BoundedFileAppender::with_now(options, Box::new(fixed_now), false).unwrap();
     appender.write_all(b"abc\n").unwrap();
     appender.write_all(b"def\n").unwrap();
     appender.flush().unwrap();
@@ -58,7 +167,7 @@ fn max_files_retention_removes_oldest_archives() {
     options.max_size_bytes = 4;
     options.max_files = 2;
 
-    let mut appender = BoundedFileAppender::with_now(options, Box::new(fixed_now)).unwrap();
+    let mut appender = BoundedFileAppender::with_now(options, Box::new(fixed_now), false).unwrap();
     for line in [b"aa\n", b"bb\n", b"cc\n", b"dd\n"] {
         appender.write_all(line).unwrap();
     }
@@ -94,7 +203,7 @@ fn max_age_retention_removes_old_archives() {
 
     let mut options = options(path);
     options.max_age_secs = 1;
-    let _appender = BoundedFileAppender::with_now(options, Box::new(fixed_now)).unwrap();
+    let _appender = BoundedFileAppender::with_now(options, Box::new(fixed_now), false).unwrap();
 
     assert!(!old_archive.exists());
 }
@@ -112,7 +221,7 @@ fn rotation_stays_bound_to_opened_directory_after_path_replacement() {
     fs::create_dir(&redirect).unwrap();
     let mut options = options(original.join("telemt.log"));
     options.max_size_bytes = 4;
-    let mut appender = BoundedFileAppender::with_now(options, Box::new(fixed_now)).unwrap();
+    let mut appender = BoundedFileAppender::with_now(options, Box::new(fixed_now), false).unwrap();
     appender.write_all(b"aa\n").unwrap();
     fs::rename(&original, &moved).unwrap();
     symlink(&redirect, &original).unwrap();
@@ -137,7 +246,11 @@ fn appender_rejects_group_writable_log_directory() {
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o770)).unwrap();
 
     assert!(
-        BoundedFileAppender::with_now(options(dir.path().join("telemt.log")), Box::new(fixed_now),)
-            .is_err()
+        BoundedFileAppender::with_now(
+            options(dir.path().join("telemt.log")),
+            Box::new(fixed_now),
+            true
+        )
+        .is_err()
     );
 }

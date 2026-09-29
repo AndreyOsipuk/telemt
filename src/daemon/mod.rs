@@ -29,6 +29,8 @@ pub struct DaemonOptions {
     pub daemonize: bool,
     /// Path to PID file.
     pub pid_file: Option<PathBuf>,
+    /// Require trusted, symlink-free PID and log parents. Disabled by default for compatibility.
+    pub strict_runtime_paths: bool,
     /// User to run as after binding sockets.
     pub user: Option<String>,
     /// Group to run as after binding sockets.
@@ -332,6 +334,7 @@ mod tests {
     fn test_daemon_options_default() {
         let opts = DaemonOptions::default();
         assert!(!opts.daemonize);
+        assert!(!opts.strict_runtime_paths);
         assert!(!opts.should_daemonize());
         assert_eq!(opts.pid_file_path(), Path::new(DEFAULT_PID_FILE));
     }

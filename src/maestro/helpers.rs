@@ -30,6 +30,7 @@ pub(crate) fn print_maestro_line(message: impl AsRef<str>) {
     );
 }
 
+/// Resolves the config source against startup cwd while retaining symlink components.
 pub(crate) fn resolve_runtime_config_path(
     config_path_cli: &str,
     startup_cwd: &Path,
@@ -75,6 +76,7 @@ pub(crate) fn resolve_runtime_config_path(
     startup_cwd.join("config.toml")
 }
 
+/// Selects the runtime directory from CLI, startup cwd, and explicit config location.
 pub(crate) fn resolve_runtime_base_dir(
     config_path: &Path,
     startup_cwd: &Path,
@@ -120,14 +122,21 @@ fn normalize_runtime_dir(path: &Path, startup_cwd: &Path) -> PathBuf {
 
 /// Parsed CLI arguments.
 pub(crate) struct CliArgs {
+    /// Config source selected by positional arguments.
     pub config_path: String,
+    /// Whether the config source was explicitly provided.
     pub config_path_explicit: bool,
+    /// Runtime directory override from CLI.
     pub data_path: Option<PathBuf>,
+    /// Whether CLI requests minimal logging output.
     pub silent: bool,
+    /// Verbosity override from CLI.
     pub log_level: Option<String>,
+    /// Logging destination, rotation, and retention overrides.
     pub log_cli_options: LogCliOptions,
 }
 
+/// Parses runtime arguments after early daemon and control-command handling.
 pub(crate) fn parse_cli() -> CliArgs {
     let mut config_path = "config.toml".to_string();
     let mut config_path_explicit = false;
@@ -222,6 +231,8 @@ pub(crate) fn parse_cli() -> CliArgs {
             }
             // Skip daemon-related flags (already parsed)
             "--daemon" | "-d" | "--foreground" | "-f" => {}
+            #[cfg(unix)]
+            "--strict-runtime-paths" => {}
             s if s.starts_with("--pid-file") => {
                 if !s.contains('=') {
                     // Skip the pid-file value consumed by daemon argument parsing.
@@ -300,6 +311,15 @@ fn print_help() {
         eprintln!("  --daemon, -d            Fork to background (daemonize)");
         eprintln!("  --foreground, -f        Explicit foreground mode (for systemd)");
         eprintln!("  --pid-file <PATH>       PID file path (default: /var/run/telemt.pid)");
+        eprintln!(
+            "  --strict-runtime-paths  Require trusted, symlink-free PID/log parents (default: off)"
+        );
+        eprintln!(
+            "                          Applies to run/start/stop/reload/status; parent symlinks and"
+        );
+        eprintln!(
+            "                          writable directories are allowed when this flag is absent"
+        );
         eprintln!("  --run-as-user <USER>    Drop privileges to this user after binding");
         eprintln!("  --run-as-group <GROUP>  Drop privileges to this group after binding");
         eprintln!("  --working-dir <DIR>     Working directory for daemon mode");

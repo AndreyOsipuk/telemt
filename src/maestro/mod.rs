@@ -96,7 +96,10 @@ async fn run_inner(
     // Acquire PID file if daemonizing or if explicitly requested.
     // Keep it alive until shutdown for RAII cleanup.
     let _pid_file = if daemon_opts.daemonize || daemon_opts.pid_file.is_some() {
-        let mut pf = PidFile::new(daemon_opts.pid_file_path());
+        let mut pf = PidFile::new(
+            daemon_opts.pid_file_path(),
+            daemon_opts.strict_runtime_paths,
+        );
         if let Err(e) = pf.acquire() {
             eprintln!("[telemt] {}", e);
             std::process::exit(1);
@@ -109,20 +112,25 @@ async fn run_inner(
     let user = daemon_opts.user.clone();
     let group = daemon_opts.group.clone();
 
-    orchestrator::run_telemt_core(user.is_some() || group.is_some(), || {
-        if (user.is_some() || group.is_some())
-            && let Err(e) = drop_privileges(user.as_deref(), group.as_deref(), _pid_file.as_ref())
-        {
-            error!(error = %e, "Failed to drop privileges");
-            std::process::exit(1);
-        }
-    })
+    orchestrator::run_telemt_core(
+        user.is_some() || group.is_some(),
+        daemon_opts.strict_runtime_paths,
+        || {
+            if (user.is_some() || group.is_some())
+                && let Err(e) =
+                    drop_privileges(user.as_deref(), group.as_deref(), _pid_file.as_ref())
+            {
+                error!(error = %e, "Failed to drop privileges");
+                std::process::exit(1);
+            }
+        },
+    )
     .await
 }
 
 #[cfg(not(unix))]
 async fn run_inner() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    orchestrator::run_telemt_core(false, || {}).await
+    orchestrator::run_telemt_core(false, false, || {}).await
 }
 
 #[cfg(test)]

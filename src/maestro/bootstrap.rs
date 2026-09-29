@@ -15,20 +15,32 @@ use super::helpers::{
 use super::runtime_tasks;
 use super::validate_synlimit_privilege_drop;
 
+/// Process-level configuration and logging resources retained across runtime generations.
 pub(super) struct BootstrapState {
+    /// Monotonic process startup time.
     pub(super) process_started_at: Instant,
+    /// Process startup time as Unix epoch seconds.
     pub(super) process_started_at_epoch_secs: u64,
+    /// Startup component progress shared with the control plane.
     pub(super) startup_tracker: Arc<StartupTracker>,
+    /// Validated initial runtime configuration.
     pub(super) config: ProxyConfig,
+    /// Resolved source path used by reload operations.
     pub(super) config_path: PathBuf,
+    /// Whether the environment owns the log filter policy.
     pub(super) has_rust_log: bool,
+    /// Initial verbosity after CLI overrides.
     pub(super) effective_log_level: LogLevel,
+    /// Process-owned dynamic tracing filter.
     pub(super) runtime_log_filter: runtime_tasks::RuntimeLogFilter,
+    /// Keeps the file logging worker alive until process shutdown.
     pub(super) logging_guard: Option<crate::logging::LoggingGuard>,
 }
 
+/// Loads configuration and initializes process logging with the startup parent-path policy.
 pub(super) async fn bootstrap(
     privilege_drop_requested: bool,
+    strict_runtime_paths: bool,
 ) -> std::result::Result<BootstrapState, Box<dyn std::error::Error>> {
     let process_started_at = Instant::now();
     let process_started_at_epoch_secs = SystemTime::now()
@@ -268,6 +280,7 @@ pub(super) async fn bootstrap(
             let logging_opts = crate::logging::LoggingOptions {
                 destination: log_destination,
                 disable_colors: true,
+                strict_runtime_paths,
             };
             let (_, guard) = crate::logging::init_logging(&logging_opts, &initial_filter_spec);
             logging_guard = Some(guard);
@@ -276,6 +289,7 @@ pub(super) async fn bootstrap(
             let logging_opts = crate::logging::LoggingOptions {
                 destination: log_destination,
                 disable_colors: true,
+                strict_runtime_paths,
             };
             let (_, guard) = crate::logging::init_logging(&logging_opts, &initial_filter_spec);
             logging_guard = Some(guard);
