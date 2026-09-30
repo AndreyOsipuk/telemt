@@ -9,7 +9,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use nix::errno::Errno;
-use nix::unistd::{self, ForkResult, Gid, Uid, chdir, close, fork, getpid, setsid};
+use nix::unistd::{self, ForkResult, Gid, Uid, chdir, fork, getpid, setsid};
 use tracing::info;
 
 // PID file ownership and process-control helpers.
@@ -176,8 +176,10 @@ fn redirect_stdio_to_devnull() -> Result<(), DaemonError> {
         }
     }
 
-    if devnull_fd > 2 {
-        let _ = close(devnull_fd);
+    // Keep stdio descriptors open; other source descriptors are closed once by File's Drop.
+    // Transfer ownership only after all dup2 calls succeed so errors retain RAII cleanup.
+    if devnull_fd <= 2 {
+        let _ = std::os::unix::io::IntoRawFd::into_raw_fd(devnull);
     }
 
     Ok(())
