@@ -44,13 +44,15 @@ pub(crate) struct BoundedFileAppender {
 }
 
 impl BoundedFileAppender {
-    pub(crate) fn new(options: FileLogOptions) -> io::Result<Self> {
-        Self::with_now(options, Box::new(Utc::now))
+    /// Opens the appender using the process-level Unix parent-path policy.
+    pub(crate) fn new(options: FileLogOptions, strict_runtime_paths: bool) -> io::Result<Self> {
+        Self::with_now(options, Box::new(Utc::now), strict_runtime_paths)
     }
 
     fn with_now(
         options: FileLogOptions,
         now: Box<dyn Fn() -> DateTime<Utc> + Send + Sync>,
+        strict_runtime_paths: bool,
     ) -> io::Result<Self> {
         let path = Path::new(&options.path);
         let dir = path
@@ -67,7 +69,13 @@ impl BoundedFileAppender {
         let start = now();
         let current_path = active_path_for(&dir, &base_name, options.rotation, &start);
         #[cfg(unix)]
-        let dir_fd = crate::util::secure_fs::open_trusted_dir_nofollow_or_create(&dir, 0o750)?;
+        let dir_fd = if strict_runtime_paths {
+            crate::util::secure_fs::open_trusted_dir_nofollow_or_create(&dir, 0o750)?
+        } else {
+            crate::util::secure_fs::open_compatible_dir(&dir, Some(0o750))?
+        };
+        #[cfg(not(unix))]
+        let _ = strict_runtime_paths;
         #[cfg(unix)]
         let (file, current_size) = open_append_file(&dir_fd, &current_path)?;
         #[cfg(not(unix))]

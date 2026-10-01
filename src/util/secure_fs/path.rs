@@ -1,7 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Component, Path};
 
 use nix::fcntl::{OFlag, open, openat};
@@ -53,6 +53,28 @@ impl AnchoredPath {
         Ok(Self { parent, name })
     }
 
+    /// Anchors a runtime parent, applying trusted traversal only when explicitly requested.
+    pub(crate) fn open_runtime_parent(
+        path: &Path,
+        create_mode: Option<u32>,
+        strict_runtime_paths: bool,
+    ) -> io::Result<Self> {
+        if strict_runtime_paths {
+            return match create_mode {
+                Some(mode) => Self::open_trusted_parent_or_create(path, mode),
+                None => Self::open_trusted_parent(path),
+            };
+        }
+        let name = path
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?
+            .to_os_string();
+        let parent =
+            open_compatible_dir(path.parent().unwrap_or_else(|| Path::new(".")), create_mode)?;
+        Ok(Self { parent, name })
+    }
+
     fn open_with_parent_creation(path: &Path, create_mode: Option<u32>) -> io::Result<Self> {
         let name = path
             .file_name()
@@ -95,6 +117,23 @@ pub(crate) fn open_dir_nofollow_or_create(path: &Path, mode: u32) -> io::Result<
 /// Opens or creates a directory chain protected from untrusted entry replacement.
 pub(crate) fn open_trusted_dir_nofollow_or_create(path: &Path, mode: u32) -> io::Result<OwnedFd> {
     open_dir_components(path, Some(mode), true)
+}
+
+/// Follows parent-directory symlinks without imposing ownership or permission policy.
+pub(crate) fn open_compatible_dir(path: &Path, create_mode: Option<u32>) -> io::Result<OwnedFd> {
+    let path = if path.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        path
+    };
+    if let Some(mode) = create_mode {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(mode)
+            .create(path)?;
+    }
+    // Retain the resolved directory inode so subsequent file operations do not rewalk the path.
+    open(path, DIRECTORY_FLAGS & !OFlag::O_NOFOLLOW, Mode::empty()).map_err(errno_to_io)
 }
 
 /// Opens a directory only when its entire path is owned by root or the effective user.

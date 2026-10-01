@@ -4,6 +4,7 @@ use super::*;
 fn test_parse_log_cli_options_default() {
     let args: Vec<String> = vec![];
     let options = parse_log_cli_options(&args).unwrap();
+    assert!(!LoggingOptions::default().strict_runtime_paths);
     assert_eq!(
         resolve_log_destination(&LoggingConfig::default(), &options).unwrap(),
         LogDestination::Stderr

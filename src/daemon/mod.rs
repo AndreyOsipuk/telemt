@@ -9,7 +9,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use nix::errno::Errno;
-use nix::unistd::{self, ForkResult, Gid, Uid, chdir, close, fork, getpid, setsid};
+use nix::unistd::{self, ForkResult, Gid, Uid, chdir, fork, getpid, setsid};
 use tracing::info;
 
 // PID file ownership and process-control helpers.
@@ -29,6 +29,8 @@ pub struct DaemonOptions {
     pub daemonize: bool,
     /// Path to PID file.
     pub pid_file: Option<PathBuf>,
+    /// Require trusted, symlink-free PID and log parents. Disabled by default for compatibility.
+    pub strict_runtime_paths: bool,
     /// User to run as after binding sockets.
     pub user: Option<String>,
     /// Group to run as after binding sockets.
@@ -174,8 +176,10 @@ fn redirect_stdio_to_devnull() -> Result<(), DaemonError> {
         }
     }
 
-    if devnull_fd > 2 {
-        let _ = close(devnull_fd);
+    // Keep stdio descriptors open; other source descriptors are closed once by File's Drop.
+    // Transfer ownership only after all dup2 calls succeed so errors retain RAII cleanup.
+    if devnull_fd <= 2 {
+        let _ = std::os::unix::io::IntoRawFd::into_raw_fd(devnull);
     }
 
     Ok(())
@@ -332,6 +336,7 @@ mod tests {
     fn test_daemon_options_default() {
         let opts = DaemonOptions::default();
         assert!(!opts.daemonize);
+        assert!(!opts.strict_runtime_paths);
         assert!(!opts.should_daemonize());
         assert_eq!(opts.pid_file_path(), Path::new(DEFAULT_PID_FILE));
     }

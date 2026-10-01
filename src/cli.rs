@@ -2,9 +2,9 @@
 //!
 //! Subcommands:
 //! - `start [OPTIONS] [config.toml]` - Start the daemon
-//! - `stop [--pid-file PATH]` - Stop a running daemon
-//! - `reload [--pid-file PATH]` - Reload configuration (SIGHUP)
-//! - `status [--pid-file PATH]` - Check daemon status
+//! - `stop [--pid-file PATH] [--strict-runtime-paths]` - Stop a running daemon
+//! - `reload [--pid-file PATH] [--strict-runtime-paths]` - Reload configuration (SIGHUP)
+//! - `status [--pid-file PATH] [--strict-runtime-paths]` - Check daemon status
 //! - `run [OPTIONS] [config.toml]` - Run in foreground (default behavior)
 //! - `healthcheck [OPTIONS] [config.toml]` - Run control-plane health probe
 
@@ -137,6 +137,10 @@ pub fn parse_command(args: &[String]) -> ParsedCommand {
     while i < args.len() {
         match args[i].as_str() {
             "start" | "stop" | "reload" | "status" | "run" | "healthcheck" => {}
+            #[cfg(unix)]
+            "--strict-runtime-paths" => {
+                cmd.daemon_opts.strict_runtime_paths = true;
+            }
             "--mode" => {
                 i += 1;
                 if i < args.len() {
@@ -199,9 +203,18 @@ pub fn parse_command(args: &[String]) -> ParsedCommand {
 #[cfg(unix)]
 pub fn execute_subcommand(cmd: &ParsedCommand) -> Option<i32> {
     match cmd.subcommand {
-        Subcommand::Stop => Some(daemon_commands::stop(&cmd.pid_file)),
-        Subcommand::Reload => Some(daemon_commands::reload(&cmd.pid_file)),
-        Subcommand::Status => Some(daemon_commands::status(&cmd.pid_file)),
+        Subcommand::Stop => Some(daemon_commands::stop(
+            &cmd.pid_file,
+            cmd.daemon_opts.strict_runtime_paths,
+        )),
+        Subcommand::Reload => Some(daemon_commands::reload(
+            &cmd.pid_file,
+            cmd.daemon_opts.strict_runtime_paths,
+        )),
+        Subcommand::Status => Some(daemon_commands::status(
+            &cmd.pid_file,
+            cmd.daemon_opts.strict_runtime_paths,
+        )),
         Subcommand::Healthcheck => {
             if let Some(invalid_mode) = cmd.healthcheck_mode_invalid.as_ref() {
                 if invalid_mode.is_empty() {

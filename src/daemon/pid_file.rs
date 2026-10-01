@@ -17,6 +17,7 @@ use crate::util::secure_fs::AnchoredPath;
 /// PID file manager backed by a persistent sibling lock file.
 pub struct PidFile {
     path: PathBuf,
+    strict_runtime_paths: bool,
     lock_path: PathBuf,
     pid_file: Option<File>,
     pid_identity: Option<FileIdentity>,
@@ -40,12 +41,13 @@ impl FileIdentity {
 }
 
 impl PidFile {
-    /// Creates a new PID file manager for the given path.
-    pub fn new<P: AsRef<Path>>(path: P) -> Self {
+    /// Creates a PID manager with explicit parent-path policy; `false` allows legacy parents.
+    pub fn new<P: AsRef<Path>>(path: P, strict_runtime_paths: bool) -> Self {
         let path = normalize_pid_path(path.as_ref());
         let lock_path = sibling_lock_path(&path);
         Self {
             path,
+            strict_runtime_paths,
             lock_path,
             pid_file: None,
             pid_identity: None,
@@ -56,7 +58,7 @@ impl PidFile {
 
     /// Checks whether the PID file names a running process without modifying either file.
     pub fn check_running(&self) -> Result<Option<i32>, DaemonError> {
-        let Some(pid) = read_pid_file_if_exists(&self.path)? else {
+        let Some(pid) = read_pid_file_if_exists(&self.path, self.strict_runtime_paths)? else {
             return Ok(None);
         };
         Ok(is_process_running(pid).then_some(pid))
@@ -67,9 +69,10 @@ impl PidFile {
     /// Fails if another owner holds the lock or the existing PID names a running process.
     pub fn acquire(&mut self) -> Result<(), DaemonError> {
         let anchor =
-            AnchoredPath::open_trusted_parent_or_create(&self.path, 0o755).map_err(|error| {
+            AnchoredPath::open_runtime_parent(&self.path, Some(0o755), self.strict_runtime_paths)
+                .map_err(|error| {
                 DaemonError::PidFile(format!(
-                    "cannot open trusted parent for {}: {}",
+                    "cannot open PID parent for {}: {}",
                     self.path.display(),
                     error
                 ))
@@ -245,13 +248,16 @@ fn open_file_at(anchor: &AnchoredPath, name: &OsStr, flags: OFlag, mode: u32) ->
     Ok(File::from(descriptor))
 }
 
-fn read_pid_file_if_exists(path: &Path) -> Result<Option<i32>, DaemonError> {
-    let anchor = match AnchoredPath::open_trusted_parent(path) {
+fn read_pid_file_if_exists(
+    path: &Path,
+    strict_runtime_paths: bool,
+) -> Result<Option<i32>, DaemonError> {
+    let anchor = match AnchoredPath::open_runtime_parent(path, None, strict_runtime_paths) {
         Ok(anchor) => anchor,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(DaemonError::PidFile(format!(
-                "cannot open trusted parent for {}: {}",
+                "cannot open PID parent for {}: {}",
                 path.display(),
                 error
             )));
@@ -352,11 +358,14 @@ fn validate_regular_single_link(file: &File, path: &Path) -> Result<fs::Metadata
     Ok(metadata)
 }
 
-/// Reads a PID from a PID file.
+/// Reads a PID using the selected parent-path policy; `false` allows legacy parents.
 #[allow(dead_code)]
-pub fn read_pid_file<P: AsRef<Path>>(path: P) -> Result<i32, DaemonError> {
+pub fn read_pid_file<P: AsRef<Path>>(
+    path: P,
+    strict_runtime_paths: bool,
+) -> Result<i32, DaemonError> {
     let path = normalize_pid_path(path.as_ref());
-    read_pid_file_if_exists(&path)?.ok_or_else(|| {
+    read_pid_file_if_exists(&path, strict_runtime_paths)?.ok_or_else(|| {
         DaemonError::PidFile(format!(
             "cannot read {}: file does not exist",
             path.display()
@@ -364,17 +373,18 @@ pub fn read_pid_file<P: AsRef<Path>>(path: P) -> Result<i32, DaemonError> {
     })
 }
 
-/// Sends a signal to the process specified in a PID file.
+/// Signals a lock-owning process using the same parent-path policy for PID and lock files.
 #[allow(dead_code)]
 pub fn signal_pid_file<P: AsRef<Path>>(
     path: P,
     signal: nix::sys::signal::Signal,
+    strict_runtime_paths: bool,
 ) -> Result<(), DaemonError> {
     let path = normalize_pid_path(path.as_ref());
-    let pid = read_pid_file(&path)?;
+    let pid = read_pid_file(&path, strict_runtime_paths)?;
     #[cfg(target_os = "linux")]
     let pidfd = open_pidfd(pid)?;
-    if !daemon_lock_is_held(&path)? {
+    if !daemon_lock_is_held(&path, strict_runtime_paths)? {
         return Err(DaemonError::PidFile(format!(
             "refusing to signal unlocked or stale PID file {}",
             path.display()
@@ -399,12 +409,15 @@ pub enum DaemonStatus {
     NotRunning,
 }
 
-/// Checks daemon status without modifying the PID or lock file.
+/// Checks daemon status read-only, applying the selected policy to both parent lookups.
 #[allow(dead_code)]
-pub fn check_status<P: AsRef<Path>>(path: P) -> DaemonStatus {
+pub fn check_status<P: AsRef<Path>>(path: P, strict_runtime_paths: bool) -> DaemonStatus {
     let path = normalize_pid_path(path.as_ref());
-    match read_pid_file_if_exists(&path) {
-        Ok(Some(pid)) if daemon_lock_is_held(&path).unwrap_or(false) && is_process_running(pid) => {
+    match read_pid_file_if_exists(&path, strict_runtime_paths) {
+        Ok(Some(pid))
+            if daemon_lock_is_held(&path, strict_runtime_paths).unwrap_or(false)
+                && is_process_running(pid) =>
+        {
             DaemonStatus::Running(pid)
         }
         Ok(Some(pid)) => DaemonStatus::Stale(pid),
@@ -412,14 +425,14 @@ pub fn check_status<P: AsRef<Path>>(path: P) -> DaemonStatus {
     }
 }
 
-fn daemon_lock_is_held(path: &Path) -> Result<bool, DaemonError> {
+fn daemon_lock_is_held(path: &Path, strict_runtime_paths: bool) -> Result<bool, DaemonError> {
     let lock_path = sibling_lock_path(path);
-    let anchor = match AnchoredPath::open_trusted_parent(path) {
+    let anchor = match AnchoredPath::open_runtime_parent(path, None, strict_runtime_paths) {
         Ok(anchor) => anchor,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
         Err(error) => {
             return Err(DaemonError::PidFile(format!(
-                "cannot open trusted parent for {}: {}",
+                "cannot open PID parent for {}: {}",
                 path.display(),
                 error
             )));

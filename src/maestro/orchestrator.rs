@@ -30,10 +30,11 @@ use super::{
     runtime_tasks, shutdown, tls_bootstrap,
 };
 
-// Shared maestro startup and main loop. `drop_after_bind` runs on Unix after listeners are bound
-// and privileged firewall setup completes; it is a no-op on other platforms.
+/// Runs startup and the main loop with explicit runtime-path policy.
+/// `drop_after_bind` runs after listeners and privileged firewall setup are ready.
 pub(super) async fn run_telemt_core(
     privilege_drop_requested: bool,
+    strict_runtime_paths: bool,
     drop_after_bind: impl FnOnce(),
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let bootstrap::BootstrapState {
@@ -46,7 +47,7 @@ pub(super) async fn run_telemt_core(
         effective_log_level,
         runtime_log_filter,
         logging_guard: _logging_guard,
-    } = bootstrap::bootstrap(privilege_drop_requested).await?;
+    } = bootstrap::bootstrap(privilege_drop_requested, strict_runtime_paths).await?;
 
     if privilege_drop_requested && config.server.conntrack_control.inline_conntrack_control {
         warn!("Inline conntrack control is disabled when process privileges are dropped");
