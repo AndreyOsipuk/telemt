@@ -7,6 +7,8 @@ const responseBody=globalThis.TelemtBridgeResponse;if(!responseBody)throw new Er
 const requestSupport=globalThis.TelemtBridgeRequest;if(!requestSupport)throw new Error('missing request runtime');
 const bufferSupport=globalThis.TelemtBridgeBuffers;if(!bufferSupport)throw new Error('missing buffer runtime');
 const recoverySupport=globalThis.TelemtBridgeRecovery;if(!recoverySupport)throw new Error('missing recovery runtime');
+// Keep the method page-owned so recovery and config rollback cannot change frozen retries.
+const carrierMethod='__CARRIER_METHOD__';
 let negotiationEnabled=__NEGOTIATION_ENABLED__,candidateCount=__CANDIDATE_COUNT__,candidateDeadlines=[__CARRIER_DEADLINES__];
 let longPollMs=__LONG_POLL_SECS__*1000,bridgeRequestMs=__BRIDGE_REQUEST_SECS__*1000,bridgeRetryMs=__BRIDGE_RETRY_SECS__*1000;
 let bridgeRecoveryMs=__BRIDGE_RECOVERY_SECS__*1000,websocketOpenMs=__WEBSOCKET_OPEN_SECS__*1000,reconnectGraceMs=__RECONNECT_GRACE_SECS__*1000;
@@ -226,7 +228,7 @@ async function createSession(epoch){
 async function probeHttp(probe,laneID,epoch){
  try{
   const headers={'X-Up-Seq':'1'},token=sessionToken,controller=attemptController,body=probe.data;if(laneID!==null)headers['X-Lane-ID']=String(laneID);
-  const response=await request('/api/v1/up',options('POST',token,body,headers,controller.signal));
+  const response=await request('/api/v1/up',options(carrierMethod,token,body,headers,controller.signal));
   if(closed||epoch!==attemptEpoch)return
   if(response.status!==204){advanceCarrier('http',epoch);return}
   if(response.headers.get('X-Up-Ack')!=='1'){advanceCarrier('protocol',epoch);return}
@@ -263,14 +265,14 @@ async function runUp(){
    lease=takeBatch(upPending,null);upLease=lease;lease.controller=new AbortController();const sequence=String(upSequence),token=sessionToken;
    for(;;){
     try{
-     const response=await request('/api/v1/up',options('POST',token,lease.body,{'X-Up-Seq':sequence},lease.controller.signal),null,1);
+     const response=await request('/api/v1/up',options(carrierMethod,token,lease.body,{'X-Up-Seq':sequence},lease.controller.signal),null,1);
      if(response.status!==204)throw failure('http','uplink rejected');
      if(response.headers.get('X-Up-Ack')!==sequence)throw failure('protocol','uplink acknowledgement rejected');
      break;
     }catch(error){
      let replayed=false;
      const recovered=await recoverTransport(error,async(signal,remaining)=>{
-      const response=await request('/api/v1/up',options('POST',token,lease.body,{'X-Up-Seq':sequence},signal),remaining,2);
+      const response=await request('/api/v1/up',options(carrierMethod,token,lease.body,{'X-Up-Seq':sequence},signal),remaining,2);
       if(response.status!==204)throw failure('http','uplink replay rejected');
       if(response.headers.get('X-Up-Ack')!==sequence)throw failure('protocol','uplink replay acknowledgement rejected');
       replayed=true;
@@ -343,7 +345,7 @@ async function poll(){
   const token=sessionToken,cursor=downCursor;
   try{
    pollController=new AbortController();
-   const response=await request('/api/v1/down',options('POST',token,null,{'X-Down-Cursor':cursor},pollController.signal),null,1);
+   const response=await request('/api/v1/down',options(carrierMethod,token,null,{'X-Down-Cursor':cursor},pollController.signal),null,1);
    if(closed||sessionToken!==token)return;
    if(response.status===204){status('connected');continue}
    if(response.status!==200)throw failure('http','downlink rejected');
@@ -354,7 +356,7 @@ async function poll(){
   }catch(error){
    if(closed)return;
    const recovered=await recoverTransport(error,async(signal,remaining)=>{
-    const response=await request('/api/v1/down',options('POST',token,null,{'X-Down-Cursor':cursor},signal),remaining,2);
+    const response=await request('/api/v1/down',options(carrierMethod,token,null,{'X-Down-Cursor':cursor},signal),remaining,2);
     if(response.status===204)return;
     if(response.status!==200||!response.body.byteLength||!response.headers.get('X-Down-Cursor'))throw failure('http','downlink replay rejected');
    });
@@ -422,14 +424,14 @@ async function runLaneUp(lane){
    const sequence=String(lane.sequence),laneID=String(lane.id),token=sessionToken;
    for(;;){
     try{
-     const response=await request('/api/v1/up',options('POST',token,lease.body,{'X-Up-Seq':sequence,'X-Lane-ID':laneID},lease.controller.signal),null,1);
+     const response=await request('/api/v1/up',options(carrierMethod,token,lease.body,{'X-Up-Seq':sequence,'X-Lane-ID':laneID},lease.controller.signal),null,1);
      if(response.status!==204)throw failure('http','lane uplink rejected');
      if(response.headers.get('X-Up-Ack')!==sequence)throw failure('protocol','lane uplink acknowledgement rejected');
      break;
     }catch(error){
      let replayed=false;
      const recovered=await recoverTransport(error,async(signal,remaining)=>{
-      const response=await request('/api/v1/up',options('POST',token,lease.body,{'X-Up-Seq':sequence,'X-Lane-ID':laneID},signal),remaining,2);
+      const response=await request('/api/v1/up',options(carrierMethod,token,lease.body,{'X-Up-Seq':sequence,'X-Lane-ID':laneID},signal),remaining,2);
       if(response.status!==204)throw failure('http','lane uplink replay rejected');
       if(response.headers.get('X-Up-Ack')!==sequence)throw failure('protocol','lane uplink replay acknowledgement rejected');
       replayed=true;
@@ -451,7 +453,7 @@ async function pollLane(lane){
   while(!closed&&sessionToken&&lanes.get(lane.id)===lane){
    const controller=new AbortController(),laneID=String(lane.id),token=sessionToken,cursor=lane.cursor;lane.controller=controller;
    failedToken=token;failedCursor=cursor;failedLaneID=laneID;
-   const response=await request('/api/v1/down',options('POST',token,null,{'X-Down-Cursor':cursor,'X-Lane-ID':laneID},controller.signal),null,1);
+   const response=await request('/api/v1/down',options(carrierMethod,token,null,{'X-Down-Cursor':cursor,'X-Lane-ID':laneID},controller.signal),null,1);
    if(closed||sessionToken!==token||lanes.get(lane.id)!==lane)return;
    if(response.status===204){
     if(response.headers.get('X-Lane-Closed')==='1'){finishLane(lane,false);return}
@@ -467,7 +469,7 @@ async function pollLane(lane){
   }catch(error){
    if(!closed&&lanes.get(lane.id)===lane){
     const recovered=await recoverTransport(error,async(signal,remaining)=>{
-     const response=await request('/api/v1/down',options('POST',failedToken,null,{'X-Down-Cursor':failedCursor,'X-Lane-ID':failedLaneID},signal),remaining,2);
+     const response=await request('/api/v1/down',options(carrierMethod,failedToken,null,{'X-Down-Cursor':failedCursor,'X-Lane-ID':failedLaneID},signal),remaining,2);
      if(response.status===204)return;
      if(response.status!==200||!response.body.byteLength||!response.headers.get('X-Down-Cursor'))throw failure('http','lane downlink replay rejected');
     });

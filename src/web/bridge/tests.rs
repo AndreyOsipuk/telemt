@@ -1,5 +1,73 @@
 use super::*;
 
+#[test]
+fn carrier_method_is_page_owned_and_used_by_every_https_request() {
+    for method in [WebCarrierMethod::Post, WebCarrierMethod::Put] {
+        let page = render(
+            "proxy.example.com",
+            "/telegram/web/",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            2 * 1024 * 1024,
+            32 * 1024 * 1024,
+            16 * 1024,
+            1024,
+            true,
+            4,
+            [3, 5, 8, 12],
+            25,
+            10,
+            90,
+            15,
+            15,
+            120,
+            0,
+            true,
+            method,
+            &SecureRandom::new(),
+        );
+        assert!(!page.body.contains("__"));
+        assert!(
+            page.body
+                .contains(&format!("const carrierMethod='{}';", method.as_str()))
+        );
+        assert_eq!(page.body.matches("carrierMethod=").count(), 1);
+        assert_eq!(page.body.matches("options(carrierMethod,").count(), 9);
+        let requests: Vec<_> = page
+            .body
+            .lines()
+            .filter(|line| {
+                line.contains("request('/api/v1/up'") || line.contains("request('/api/v1/down'")
+            })
+            .collect();
+        assert_eq!(requests.len(), 9);
+        assert!(
+            requests
+                .iter()
+                .all(|line| line.contains("options(carrierMethod,"))
+        );
+        assert_eq!(page.body.matches("options('POST',bootstrap,").count(), 2);
+        assert!(
+            page.body
+                .contains("fetch(relayBase+'/api/v1/diagnostic',{method:'POST'")
+        );
+        assert!(
+            page.body
+                .contains("options('DELETE',token,null,headers,undefined,true)")
+        );
+        assert!(
+            page.body
+                .contains("method:'GET',signal:requestController.signal")
+        );
+        assert!(
+            page.body
+                .contains("exactKeys(value,['v','bootstrap','limits','timeouts','negotiation'])")
+        );
+        assert!(!page.body.contains("policy.carrier_method"));
+        assert!(page.body.contains("port.postMessage({t:'status',state})"));
+        assert!(!page.body.contains("port.postMessage({t:'status',state,"));
+    }
+}
+
 fn render_page(bootstrap: &str, candidate_count: usize) -> BridgePage {
     render(
         "proxy.example.com",
@@ -20,6 +88,7 @@ fn render_page(bootstrap: &str, candidate_count: usize) -> BridgePage {
         120,
         0,
         false,
+        WebCarrierMethod::Post,
         &SecureRandom::new(),
     )
 }
@@ -44,6 +113,7 @@ fn render_diagnostic_page(bootstrap: &str) -> BridgePage {
         120,
         0,
         true,
+        WebCarrierMethod::Post,
         &SecureRandom::new(),
     )
 }
@@ -95,6 +165,7 @@ fn rendered_page_resolves_carriers_against_the_exact_base_path() {
         120,
         0,
         true,
+        WebCarrierMethod::Post,
         &SecureRandom::new(),
     );
 
@@ -148,6 +219,7 @@ fn rendered_page_embeds_the_configured_bridge_timing_policy() {
         119,
         4,
         false,
+        WebCarrierMethod::Post,
         &SecureRandom::new(),
     );
 
@@ -201,6 +273,7 @@ fn disabled_negotiation_does_not_arm_a_carrier_deadline() {
         120,
         0,
         false,
+        WebCarrierMethod::Post,
         &SecureRandom::new(),
     );
     assert!(page.body.contains(

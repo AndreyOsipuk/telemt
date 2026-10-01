@@ -44,9 +44,9 @@ mod recovery;
 mod response;
 // Session creation and replacement negotiation remain separate from request routing.
 mod session;
-// RFC 6455 upgrade validation and carrier drivers remain isolated from HTTP routing.
 #[cfg(test)]
 mod tests;
+// RFC 6455 upgrade validation and carrier drivers remain isolated from HTTP routing.
 mod websocket;
 // Enabled-debug integration coverage remains separate from carrier behavior tests.
 #[cfg(test)]
@@ -389,6 +389,7 @@ async fn handle_root(
         config.web.timeouts.reconnect_grace_secs,
         config.web.timeouts.carrier_probe_coalesce_ms,
         config.web.debug.bridge_diagnostics_enabled(),
+        config.web.carrier_method,
         &generation.rng,
     );
     let mut response = full_response(StatusCode::OK, Bytes::from(page.body));
@@ -456,14 +457,13 @@ async fn handle_api(
         _ => serve_decoy(request, vhost, true, &runtime).await,
     }
 }
-
 async fn handle_up(
     request: Request<RequestBody>,
     runtime: Arc<WebProcessRuntime>,
     vhost: Arc<WebRuntimeVhost>,
     token_hash: crate::web::manager::TokenHash,
 ) -> HttpResponse {
-    if request.method() != Method::POST || !binary_content_type(&request) {
+    if !matches!(*request.method(), Method::POST | Method::PUT) || !binary_content_type(&request) {
         return serve_decoy(request, vhost, true, &runtime).await;
     }
     let Some(sequence) = canonical_u64_header(&request, "x-up-seq").filter(|value| *value != 0)

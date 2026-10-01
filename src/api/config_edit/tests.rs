@@ -1,5 +1,54 @@
 use super::*;
 
+#[tokio::test]
+async fn carrier_method_api_defaults_and_patches_are_hot() {
+    let (path, _directory) = temp_config("[web]\nenabled = false\n");
+    let (value, _) = read_managed_config(&path).await.unwrap();
+    assert_eq!(value["web"]["carrier_method"].as_str(), Some("post"));
+    for token in ["put", "post"] {
+        let active = ProxyConfig::load(&path).unwrap();
+        let patch = serde_json::json!({"web": {"carrier_method": token}});
+        let mut response = apply_patch_to_path(&path, &patch, None).await.unwrap();
+        let desired = ProxyConfig::load(&path).unwrap();
+        reconcile_runtime_effect(&mut response, &active, &desired).unwrap();
+        assert!(!response.restart_required);
+        assert!(response.runtime_reload_required);
+        assert!(!response.process_restart_required);
+        assert!(response.deferred_process_fields.is_empty());
+        let (value, revision) = read_managed_config(&path).await.unwrap();
+        assert_eq!(value["web"]["carrier_method"].as_str(), Some(token));
+        assert_eq!(revision, response.revision);
+        let written = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(written.contains(&format!("carrier_method = \"{token}\"")));
+    }
+}
+
+#[tokio::test]
+async fn carrier_method_api_rejects_invalid_values_without_writing() {
+    let (path, _directory) = temp_config("[web]\ncarrier_method = \"put\"\n");
+    let original = tokio::fs::read(&path).await.unwrap();
+    let revision = crate::api::config_store::current_revision(&path)
+        .await
+        .unwrap();
+    for value in [
+        serde_json::json!("PUT"),
+        serde_json::json!("patch"),
+        serde_json::json!(true),
+        serde_json::json!(42),
+    ] {
+        let patch = serde_json::json!({"web": {"carrier_method": value}});
+        let error = apply_patch_to_path(&path, &patch, None).await.unwrap_err();
+        assert_eq!(error.status, hyper::StatusCode::BAD_REQUEST);
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), original);
+        assert_eq!(
+            crate::api::config_store::current_revision(&path)
+                .await
+                .unwrap(),
+            revision
+        );
+    }
+}
+
 #[test]
 fn json_object_converts_to_toml_table() {
     let j: Json = serde_json::json!({"censorship": {"tls_domain": "a.com"}, "default_dc": 2});

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-use super::web_carrier::{WebCarrier, WebCarriers};
+use super::web_carrier::{WebCarrier, WebCarrierMethod, WebCarriers};
 use super::web_debug::WebDebugConfig;
 
 // Serialized WEB defaults remain separate from the runtime data model.
@@ -413,6 +413,9 @@ pub struct WebConfig {
     /// Sole carrier when negotiation is disabled and final fallback when enabled.
     #[serde(default)]
     pub carrier: WebCarrier,
+    /// Page-owned HTTP method for HTTPS uplink and downlink, including retries.
+    #[serde(default)]
+    pub carrier_method: WebCarrierMethod,
     /// Ordered carriers considered by server-side negotiation before the fallback carrier.
     #[serde(default)]
     pub carriers: WebCarriers,
@@ -471,6 +474,7 @@ impl Default for WebConfig {
         Self {
             enabled: false,
             carrier: WebCarrier::default(),
+            carrier_method: WebCarrierMethod::default(),
             carriers: WebCarriers::default(),
             carrier_learning: default_web_carrier_learning(),
             carrier_negotiation_aggressiveness: WebCarrierNegotiationAggressiveness::default(),

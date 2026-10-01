@@ -3,6 +3,27 @@ use serde::{Deserialize, Serialize};
 /// Minimum restart-owned entries required for one complete learning sample.
 pub(crate) const WEB_CARRIER_LEARNING_MIN_ENTRIES: usize = 3;
 
+/// HTTP method emitted by newly rendered HTTPS carrier bridges.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WebCarrierMethod {
+    /// Preserve the original bridge request method.
+    #[default]
+    Post,
+    /// Allow idempotent-method connection reuse in Linux WebKitGTK.
+    Put,
+}
+
+impl WebCarrierMethod {
+    /// Returns the HTTP token embedded in the page-owned carrier policy.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Post => "POST",
+            Self::Put => "PUT",
+        }
+    }
+}
+
 /// Carrier selected for one newly issued WEB relay session.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

@@ -263,6 +263,7 @@ const LISTENER_CONFIG_KEYS: &[&str] = &[
 const WEB_CONFIG_KEYS: &[&str] = &[
     "enabled",
     "carrier",
+    "carrier_method",
     "carriers",
     "carrier_learning",
     "carrier_negotiation_aggressiveness",
