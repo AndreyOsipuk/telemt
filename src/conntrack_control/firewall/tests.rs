@@ -20,6 +20,10 @@ use super::transaction::{InterruptibleRunner, reconcile_once};
 #[path = "tests/model_tests.rs"]
 mod model_tests;
 
+// Replays helper diagnostics through command classification and recovery.
+#[path = "tests/recovery_errors.rs"]
+mod recovery_errors;
+
 #[derive(Clone)]
 struct FailureRule {
     binary: &'static str,
