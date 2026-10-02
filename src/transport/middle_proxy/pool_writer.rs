@@ -33,6 +33,10 @@ mod publication;
 mod replacement;
 mod runtime;
 
+// Recovery regressions exercise the serialized production publication boundary.
+#[cfg(test)]
+mod recovery_tests;
+
 struct PreparedWriter<'a> {
     writer: MeWriter,
     tx: mpsc::Sender<WriterCommand>,

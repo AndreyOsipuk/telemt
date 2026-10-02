@@ -1,6 +1,72 @@
 use super::*;
 
 #[test]
+fn conntrack_control_is_opt_in_by_default() {
+    assert!(!default_conntrack_control_enabled());
+    assert!(
+        !ProxyConfig::default()
+            .server
+            .conntrack_control
+            .inline_conntrack_control
+    );
+    let cfg = load_config_from_temp_toml(
+        r#"
+        [censorship]
+        tls_domain = "example.com"
+
+        [access.users]
+        user = "00000000000000000000000000000000"
+        "#,
+    );
+    assert!(!cfg.server.conntrack_control.inline_conntrack_control);
+    assert!(
+        !cfg.server
+            .conntrack_control
+            .inline_conntrack_control_explicit
+    );
+    assert_eq!(
+        serde_json::to_value(&cfg.server.conntrack_control).unwrap()["inline_conntrack_control"],
+        false,
+    );
+}
+
+#[test]
+fn conntrack_control_preserves_explicit_enablement() {
+    for enabled in [false, true] {
+        let cfg = load_config_from_temp_toml(&format!(
+            r#"
+            [server.conntrack_control]
+            inline_conntrack_control = {enabled}
+            backend = "nftables"
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+            "#,
+        ));
+        assert_eq!(
+            cfg.server.conntrack_control.inline_conntrack_control,
+            enabled
+        );
+        assert!(
+            cfg.server
+                .conntrack_control
+                .inline_conntrack_control_explicit
+        );
+        assert_eq!(
+            cfg.server.conntrack_control.backend,
+            ConntrackBackend::Nftables
+        );
+        assert_eq!(
+            serde_json::to_value(&cfg.server.conntrack_control).unwrap()["inline_conntrack_control"],
+            enabled,
+        );
+    }
+}
+
+#[test]
 fn conntrack_pressure_high_watermark_out_of_range_is_rejected() {
     let toml = r#"
         [server.conntrack_control]

@@ -84,7 +84,17 @@ impl MePool {
             crate::network::IpFamily::V6
         };
         let now_epoch_secs = Self::now_epoch_secs();
-        if !self.family_enabled_for_drain_coverage(family, now_epoch_secs) {
+        let configured = match family {
+            crate::network::IpFamily::V4 => self.decision.ipv4_me,
+            crate::network::IpFamily::V6 => self.decision.ipv6_me,
+        };
+        // Recovery coverage must remain publishable during suppression; the serialized
+        // per-group floor check below still bounds it and generation authority is unchanged.
+        let recovery_coverage =
+            contour == WriterContour::Active && intent == WriterOpenIntent::Coverage;
+        if !configured
+            || (self.is_family_temporarily_suppressed(family, now_epoch_secs) && !recovery_coverage)
+        {
             return Err(ProxyError::Proxy(
                 "ME writer family lost publication authority".into(),
             ));

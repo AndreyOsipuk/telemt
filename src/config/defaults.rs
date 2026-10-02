@@ -59,7 +59,7 @@ const DEFAULT_ME_POOL_DRAIN_SOFT_EVICT_BUDGET_PER_CORE: u16 = 16;
 const DEFAULT_ME_POOL_DRAIN_SOFT_EVICT_COOLDOWN_MS: u64 = 1000;
 const DEFAULT_USER_MAX_UNIQUE_IPS_WINDOW_SECS: u64 = 30;
 const DEFAULT_ACCEPT_PERMIT_TIMEOUT_MS: u64 = 250;
-const DEFAULT_CONNTRACK_CONTROL_ENABLED: bool = true;
+const DEFAULT_CONNTRACK_CONTROL_ENABLED: bool = false;
 const DEFAULT_CONNTRACK_PRESSURE_HIGH_WATERMARK_PCT: u8 = 85;
 const DEFAULT_CONNTRACK_PRESSURE_LOW_WATERMARK_PCT: u8 = 70;
 const DEFAULT_CONNTRACK_DELETE_BUDGET_PER_SEC: u64 = 4096;
@@ -244,6 +244,7 @@ pub(crate) fn default_accept_permit_timeout_ms() -> u64 {
     DEFAULT_ACCEPT_PERMIT_TIMEOUT_MS
 }
 
+/// Keeps privileged conntrack control disabled unless explicitly requested.
 pub(crate) fn default_conntrack_control_enabled() -> bool {
     DEFAULT_CONNTRACK_CONTROL_ENABLED
 }
