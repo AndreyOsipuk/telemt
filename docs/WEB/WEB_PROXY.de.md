@@ -2,7 +2,7 @@
 
 [English](WEB_PROXY.en.md) | [Русский](WEB_PROXY.ru.md) | [Deutsch](WEB_PROXY.de.md)
 
-Der WEB-Modus transportiert gewöhnliche MTProxy-Streams über begrenzte HTTPS- oder WebSocket-Carrier, die mit dem Proxy-Typ `WEB` von Telegram Desktop kompatibel sind. Telemt terminiert TLS nicht selbst: NGINX oder HAProxy verwaltet das öffentliche Zertifikat und leitet unverschlüsseltes HTTP/1.1 an einen privaten Telemt-Listener weiter.
+Der WEB-Modus transportiert gewöhnliche MTProxy-Streams über begrenzte HTTPS- oder WebSocket-Carrier, die mit dem Proxy-Typ `WEB` von Telegram Desktop kompatibel sind. Telemt terminiert TLS nicht selbst: NGINX, HAProxy oder Caddy verwaltet das öffentliche Zertifikat und leitet unverschlüsseltes HTTP/1.1 an einen privaten Telemt-Listener weiter.
 
 > [!IMPORTANT]
 >
@@ -14,7 +14,7 @@ Der WEB-Modus transportiert gewöhnliche MTProxy-Streams über begrenzte HTTPS- 
 Telegram Desktop
     | HTTPS oder WSS :443
     v
-NGINX oder HAProxy (TLS-Terminierung, kanonischer Host und eine X-Forwarded-For-Adresse)
+NGINX, HAProxy oder Caddy (TLS-Terminierung, kanonischer Host und eine X-Forwarded-For-Adresse)
     | unverschlüsseltes HTTP/1.1 in einem privaten Netz
     v
 Telemt-WEB-Listener
@@ -270,6 +270,66 @@ backend telemt_web
 
 Im Frontend oder im Abschnitt `defaults` muss für das standardmäßige WebSocket-Liveness-Intervall auch `timeout client 65s` oder länger gesetzt sein. Für `https-lanes` muss das öffentliche HAProxy-ALPN `h2`, für WebSocket-Upgrade außerdem `http/1.1` enthalten. Bewahren Sie `Connection`, `Upgrade` und `Sec-WebSocket-*` unverändert; Pfad, Raw Query, Body sowie die Carrier-Header `Authorization`, `Content-Type`, `X-Up-Seq`, `X-Down-Cursor` und `X-Lane-ID` dürfen nicht umgeschrieben werden. Fügen Sie für Prefix-only-Cohosting `acl telemt_web_path path_beg /telegram/web/` hinzu und verlangen Sie in `use_backend` sowohl Host- als auch Pfad-ACL; entfernen Sie das Präfix nicht.
 
+## TLS-Terminierung mit Caddy
+
+```caddyfile
+{
+	servers {
+		protocols h1 h2
+	}
+}
+
+proxy.example.com {
+	reverse_proxy 127.0.0.1:18080 {
+		header_up X-Forwarded-For {remote_host}
+		flush_interval -1
+		stream_close_delay 5m
+	}
+}
+```
+
+Caddy bezieht und erneuert das öffentliche Zertifikat für die Site-Adresse automatisch. Den ursprünglichen `Host` sowie die Header `Connection`, `Upgrade` und `Sec-WebSocket-*` leitet Caddy unverändert weiter, WebSocket-Upgrade wird ohne zusätzliche Direktiven proxied; fügen Sie kein `header_up Host` hinzu. Öffentliches HTTP/2 (für `https-lanes`) und HTTP/1.1 (für WebSocket-Upgrade) sind standardmäßig aktiv, der private Abschnitt Caddy → Telemt bleibt HTTP/1.1. Die globale Option `protocols h1 h2` hält HTTP/3 aus dem WEB-Pfad heraus, weil der WEB-Vertrag nur HTTP/1.1 und HTTP/2 abdeckt. Sie gilt für alle Sites dieses Caddy-Servers.
+
+`header_up X-Forwarded-For {remote_host}` überschreibt den Header mit genau einer Adresse. Ohne diese Zeile hängt Caddy bei Peers aus `trusted_proxies` an einen eingehenden `X-Forwarded-For` an, Telemt akzeptiert jedoch nur eine parsebare IP-Adresse. Steht Caddy selbst hinter einem L4-Balancer mit `listener_wrappers { proxy_protocol }`, ist `{remote_host}` die Client-Adresse aus dem PROXY-Header. `flush_interval -1` deaktiviert die Antwortpufferung für Long Polls und Downlinks. Request-Bodies streamt Caddy standardmäßig; aktivieren Sie kein `request_buffers`.
+
+`reverse_proxy` hat in Caddy standardmäßig weder Read-/Write-Timeouts noch ein Body-Limit, daher passieren der 25-Sekunden-Long-Poll und das WebSocket-Liveness-Intervall unverändert. Sind serverweite `timeouts` oder `request_body max_size` gesetzt, müssen sie über 65 Sekunden bzw. mindestens bei `web.limits.max_body_bytes` liegen. Mit einem einzigen Upstream wiederholt Caddy fehlgeschlagene Anfragen nicht; fügen Sie weder `lb_retries` noch `lb_try_duration` hinzu. Bei einem Konfigurations-Reload schließt Caddy upgegradete Verbindungen standardmäßig sofort. `stream_close_delay` hält bestehende WebSocket-Lanes nach einem Reload für die angegebene Zeit offen.
+
+Leiten Sie für Prefix-only-Cohosting mit `base_path = "telegram/web"` den Teilbaum über `handle` und nicht über `handle_path` weiter, denn `handle_path` entfernt das Präfix:
+
+```caddyfile
+proxy.example.com {
+	handle /telegram/web/* {
+		reverse_proxy 127.0.0.1:18080 {
+			header_up X-Forwarded-For {remote_host}
+			flush_interval -1
+			stream_close_delay 5m
+		}
+	}
+
+	handle {
+		# gewöhnliche Site
+	}
+}
+```
+
+Das Routing von Caddy fügt keine Weiterleitung mit angehängtem Slash hinzu: `/telegram/web` ohne abschließenden Slash landet im Handler der gewöhnlichen Site. Stellen Sie sicher, dass auch dieser Handler nicht weiterleitet; `file_server` leitet etwa eine Verzeichnisanfrage auf die Variante mit Slash um.
+
+Ohne `log`-Direktive schreibt Caddy kein Access-Log. Wird eines benötigt, schwärzen Sie Bridge-Capability und Bearer-Credentials:
+
+```caddyfile
+log {
+	format filter {
+		request>uri query {
+			replace bridge REDACTED
+		}
+		request>headers>Authorization delete
+		request>headers>Sec-Websocket-Protocol delete
+	}
+}
+```
+
+Tragen Sie in `web_trusted_proxy_cidrs` die Adresse ein, von der aus Caddy Telemt erreicht, für die obige Konfiguration also `["127.0.0.1/32"]`.
+
 ## Lebenszyklus und Reload-Verhalten
 
 | Konfiguration | Runtime-Verhalten |
@@ -431,7 +491,7 @@ Der vollständige Vertrag für Requests, Revisionen, Fehler und alle Benutzer-En
 | `/telegram/web` leitet auf `/telegram/web/` um | Fügen Sie für den Pfad ohne Schrägstrich einen exakten Non-WEB-Handler hinzu. Nur der mit Schrägstrich abgeschlossene konfigurierte Teilbaum gehört zum WEB-Vertrag von Telemt. |
 | Ein konkurrierender `https-lanes`-Downlink erreicht den Decoy mit `404` | Prüfen Sie, dass er mit `X-Down-Cursor: 0` beginnt, bewahren Sie `X-Lane-ID` und setzen Sie `lane_open_wait_secs` über den beobachteten Abstand zwischen Downlink und `OPEN`. Fortgeschrittene Cursor fehlender Lanes schlagen absichtlich fail-closed fehl. |
 | Auto-Negotiation wechselt weiter, nachdem Daten bereits akzeptiert wurden | Das ist ungültig. Prüfen Sie das authentifizierte `X-Carrier-State`-Replay und das Carrier-Commit-Lifecycle-Ereignis; `committed` oder `healthy` ist terminal und erfordert eine neue Sitzung. |
-| Long Polls werden nach einem festen Intervall getrennt | Setzen Sie Client-, Server-, Sende- und Lese-Timeouts von NGINX/HAProxy über `web.timeouts.long_poll_secs`. |
+| Long Polls werden nach einem festen Intervall getrennt | Setzen Sie Client-, Server-, Sende- und Lese-Timeouts von NGINX/HAProxy/Caddy über `web.timeouts.long_poll_secs`. |
 | WebSocket-Upgrade erreicht statt `101` den Decoy | Bewahren Sie HTTP/1.1 `Connection: Upgrade`, `Upgrade: websocket`, das einzelne exakte `Sec-WebSocket-Protocol` und den kanonischen bodylosen Request an der konfigurierten Basis plus `/api/v1/ws`. Prüfen Sie außerdem Carrier-/Session-Kompatibilität und die Prozess-Verbindungsreserve. |
 | Ein `websocket-lanes`-Stream wurde geschlossen, Geschwister bleiben aber verbunden | Dies ist die beabsichtigte Fehlergrenze. Prüfen Sie die Message-/Frame-Zeilen dieser Lane in `/web-status`; fehlerhafte oder lane-fremde Frames, Write-Timeouts und Backend-Close schließen nur die betroffene Lane. |
 | `/web-status` ist leer | Prüfen Sie, dass `[web.debug].enabled = true` gesetzt ist, wenden Sie die Konfiguration an, wählen Sie ein Fenster innerhalb von `max_window_secs` und erzeugen Sie nach der Policy-Änderung neuen WEB-Datenverkehr. |
