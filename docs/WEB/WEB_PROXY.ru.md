@@ -2,7 +2,7 @@
 
 [English](WEB_PROXY.en.md) | [Русский](WEB_PROXY.ru.md) | [Deutsch](WEB_PROXY.de.md)
 
-WEB-режим переносит обычные MTProxy-потоки через bounded HTTPS или WebSocket carriers, совместимые с типом прокси `WEB` в Telegram Desktop. Telemt не терминирует TLS: публичный сертификат обслуживает NGINX или HAProxy, который передаёт обычный HTTP/1.1 на приватный listener Telemt.
+WEB-режим переносит обычные MTProxy-потоки через bounded HTTPS или WebSocket carriers, совместимые с типом прокси `WEB` в Telegram Desktop. Telemt не терминирует TLS: публичный сертификат обслуживает NGINX, HAProxy или Caddy, который передаёт обычный HTTP/1.1 на приватный listener Telemt.
 
 > [!IMPORTANT]
 >
@@ -14,7 +14,7 @@ WEB-режим переносит обычные MTProxy-потоки через
 Telegram Desktop
     | HTTPS или WSS :443
     v
-NGINX или HAProxy (TLS termination, канонический Host и один адрес X-Forwarded-For)
+NGINX, HAProxy или Caddy (TLS termination, канонический Host и один адрес X-Forwarded-For)
     | обычный HTTP/1.1 в приватной сети
     v
 WEB-listener Telemt
@@ -270,6 +270,66 @@ backend telemt_web
 
 Во frontend или секции `defaults` также задайте `timeout client 65s` или больше для default WebSocket liveness interval. Для `https-lanes` публичный ALPN HAProxy должен содержать `h2`, а для WebSocket Upgrade — `http/1.1`. Сохраняйте `Connection`, `Upgrade` и `Sec-WebSocket-*`; не переписывайте path, raw query, body и carrier headers `Authorization`, `Content-Type`, `X-Up-Seq`, `X-Down-Cursor`, `X-Lane-ID`. Для prefix-only cohosting добавьте `acl telemt_web_path path_beg /telegram/web/` и потребуйте одновременно host- и path-ACL в `use_backend`; не удаляйте prefix.
 
+## Терминация TLS на Caddy
+
+```caddyfile
+{
+	servers {
+		protocols h1 h2
+	}
+}
+
+proxy.example.com {
+	reverse_proxy 127.0.0.1:18080 {
+		header_up X-Forwarded-For {remote_host}
+		flush_interval -1
+		stream_close_delay 5m
+	}
+}
+```
+
+Caddy сам получает и продлевает публичный сертификат для адреса сайта. Он передаёт исходный `Host` и заголовки `Connection`, `Upgrade` и `Sec-WebSocket-*` без изменений и проксирует WebSocket Upgrade без дополнительных директив; не добавляйте `header_up Host`. Публичные HTTP/2 (нужен для `https-lanes`) и HTTP/1.1 (нужен для WebSocket Upgrade) включены по умолчанию, а приватный участок Caddy → Telemt остаётся HTTP/1.1. Глобальная опция `protocols h1 h2` убирает HTTP/3 с пути WEB: контракт WEB описывает только HTTP/1.1 и HTTP/2. Она действует на все сайты этого сервера Caddy.
+
+`header_up X-Forwarded-For {remote_host}` перезаписывает заголовок одним адресом. Без неё Caddy дописывает адрес к входящему `X-Forwarded-For` от пиров из `trusted_proxies`, а Telemt принимает только один разбираемый IP-адрес. Если сам Caddy стоит за L4-балансировщиком с `listener_wrappers { proxy_protocol }`, `{remote_host}` — адрес клиента из заголовка PROXY. `flush_interval -1` отключает буферизацию ответа для long polls и downlink. Тела запросов Caddy по умолчанию передаёт потоком; не включайте `request_buffers`.
+
+У `reverse_proxy` в Caddy по умолчанию нет read/write timeout и лимита тела запроса, поэтому 25-секундный long poll и WebSocket liveness interval проходят без изменений. Если заданы серверные `timeouts` или `request_body max_size`, держите их выше 65 секунд и не меньше `web.limits.max_body_bytes` соответственно. С одним upstream Caddy не повторяет неудачные запросы; не добавляйте `lb_retries` и `lb_try_duration`. При reload конфигурации Caddy по умолчанию сразу закрывает upgraded-соединения. `stream_close_delay` держит установленные WebSocket lanes открытыми на заданное время после reload.
+
+Для prefix-only cohosting с `base_path = "telegram/web"` направляйте поддерево через `handle`, а не `handle_path`: `handle_path` срезает prefix.
+
+```caddyfile
+proxy.example.com {
+	handle /telegram/web/* {
+		reverse_proxy 127.0.0.1:18080 {
+			header_up X-Forwarded-For {remote_host}
+			flush_interval -1
+			stream_close_delay 5m
+		}
+	}
+
+	handle {
+		# обычный сайт
+	}
+}
+```
+
+Маршрутизация Caddy не добавляет редирект со слэшем: `/telegram/web` без завершающего слэша уходит в обработчик обычного сайта. Убедитесь, что и этот обработчик не редиректит его; например, `file_server` перенаправляет запрос каталога на вариант со слэшем.
+
+Caddy не пишет access log без директивы `log`. Если журнал нужен, скройте bridge capability и bearer credentials:
+
+```caddyfile
+log {
+	format filter {
+		request>uri query {
+			replace bridge REDACTED
+		}
+		request>headers>Authorization delete
+		request>headers>Sec-Websocket-Protocol delete
+	}
+}
+```
+
+В `web_trusted_proxy_cidrs` укажите адрес, с которого Caddy подключается к Telemt, например `["127.0.0.1/32"]` для конфигурации выше.
+
 ## Lifecycle и reload
 
 | Конфигурация | Поведение runtime |
@@ -431,7 +491,7 @@ curl -sS -X POST http://127.0.0.1:9091/v1/users/web-user/rotate-secret \
 | `/telegram/web` перенаправляет на `/telegram/web/` | Добавьте точный non-WEB handler для path без слеша. В WEB-контракт Telemt входит только настроенное поддерево с завершающим слешем. |
 | Downlink `https-lanes`, участвующий в гонке, попадает в decoy с `404` | Убедитесь, что он начинается с `X-Down-Cursor: 0`, сохраняйте `X-Lane-ID` и задайте `lane_open_wait_secs` выше наблюдаемого разрыва down-before-`OPEN`. Продвинутый cursor отсутствующей lane намеренно закрывается fail-closed. |
 | Auto-negotiation переходит дальше после уже принятого трафика | Такое поведение некорректно. Проверьте аутентифицированный replay `X-Carrier-State` и lifecycle row commit carrier; ответ `committed` или `healthy` terminal и требует новой сессии. |
-| Long polls разрываются через фиксированный интервал | Поднимите client, server, send и read timeouts NGINX/HAProxy выше `web.timeouts.long_poll_secs`. |
+| Long polls разрываются через фиксированный интервал | Поднимите client, server, send и read timeouts NGINX/HAProxy/Caddy выше `web.timeouts.long_poll_secs`. |
 | WebSocket Upgrade попадает в decoy вместо `101` | Сохраните HTTP/1.1 `Connection: Upgrade`, `Upgrade: websocket`, единственный точный `Sec-WebSocket-Protocol` и канонический bodyless request по настроенному base плюс `/api/v1/ws`. Также проверьте соответствие carrier/session и process connection reserve. |
 | Один stream `websocket-lanes` закрылся, а siblings остались подключены | Это штатная failure boundary. Проверьте message/frame rows этой lane в `/web-status`; malformed, cross-lane, write-timeout и backend-close закрывают только затронутую lane. |
 | `/web-status` пуст | Убедитесь, что `[web.debug].enabled = true`, примените конфигурацию, выберите окно в пределах `max_window_secs` и создайте новый WEB-трафик после изменения policy. |
