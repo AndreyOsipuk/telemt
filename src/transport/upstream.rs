@@ -339,6 +339,8 @@ pub struct UpstreamManager {
 
 // Upstream manager configuration, DNS resolution, and API snapshots.
 mod manager_config;
+// Current direct egress addresses eligible for source-bound NAT discovery.
+mod nat_contexts;
 // Latency- and scope-aware upstream selection.
 mod selection;
 // Direct and proxied connection establishment.

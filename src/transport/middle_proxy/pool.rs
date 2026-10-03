@@ -407,6 +407,7 @@ pub(super) struct BindingPolicyCore {
 }
 
 pub(super) struct NatRuntimeCore {
+    pub(super) discovery: super::pool_nat::NatDiscovery,
     pub(super) nat_ip_cfg: Option<IpAddr>,
     pub(super) nat_ip_detected: Arc<RwLock<Option<IpAddr>>>,
     pub(super) nat_probe: bool,
