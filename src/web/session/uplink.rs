@@ -39,6 +39,7 @@ impl WebSession {
             sequence,
             body,
             WebSessionLifecycleObservation::HttpActivityAfterGap,
+            None,
         )?;
         if self.automatic_carrier && !progressed && !self.is_carrier_committed() {
             return Err(ManagerError::Backpressure);
@@ -56,8 +57,29 @@ impl WebSession {
             sequence,
             body,
             WebSessionLifecycleObservation::WebSocketActivityAfterGap,
+            None,
         )
         .map(|(_, progress)| progress)
+    }
+
+    /// Applies an admitted conveyor head without weakening the carrier commit gate.
+    pub(super) fn process_claimed_up(
+        self: &Arc<Self>,
+        sequence: u64,
+        body: &[u8],
+        claim: &super::conveyor::ConveyorClaim,
+        digest: TokenHash,
+    ) -> Result<u64, ManagerError> {
+        let (acknowledged, progressed) = self.process_up_inner(
+            sequence,
+            body,
+            WebSessionLifecycleObservation::HttpActivityAfterGap,
+            Some((claim, digest)),
+        )?;
+        if self.automatic_carrier && !progressed && !self.is_carrier_committed() {
+            return Err(ManagerError::Backpressure);
+        }
+        Ok(acknowledged)
     }
 
     fn process_up_inner(
@@ -65,6 +87,7 @@ impl WebSession {
         sequence: u64,
         body: &[u8],
         observation: WebSessionLifecycleObservation,
+        claim: Option<(&super::conveyor::ConveyorClaim, TokenHash)>,
     ) -> Result<(u64, bool), ManagerError> {
         if !self.carrier().is_multiplexed() {
             return Err(ManagerError::Protocol);
@@ -95,7 +118,8 @@ impl WebSession {
             self.close(SessionCloseReason::Protocol);
             return Err(ManagerError::Protocol);
         }
-        let digest: TokenHash = Sha256::digest(body).into();
+        let digest: TokenHash =
+            claim.map_or_else(|| Sha256::digest(body).into(), |(_, digest)| digest);
         let mut opened = Vec::new();
         let mut committed = false;
         let mut healthy = None;
@@ -106,6 +130,9 @@ impl WebSession {
                 return Err(ManagerError::Closed);
             }
             self.ensure_carrier_active_locked(&state)?;
+            if let Some((claim, _)) = claim {
+                claim.validate_locked(&state, &digest)?;
+            }
             if sequence == state.last_up_sequence && sequence != 0 {
                 return if bool::from(state.last_up_digest.ct_eq(&digest)) {
                     self.touch_peer_locked(&mut state, Instant::now(), observation);
@@ -155,6 +182,7 @@ impl WebSession {
             } else {
                 state.last_up_sequence = sequence;
                 state.last_up_digest = digest;
+                state.conveyor.commit(None, sequence, digest);
                 (committed, healthy) = self.record_uplink_progress_locked(&mut state, progress);
                 Ok((sequence, progress.any()))
             }

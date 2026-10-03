@@ -416,6 +416,9 @@ pub struct WebConfig {
     /// Page-owned HTTP method for HTTPS uplink and downlink, including retries.
     #[serde(default)]
     pub carrier_method: WebCarrierMethod,
+    /// Enables negotiated bounded HTTP uplink pipelining for new WEB sessions.
+    #[serde(default = "default_web_conveyor")]
+    pub conveyor: bool,
     /// Ordered carriers considered by server-side negotiation before the fallback carrier.
     #[serde(default)]
     pub carriers: WebCarriers,
@@ -475,6 +478,7 @@ impl Default for WebConfig {
             enabled: false,
             carrier: WebCarrier::default(),
             carrier_method: WebCarrierMethod::default(),
+            conveyor: default_web_conveyor(),
             carriers: WebCarriers::default(),
             carrier_learning: default_web_carrier_learning(),
             carrier_negotiation_aggressiveness: WebCarrierNegotiationAggressiveness::default(),

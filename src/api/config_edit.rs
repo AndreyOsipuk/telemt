@@ -453,3 +453,7 @@ mod base_path_tests;
 #[cfg(test)]
 #[path = "config_edit/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "config_edit/conveyor_tests.rs"]
+mod conveyor_tests;

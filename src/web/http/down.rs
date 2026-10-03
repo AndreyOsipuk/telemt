@@ -65,6 +65,8 @@ pub(super) async fn handle_down(
     if !body.is_empty() {
         return serve_decoy(request, vhost, true, &runtime).await;
     }
+    // Empty polls must not retain even one byte from a conveyor head's body reserve.
+    drop(_body_budget);
     let Some(_down_poll) = runtime.try_lane_poll(false) else {
         return service_unavailable();
     };

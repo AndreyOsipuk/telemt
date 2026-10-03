@@ -26,12 +26,13 @@ function create(settings){
   if(status===204&&(path==='/api/v1/up'||path==='/api/v1/down'))return {limit:0,exact:true,reason:'protocol'};
   return {limit:0,exact:true,reason:'http'};
  }
- async function send(path,frozenOptions,remainingBudget,maxAttempts){
+ async function send(path,frozenOptions,remainingBudget,maxAttempts,receiver){
   let delay=250,attempt=0,lastReason='network';maxAttempts=maxAttempts||9;
+  const attempts=()=>typeof maxAttempts==='function'?maxAttempts():maxAttempts;
   const initialBudget=remainingBudget?Math.min(settings.retryMs(),remainingBudget()):settings.retryMs();
   const deadline=Date.now()+Math.max(0,initialBudget),external=frozenOptions.signal;
   const attemptLimit=path==='/api/v1/down'?settings.longPollMs()+settings.requestMs():settings.requestMs();
-  while(attempt<maxAttempts){
+  while(attempt<attempts()){
    if(settings.closed()||(external&&external.aborted))throw new Error('request aborted');
    const remaining=Math.min(deadline-Date.now(),remainingBudget?remainingBudget():Infinity);if(remaining<=0)break;attempt++;
    const controller=new AbortController(),abort=()=>controller.abort();let timedOut=false;
@@ -45,12 +46,12 @@ function create(settings){
      lastReason='http';wait=retryAfterMs(fetched);settings.cancel(fetched);
     }else{
      const policy=responsePolicy(path,fetched.status);let body;
-     try{body=await settings.read(fetched,policy.limit,policy.exact,controller.signal)}
+     try{body=receiver&&(fetched.status===200||fetched.status===204)?await receiver(fetched,controller.signal):await settings.read(fetched,policy.limit,policy.exact,controller.signal);}
      catch(error){
       controller.abort();
       if(external&&external.aborted)throw error;
       if(timedOut)throw settings.failure('timeout','response deadline exceeded');
-      throw settings.failure(policy.reason,error&&error.message);
+      throw settings.failure(settings.reason(error,policy.reason),error&&error.message);
      }
      response={status:fetched.status,headers:fetched.headers,body};return response;
     }
@@ -60,7 +61,7 @@ function create(settings){
     if(timedOut)lastReason='timeout';
     if(settings.reason(error,'')==='protocol')throw error;
    }finally{clearTimeout(timer);if(external)external.removeEventListener('abort',abort)}
-   const after=Math.min(deadline-Date.now(),remainingBudget?remainingBudget():Infinity);if(attempt>=maxAttempts||after<=0)break;
+   const after=Math.min(deadline-Date.now(),remainingBudget?remainingBudget():Infinity);if(attempt>=attempts()||after<=0)break;
    settings.retrying();
    const backoff=wait||delay+Math.floor(Math.random()*Math.max(1,delay/4));
    await pause(Math.min(backoff,after),external);delay=Math.min(delay*2,2000);

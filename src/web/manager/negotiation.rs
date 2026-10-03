@@ -130,6 +130,7 @@ pub(crate) struct CarrierRequest {
     attempt: Option<u8>,
     failure: Option<CarrierFailure>,
     user_agent_hash: [u8; 32],
+    up_window: Option<u8>,
 }
 
 impl CarrierRequest {
@@ -141,6 +142,7 @@ impl CarrierRequest {
             attempt: None,
             failure: None,
             user_agent_hash,
+            up_window: None,
         }
     }
 
@@ -152,6 +154,7 @@ impl CarrierRequest {
             attempt: None,
             failure: None,
             user_agent_hash,
+            up_window: None,
         }
     }
 
@@ -169,7 +172,19 @@ impl CarrierRequest {
             attempt: Some(attempt),
             failure,
             user_agent_hash,
+            up_window: None,
         }
+    }
+
+    /// Attaches the separately validated HTTP conveyor capability.
+    pub(crate) const fn with_up_window(mut self, window: Option<u8>) -> Self {
+        self.up_window = window;
+        self
+    }
+
+    /// Returns the separately advertised HTTP conveyor capability.
+    pub(crate) const fn up_window(self) -> Option<u8> {
+        self.up_window
     }
 
     /// Returns whether this request participates in server-side negotiation.
@@ -215,6 +230,7 @@ impl CarrierRequest {
         self.class == other.class
             && self.capabilities_bits() == other.capabilities_bits()
             && self.user_agent_hash == other.user_agent_hash
+            && self.up_window == other.up_window
     }
 
     /// Checks the complete idempotent identity of one exact attempt request.

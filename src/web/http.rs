@@ -36,6 +36,8 @@ mod decoy;
 mod diagnostic;
 // Downlink long-poll handling remains isolated from request routing.
 mod down;
+// Uplink admission and conveyor waits own their bounded request bodies.
+mod up;
 // Canonical request parsing rejects ambiguous credentials before routing.
 mod request;
 // Positive-only recovery representation stays separate from ordinary bridge rendering.
@@ -68,6 +70,7 @@ use response::{
     insert_header, service_unavailable,
 };
 use session::handle_session;
+use up::handle_up;
 
 type BoxError = Box<dyn Error + Send + Sync>;
 type HttpBody = UnsyncBoxBody<Bytes, BoxError>;
@@ -457,76 +460,6 @@ async fn handle_api(
         _ => serve_decoy(request, vhost, true, &runtime).await,
     }
 }
-async fn handle_up(
-    request: Request<RequestBody>,
-    runtime: Arc<WebProcessRuntime>,
-    vhost: Arc<WebRuntimeVhost>,
-    token_hash: crate::web::manager::TokenHash,
-) -> HttpResponse {
-    if !matches!(*request.method(), Method::POST | Method::PUT) || !binary_content_type(&request) {
-        return serve_decoy(request, vhost, true, &runtime).await;
-    }
-    let Some(sequence) = canonical_u64_header(&request, "x-up-seq").filter(|value| *value != 0)
-    else {
-        return serve_decoy(request, vhost, true, &runtime).await;
-    };
-    let Ok(session) = runtime.get_session(token_hash, &vhost.host) else {
-        return serve_decoy(request, vhost, true, &runtime).await;
-    };
-    if session.carrier().uses_websocket() {
-        return serve_decoy(request, vhost, true, &runtime).await;
-    }
-    if let Some(trace) = request_trace(&request) {
-        trace.set_route(TraceRoute::Uplink);
-        trace.bind_identity(session.trace_identity());
-    }
-    let Some(lane_id) = carrier_lane(&request, session.carrier()) else {
-        return serve_decoy(request, vhost, true, &runtime).await;
-    };
-    let limit = session.limits().max_body_bytes;
-    let CollectedBody {
-        request,
-        body,
-        _body_budget,
-    } = match collect_body(
-        request,
-        &runtime,
-        Duration::from_secs(session.timeouts().body_secs),
-        limit,
-        false,
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(CollectBodyError::Limit) => return service_unavailable(),
-        Err(CollectBodyError::Invalid(request)) => {
-            return serve_decoy(request, vhost, true, &runtime).await;
-        }
-    };
-    if let Some(trace) = request_trace(&request) {
-        trace.record_frames(TraceDirection::Request, &body, session.limits());
-    }
-    let result = match lane_id {
-        Some(lane_id) => session.process_up_lane(lane_id, sequence, &body),
-        None => session.process_up(sequence, &body),
-    };
-    match result {
-        Ok(ack) => {
-            let mut response = carrier_empty(StatusCode::NO_CONTENT);
-            insert_header(
-                &mut response,
-                HeaderName::from_static("x-up-ack"),
-                &ack.to_string(),
-            );
-            response
-        }
-        Err(ManagerError::Backpressure | ManagerError::Concurrent | ManagerError::Limit) => {
-            service_unavailable()
-        }
-        Err(_) => serve_decoy(request, vhost, true, &runtime).await,
-    }
-}
-
 fn strip_query<B>(request: &mut Request<B>) {
     if request.uri().query().is_some()
         && let Ok(uri) = request.uri().path().parse()

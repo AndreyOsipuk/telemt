@@ -76,6 +76,17 @@ pub(super) async fn handle_session(
     let Some(carrier_request) = carrier_request(&request, &vhost.host) else {
         return serve_decoy(request, vhost, true, &runtime).await;
     };
+    let up_window = if request.headers().contains_key("x-telemt-up-window") {
+        let Some(window) = super::request::canonical_u64_header(&request, "x-telemt-up-window")
+            .filter(|window| (1..=4).contains(window))
+        else {
+            return serve_decoy(request, vhost, true, &runtime).await;
+        };
+        Some(window as u8)
+    } else {
+        None
+    };
+    let carrier_request = carrier_request.with_up_window(up_window);
     let ip_learning_eligible = carrier_ip_learning_eligible(&request, client_ip);
     let Some((trace_session_id, profile, body_timeout)) =
         runtime.bootstrap_trace_identity(token_hash, &vhost.host)
@@ -124,6 +135,13 @@ pub(super) async fn handle_session(
             }
             let mut response = full_response(StatusCode::OK, welcome);
             carrier_headers(&mut response);
+            if let Some(window) = result.up_window {
+                insert_header(
+                    &mut response,
+                    HeaderName::from_static("x-telemt-up-window"),
+                    &window.to_string(),
+                );
+            }
             insert_header(
                 &mut response,
                 HeaderName::from_static("x-session-token"),

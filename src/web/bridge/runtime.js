@@ -19,7 +19,7 @@ let laneQueueLimit=Math.min(queueLimit,8388608),laneItemLimit=Math.min(queueItem
 const fragment=location.hash,androidNonce=/^#android=([A-Za-z0-9_-]{43})$/.exec(fragment)?.[1]||'',recoveryPath=location.pathname+location.search;
 history.replaceState(null,'',location.pathname);
 let initialized=false,closed=false,port=null,sessionToken='',cleanupToken='',createStarted=false,socket=null,socketReady=false,carrier='';
-let upSequence=1,downCursor='0',upRunning=false,upLease=null,pollController=null;
+let upSequence=1,downCursor='0',upRunning=false,upLease=null,httpCarrier=null,upWindow=1;
 let helloFrame=null,helloTimer=null,welcomeSent=false,carrierAttempt=1,carrierFailure='',carrierCommitted=false,terminalFailure='';
 let negotiationStartedAt=0,carrierTimer=null,probeTimer=null,attemptController=null,attemptEpoch=1,candidateRunning=false,switching=false,currentAttempt=null;
 let recoveryController=null,recoveryCommit=null,recoveryReplaced=false,lastSchedulerWall=Date.now(),lastSchedulerMonotonic=performance.now(),schedulerGapPending=0,schedulerTimer=null;
@@ -44,7 +44,7 @@ const {reserve,release,releasePending,frameBound,splitFrames,acceptNativeFrames,
 function detachLease(lease){if(lease.lane){if(lease.lane.upLease===lease)lease.lane.upLease=null}else if(upLease===lease)upLease=null}
 function settleBatch(lease){if(!buffers.settleBatch(lease))return false;detachLease(lease);return true}
 function cancelBatch(lease){if(!lease||lease.settled)return;buffers.cancelBatch(lease);detachLease(lease)}
-const attemptHeaders=(attempt,failure)=>negotiationEnabled?Object.assign({'X-Carrier-Capabilities':carrierCapabilities,'X-Carrier-Attempt':String(attempt)},failure?{'X-Carrier-Failure':failure}:{}):{};
+const attemptHeaders=(attempt,failure)=>Object.assign({'X-Telemt-Up-Window':'4'},negotiationEnabled?Object.assign({'X-Carrier-Capabilities':carrierCapabilities,'X-Carrier-Attempt':String(attempt)},failure?{'X-Carrier-Failure':failure}:{}):{});
 function finishOldRecovery(){
  recoveryReplaced=false;resetScheduler();status('connected');
  while(recoveryPending.length&&!closed){const data=recoveryPending.shift();release(data.byteLength,1,null);queueCarrier(data)}
@@ -58,8 +58,9 @@ function resolveRecoveryCommit(){
  commit.signal.removeEventListener('abort',commit.abort);commit.resolve();
 }
 function retireCarrier(policy){
+ stopHttp(false);upWindow=1;
  recoveryReplaced=true;attemptEpoch++;if(carrierTimer)clearTimeout(carrierTimer);carrierTimer=null;clearProbeTimer();
- if(attemptController)attemptController.abort();attemptController=null;if(pollController)pollController.abort();pollController=null;
+ if(attemptController)attemptController.abort();attemptController=null;
  if(socket){const previous=socket;socket=null;previous.close()}socketReady=false;cancelBatch(upLease);releasePending(upPending,null);
  for(const lane of lanes.values()){
   if(lane.controller)lane.controller.abort();cancelBatch(lane.upLease);releasePending(lane.pending,lane);if(lane.socket)lane.socket.close();
@@ -118,9 +119,10 @@ function fail(reason){
 }
 function knownCarrier(value){return value==='https'||value==='https-lanes'||value==='websocket'||value==='websocket-lanes'}
 function sessionEcho(response,expectedAttempt,states,exactAttempt){
- const selected=response.headers.get('X-Carrier-Mode')||'',echo=response.headers.get('X-Carrier-Attempt')||'';
+ const selected=response.headers.get('X-Carrier-Mode')||'',echo=response.headers.get('X-Carrier-Attempt')||'',windowHeader=response.headers.get('X-Telemt-Up-Window');
+ if(windowHeader!==null&&!/^[1-4]$/.test(windowHeader))throw new Error('invalid conveyor window');const upWindow=windowHeader===null?1:Number(windowHeader);
  if(!knownCarrier(selected))throw new Error('invalid carrier mode');
- if(!negotiationEnabled){if(echo!=='')throw new Error('unexpected carrier attempt');return {selected,state:''}}
+ if(!negotiationEnabled){if(echo!=='')throw new Error('unexpected carrier attempt');return {selected,state:'',upWindow}}
  const count=response.headers.get('X-Carrier-Candidate-Count')||'',deadline=response.headers.get('X-Carrier-Deadline')||'',state=response.headers.get('X-Carrier-State')||'';
  if(!/^[1-4]$/.test(count)||!/^[1-9]\d*$/.test(deadline)||!states.includes(state))throw new Error('invalid carrier state');
  const echoedAttempt=Number(echo),parsedCount=Number(count),parsedDeadline=Number(deadline);
@@ -129,7 +131,7 @@ function sessionEcho(response,expectedAttempt,states,exactAttempt){
  if(!negotiatedFrozen){negotiatedCandidateCount=parsedCount;negotiatedFinalDeadline=parsedDeadline;negotiatedFrozen=true}
  else if(parsedCount!==negotiatedCandidateCount||parsedDeadline!==negotiatedFinalDeadline)throw new Error('changed carrier bounds');
  if(echoedAttempt>negotiatedCandidateCount)throw new Error('carrier attempt exceeds candidates');
- return {selected,state};
+ return {selected,state,upWindow};
 }
 function armCarrierDeadline(epoch){
  if(!negotiationStartedAt||epoch!==attemptEpoch)return;
@@ -140,8 +142,8 @@ function armCarrierDeadline(epoch){
 }
 function clearProbeTimer(){if(probeTimer){clearTimeout(probeTimer.timer);probeTimer=null}}
 function resetCandidate(){
+ stopHttp(true);upWindow=1;
  clearProbeTimer();
- if(pollController)pollController.abort();pollController=null;
  if(socket){const previous=socket;socket=null;previous.close()}socketReady=false;
  cancelBatch(upLease);releasePending(upPending,null);
  for(const lane of lanes.values()){
@@ -198,8 +200,8 @@ function startCandidate(probe,epoch){
  else advanceCarrier('protocol',epoch);
 }
 function maybeStartCandidate(){
- if(closed||carrierCommitted||!sessionToken||candidateRunning)return;const epoch=attemptEpoch;
- let probe;try{probe=findProbe(probeCoalesceMs>0)}catch(error){fail('protocol');return}if(!probe)return;
+ if(closed||carrierCommitted||!sessionToken)return;if(candidateRunning){try{flushHttpPending()}catch(error){fail(failureReason(error,'protocol'))}return}const epoch=attemptEpoch;
+ let probe;try{probe=findProbe(true)}catch(error){fail('protocol');return}if(!probe)return;
  if(!probeCoalesceMs||probe.hasData){startCandidate(probe,epoch);return}
  if(probeTimer)return;const owner={epoch,timer:null};
  owner.timer=setTimeout(()=>{if(probeTimer!==owner||closed||owner.epoch!==attemptEpoch)return;probeTimer=null;let current;try{current=findProbe(false)}catch(error){fail('protocol');return}startCandidate(current,owner.epoch)},probeCoalesceMs);
@@ -219,73 +221,57 @@ async function createSession(epoch){
   const token=response.headers.get('X-Session-Token')||'',cursor=response.headers.get('X-Down-Cursor')||'';
   if(!token||cursor!=='0'){advanceCarrier('protocol',epoch);return}
   const welcome=response.body;if(closed||epoch!==attemptEpoch)return;
-  carrier=selected;sessionToken=token;cleanupToken=token;downCursor=cursor;
+  carrier=selected;sessionToken=token;cleanupToken=token;downCursor=cursor;upWindow=echo.upWindow;
   if(!welcomeSent){welcomeSent=true;port.postMessage(welcome,[welcome]);status('connecting')}
   if(carrier==='websocket')openCandidateSocket(null,null,epoch);
   maybeStartCandidate();
  }catch(error){if(closed||epoch!==attemptEpoch)return;advanceCarrier(failureReason(error,'network'),epoch)}
 }
-async function probeHttp(probe,laneID,epoch){
- try{
-  const headers={'X-Up-Seq':'1'},token=sessionToken,controller=attemptController,body=probe.data;if(laneID!==null)headers['X-Lane-ID']=String(laneID);
-  const response=await request('/api/v1/up',options(carrierMethod,token,body,headers,controller.signal));
-  if(closed||epoch!==attemptEpoch)return
-  if(response.status!==204){advanceCarrier('http',epoch);return}
-  if(response.headers.get('X-Up-Ack')!=='1'){advanceCarrier('protocol',epoch);return}
-  if(laneID===null)upSequence=2;else ensureLane(laneID).sequence=2;
-  commitCarrier(probe,epoch);
- }catch(error){if(!closed&&epoch===attemptEpoch)advanceCarrier(failureReason(error,'network'),epoch)}
+function stopHttp(restore){
+ if(!httpCarrier)return;const saved=httpCarrier.close(restore);httpCarrier=null;
+ for(const data of saved){if(!reserve(data,null)){fail('capacity');return}pending.push(data)}
+}
+function flushHttpPending(){
+ while(httpCarrier&&pending.length&&!closed){const data=pending.shift();release(data.byteLength,1,null);httpCarrier.enqueue(data,true)}
+ if(httpCarrier&&!closed)httpCarrier.flush();
+}
+function probeHttp(probe,laneID,epoch){
+ const token=sessionToken;
+ httpCarrier=globalThis.TelemtBridgeConveyor.create({
+  token,window:upWindow,method:carrierMethod,lanes:carrier==='https-lanes',buffers,options,request,
+  queueLimit:()=>queueLimit,batchLimit:()=>batchLimit,committed:()=>carrierCommitted,failure,cancel:responseBody.cancel,
+  alive:lane=>!closed&&epoch===attemptEpoch&&token===sessionToken&&(!lane||lanes.get(lane.id)===lane),
+  commit:()=>commitCarrier(null,epoch),recover:recoverTransport,connected:()=>status('connected'),
+  traffic:(up,down)=>port.postMessage({t:'traffic',up,down}),
+  deliver:data=>{observeServerFrames(data);port.postMessage({t:'traffic',up:0,down:data.byteLength});port.postMessage(data,[data])},
+  lane:(id,type)=>{
+   let lane=lanes.get(id);if(!lane&&(type===2||type===3||type===4))return null;
+   if(!lane&&closedLanes.has(id))throw failure('protocol','closed lane reused');
+   if(!lane&&id!==0&&type!==1)throw failure('protocol','lane did not begin with OPEN');
+   return lane||ensureLane(id);
+  },
+  finish:finishLane,failed:error=>{if(closed||epoch!==attemptEpoch)return;if(carrierCommitted)fail(failureReason(error,'network'));else advanceCarrier(failureReason(error,'network'),epoch)}
+ });
+ try{flushHttpPending()}catch(error){fail(failureReason(error,'protocol'))}
 }
 function commitCarrier(probe,epoch){
  if(closed||carrierCommitted||epoch!==attemptEpoch)return;
  if(switching){fail('protocol');return}
- clearProbeTimer();try{consumeProbe(probe)}catch(error){fail('protocol');return}
+ clearProbeTimer();try{if(probe)consumeProbe(probe)}catch(error){fail('protocol');return}
  carrierCommitted=true;candidateRunning=false;if(carrierTimer)clearTimeout(carrierTimer);carrierTimer=null;
  resetScheduler();
  attemptController=null;currentAttempt=null;
  status('connected');
- if(carrier==='https')poll();
- else if(carrier==='https-lanes'){const lane=lanes.get(probe.id);if(lane&&!lane.polling)pollLane(lane)}
  while(pending.length&&!closed){const data=pending.shift();release(data.byteLength,1,null);queueCarrier(data)}
  resolveRecoveryCommit();
 }
 function queueCarrier(data){
  if(closed)return;
  try{
-  if(carrier==='https')queueUp(data);
+  if(carrier==='https'||carrier==='https-lanes')httpCarrier.enqueue(data);
   else if(carrier==='websocket')queueSocket(data);
   else for(const value of splitFrames(data)){if(closed)break;queueLane(value)}
  }catch(error){fail('protocol')}
-}
-function queueUp(data){if(!reserve(data,null)){fail('capacity');return}upPending.push(data);runUp()}
-async function runUp(){
- if(upRunning)return;upRunning=true;const ownerEpoch=attemptEpoch;let lease=null;
- try{
-  while(!closed&&sessionToken&&upPending.length){
-   lease=takeBatch(upPending,null);upLease=lease;lease.controller=new AbortController();const sequence=String(upSequence),token=sessionToken;
-   for(;;){
-    try{
-     const response=await request('/api/v1/up',options(carrierMethod,token,lease.body,{'X-Up-Seq':sequence},lease.controller.signal),null,1);
-     if(response.status!==204)throw failure('http','uplink rejected');
-     if(response.headers.get('X-Up-Ack')!==sequence)throw failure('protocol','uplink acknowledgement rejected');
-     break;
-    }catch(error){
-     let replayed=false;
-     const recovered=await recoverTransport(error,async(signal,remaining)=>{
-      const response=await request('/api/v1/up',options(carrierMethod,token,lease.body,{'X-Up-Seq':sequence},signal),remaining,2);
-      if(response.status!==204)throw failure('http','uplink replay rejected');
-      if(response.headers.get('X-Up-Ack')!==sequence)throw failure('protocol','uplink replay acknowledgement rejected');
-      replayed=true;
-     });
-     if(!recovered||closed||lease.cancelled||sessionToken!==token)return;
-     if(!replayed)continue;
-     break;
-    }
-   }
-   if(!settleBatch(lease))return;port.postMessage({t:'traffic',up:lease.total,down:0});upSequence++;lease=null;
-  }
- }catch(error){if(!closed&&!(lease&&lease.cancelled))fail(failureReason(error,'network'))}
- finally{if(ownerEpoch===attemptEpoch){upRunning=false;if(!closed&&sessionToken&&upPending.length)runUp()}}
 }
 function sendCandidateSocket(next){
  const state=next.telemt;if(!state||state.sent||next.readyState!==WebSocket.OPEN||!state.probe)return;
@@ -340,30 +326,6 @@ async function runSocketUp(){
  }catch(error){if(!closed&&!(lease&&lease.cancelled))recoverTransport(error,null)}
  finally{if(ownerEpoch===attemptEpoch){upRunning=false;if(!closed&&socketReady&&upPending.length)runSocketUp()}}
 }
-async function poll(){
- while(!closed&&sessionToken){
-  const token=sessionToken,cursor=downCursor;
-  try{
-   pollController=new AbortController();
-   const response=await request('/api/v1/down',options(carrierMethod,token,null,{'X-Down-Cursor':cursor},pollController.signal),null,1);
-   if(closed||sessionToken!==token)return;
-   if(response.status===204){status('connected');continue}
-   if(response.status!==200)throw failure('http','downlink rejected');
-   const next=response.headers.get('X-Down-Cursor')||'',data=response.body;
-   if(!next||!data.byteLength)throw failure('protocol','invalid downlink response');
-   if(closed)return;
-   observeServerFrames(data);port.postMessage({t:'traffic',up:0,down:data.byteLength});port.postMessage(data,[data]);downCursor=next;status('connected');
-  }catch(error){
-   if(closed)return;
-   const recovered=await recoverTransport(error,async(signal,remaining)=>{
-    const response=await request('/api/v1/down',options(carrierMethod,token,null,{'X-Down-Cursor':cursor},signal),remaining,2);
-    if(response.status===204)return;
-    if(response.status!==200||!response.body.byteLength||!response.headers.get('X-Down-Cursor'))throw failure('http','downlink replay rejected');
-   });
-   if(!recovered||closed||sessionToken!==token)return;
-  }
- }
-}
 function ensureLane(id){
  let lane=lanes.get(id);
  if(!lane){lane={id,sequence:1,cursor:'0',pending:[],bytes:0,items:0,running:false,upLease:null,polling:false,controller:null,socket:null,ready:false,remoteClosed:false};lanes.set(id,lane)}
@@ -375,7 +337,7 @@ function rememberLaneClosed(id){
  closedLanes.add(id);closedLaneOrder.push(id);
 }
 function finishLane(lane,notifyClient){
- if(lanes.get(lane.id)!==lane)return;
+ if(lanes.get(lane.id)!==lane)return;if(httpCarrier)httpCarrier.finish(lane);
  if(lane.controller)lane.controller.abort();lane.controller=null;cancelBatch(lane.upLease);
  if(lane.socket&&lane.socket.readyState<WebSocket.CLOSING)lane.socket.close();
  releasePending(lane.pending,lane);lanes.delete(lane.id);rememberLaneClosed(lane.id);
@@ -389,7 +351,7 @@ function queueLane(value){
  lane=lane||ensureLane(value.id);
  if(!reserve(value.data,lane)){fail('capacity');return}
  lane.pending.push(value.data);
- if(carrier==='websocket-lanes'){openLaneSocket(lane);runLaneSocketUp(lane)}else runLaneUp(lane);
+ openLaneSocket(lane);runLaneSocketUp(lane);
 }
 function openLaneSocket(lane){
  if(lane.socket||closed)return;lane.socket=new WebSocket(socketURL(),'tproxy-lane-v1.'+sessionToken+'.'+String(lane.id));lane.socket.binaryType='arraybuffer';
@@ -416,74 +378,12 @@ async function runLaneSocketUp(lane){
  }catch(error){if(!closed&&lanes.get(lane.id)===lane&&!(lease&&lease.cancelled))finishLane(lane,true)}
  finally{lane.running=false;if(!closed&&lanes.get(lane.id)===lane&&lane.ready&&lane.pending.length)runLaneSocketUp(lane)}
 }
-async function runLaneUp(lane){
- if(lane.running)return;lane.running=true;let lease=null;
- try{
-  while(!closed&&sessionToken&&lane.pending.length){
-   lease=takeBatch(lane.pending,lane);lane.upLease=lease;lease.controller=new AbortController();
-   const sequence=String(lane.sequence),laneID=String(lane.id),token=sessionToken;
-   for(;;){
-    try{
-     const response=await request('/api/v1/up',options(carrierMethod,token,lease.body,{'X-Up-Seq':sequence,'X-Lane-ID':laneID},lease.controller.signal),null,1);
-     if(response.status!==204)throw failure('http','lane uplink rejected');
-     if(response.headers.get('X-Up-Ack')!==sequence)throw failure('protocol','lane uplink acknowledgement rejected');
-     break;
-    }catch(error){
-     let replayed=false;
-     const recovered=await recoverTransport(error,async(signal,remaining)=>{
-      const response=await request('/api/v1/up',options(carrierMethod,token,lease.body,{'X-Up-Seq':sequence,'X-Lane-ID':laneID},signal),remaining,2);
-      if(response.status!==204)throw failure('http','lane uplink replay rejected');
-      if(response.headers.get('X-Up-Ack')!==sequence)throw failure('protocol','lane uplink replay acknowledgement rejected');
-      replayed=true;
-     });
-     if(!recovered||closed||lease.cancelled||sessionToken!==token||lanes.get(lane.id)!==lane)return;
-     if(!replayed)continue;
-     break;
-    }
-   }
-   if(!settleBatch(lease))return;port.postMessage({t:'traffic',up:lease.total,down:0});lane.sequence++;lease=null;
-   if(!lane.polling)pollLane(lane);
-  }
- }catch(error){if(!closed&&lanes.get(lane.id)===lane&&!(lease&&lease.cancelled))fail(failureReason(error,'network'))}
- finally{lane.running=false;if(!closed&&lanes.get(lane.id)===lane&&sessionToken&&lane.pending.length)runLaneUp(lane)}
-}
-async function pollLane(lane){
- if(!lane||lane.polling)return;lane.polling=true;let restart=false,failedToken='',failedCursor='',failedLaneID='';
- try{
-  while(!closed&&sessionToken&&lanes.get(lane.id)===lane){
-   const controller=new AbortController(),laneID=String(lane.id),token=sessionToken,cursor=lane.cursor;lane.controller=controller;
-   failedToken=token;failedCursor=cursor;failedLaneID=laneID;
-   const response=await request('/api/v1/down',options(carrierMethod,token,null,{'X-Down-Cursor':cursor,'X-Lane-ID':laneID},controller.signal),null,1);
-   if(closed||sessionToken!==token||lanes.get(lane.id)!==lane)return;
-   if(response.status===204){
-    if(response.headers.get('X-Lane-Closed')==='1'){finishLane(lane,false);return}
-    status('connected');continue;
-   }
-   if(response.status!==200)throw failure('http','lane downlink rejected');
-   const next=response.headers.get('X-Down-Cursor')||'',data=response.body;
-   if(!next||!data.byteLength)throw failure('protocol','invalid lane downlink response');
-   for(const value of splitFrames(data))if(value.id!==lane.id)throw new Error('cross-lane frame');
-   if(closed)return;
-   observeServerFrames(data);port.postMessage({t:'traffic',up:0,down:data.byteLength});port.postMessage(data,[data]);lane.cursor=next;status('connected');
-  }
-  }catch(error){
-   if(!closed&&lanes.get(lane.id)===lane){
-    const recovered=await recoverTransport(error,async(signal,remaining)=>{
-     const response=await request('/api/v1/down',options(carrierMethod,failedToken,null,{'X-Down-Cursor':failedCursor,'X-Lane-ID':failedLaneID},signal),remaining,2);
-     if(response.status===204)return;
-     if(response.status!==200||!response.body.byteLength||!response.headers.get('X-Down-Cursor'))throw failure('http','lane downlink replay rejected');
-    });
-    restart=recovered&&!closed&&sessionToken===failedToken&&lanes.get(lane.id)===lane;
-   }
-  }
- finally{lane.polling=false;lane.controller=null;if(restart)pollLane(lane)}
-}
 function deleteSession(){
  const token=cleanupToken||sessionToken,headers=canonicalFailures.includes(terminalFailure)?{'X-Carrier-Failure':terminalFailure}:null;
  if(token)fetch(relayBase+'/api/v1/session',options('DELETE',token,null,headers,undefined,true)).catch(()=>{});
 }
 function close(notifyServer){
- if(closed)return;closed=true;if(recoveryController)recoveryController.cancel();rejectRecoveryCommit(failure('network','bridge closed'));if(helloTimer)clearTimeout(helloTimer);helloTimer=null;if(carrierTimer)clearTimeout(carrierTimer);clearProbeTimer();if(schedulerTimer)clearTimeout(schedulerTimer);schedulerTimer=null;if(attemptController)attemptController.abort();if(pollController)pollController.abort();
+ if(closed)return;closed=true;stopHttp(false);if(recoveryController)recoveryController.cancel();rejectRecoveryCommit(failure('network','bridge closed'));if(helloTimer)clearTimeout(helloTimer);helloTimer=null;if(carrierTimer)clearTimeout(carrierTimer);clearProbeTimer();if(schedulerTimer)clearTimeout(schedulerTimer);schedulerTimer=null;if(attemptController)attemptController.abort();
  if(socket)socket.close();cancelBatch(upLease);releasePending(upPending,null);
  for(const lane of lanes.values()){
   if(lane.controller)lane.controller.abort();cancelBatch(lane.upLease);releasePending(lane.pending,lane);if(lane.socket)lane.socket.close();

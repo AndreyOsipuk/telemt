@@ -469,12 +469,16 @@ impl WebSession {
         }
     }
 
+    /// Retires exact lane queues and ordering history, deferring every waiter notification.
     pub(super) fn release_lane_locked(
         &self,
         state: &mut SessionState,
         effects: &mut DeferredSessionEffects,
         lane_id: u32,
     ) {
+        if let Some(notify) = state.conveyor.remove(Some(lane_id)) {
+            effects.notify(notify);
+        }
         let Some(mut lane) = state.carrier_lanes.remove(&lane_id) else {
             return;
         };

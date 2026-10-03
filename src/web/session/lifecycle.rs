@@ -279,6 +279,9 @@ impl WebSession {
         let recovery_closed_before_commit = self.recovery && !state.recovery_committed;
         state.close_requested = Some(reason);
         state.closed = true;
+        for notify in state.conveyor.clear() {
+            effects.notify(notify);
+        }
         if reason == SessionCloseReason::CarrierSuperseded {
             state.negotiation_phase = SessionNegotiationPhase::Superseded;
         }

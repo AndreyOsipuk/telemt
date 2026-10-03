@@ -21,6 +21,17 @@ impl WebSession {
         sequence: u64,
         body: &[u8],
     ) -> Result<u64, ManagerError> {
+        self.process_up_lane_inner(lane_id, sequence, body, None)
+    }
+
+    /// Applies one lane batch only while its optional conveyor claim still owns the turn.
+    pub(super) fn process_up_lane_inner(
+        self: &Arc<Self>,
+        lane_id: u32,
+        sequence: u64,
+        body: &[u8],
+        claim: Option<(&super::conveyor::ConveyorClaim, TokenHash)>,
+    ) -> Result<u64, ManagerError> {
         if self.carrier() != WebCarrier::HttpsLanes || lane_id > frame::MAX_STREAM_ID {
             return Err(ManagerError::Protocol);
         }
@@ -42,7 +53,8 @@ impl WebSession {
             self.close(SessionCloseReason::Protocol);
             return Err(ManagerError::Protocol);
         }
-        let digest: TokenHash = Sha256::digest(body).into();
+        let digest: TokenHash =
+            claim.map_or_else(|| Sha256::digest(body).into(), |(_, digest)| digest);
         let mut opened = Vec::new();
         let mut committed = false;
         let mut healthy = None;
@@ -53,9 +65,13 @@ impl WebSession {
                 return Err(ManagerError::Closed);
             }
             self.ensure_carrier_active_locked(&state)?;
+            if let Some((claim, _)) = claim {
+                claim.validate_locked(&state, &digest)?;
+            }
             let new_lane = !state.carrier_lanes.contains_key(&lane_id);
             if new_lane {
-                if lane_id != 0
+                if claim.is_none()
+                    && lane_id != 0
                     && frames
                         .first()
                         .is_some_and(|value| value.frame_type != FrameType::Open)
@@ -190,6 +206,7 @@ impl WebSession {
                 }
             }
             if applied {
+                state.conveyor.commit(Some(lane_id), sequence, digest);
                 (committed, healthy) = self.record_uplink_progress_locked(&mut state, progress);
             }
             applied.then_some(sequence).ok_or(ManagerError::Closed)
