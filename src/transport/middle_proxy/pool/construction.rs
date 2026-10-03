@@ -279,6 +279,7 @@ impl MePool {
                 me_bind_stale_ttl_secs: AtomicU64::new(me_bind_stale_ttl_secs),
             }),
             nat_runtime: Arc::new(NatRuntimeCore {
+                discovery: super::super::pool_nat::NatDiscovery::default(),
                 nat_ip_cfg: nat_ip,
                 nat_ip_detected: Arc::new(RwLock::new(None)),
                 nat_probe,

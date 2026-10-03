@@ -8,6 +8,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::os::fd::{AsRawFd, RawFd};
 #[cfg(target_os = "linux")]
 use std::os::raw::c_int;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -252,7 +253,7 @@ impl MePool {
     /// Perform full ME RPC handshake on an established TCP stream.
     /// Returns cipher keys/ivs and split halves; does not register writer.
     pub(crate) async fn handshake_only(
-        &self,
+        self: &Arc<Self>,
         stream: TcpStream,
         addr: SocketAddr,
         upstream_egress: Option<UpstreamEgressInfo>,
