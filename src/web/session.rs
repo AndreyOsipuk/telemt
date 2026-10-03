@@ -54,6 +54,9 @@ use lifecycle::SessionNegotiationPhase;
 pub(crate) use lifecycle::{SessionCloseOutcome, SessionCloseReason};
 // Uplink batches own exactly-once sequencing and client-frame validation.
 mod uplink;
+// HTTP conveyor ownership bounds reordered requests without changing native frames.
+mod conveyor;
+pub(crate) use conveyor::{ConveyorError, conveyor_waiter_limit};
 // Logical stream polling owns cancellation-safe waker registration.
 mod stream_io;
 
@@ -160,6 +163,7 @@ impl CarrierLane {
 }
 
 struct SessionState {
+    conveyor: conveyor::ConveyorState,
     streams: HashMap<u32, StreamState>,
     closing_streams: HashMap<u32, u64>,
     next_stream_instance: u64,
@@ -295,6 +299,7 @@ impl WebSession {
             timeouts,
             _user_registration: user_registration,
             state: Mutex::new(SessionState {
+                conveyor: conveyor::ConveyorState::default(),
                 streams: HashMap::new(),
                 closing_streams: HashMap::new(),
                 next_stream_instance: 1,

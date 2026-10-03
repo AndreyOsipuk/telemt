@@ -31,20 +31,8 @@ fn carrier_method_is_page_owned_and_used_by_every_https_request() {
                 .contains(&format!("const carrierMethod='{}';", method.as_str()))
         );
         assert_eq!(page.body.matches("carrierMethod=").count(), 1);
-        assert_eq!(page.body.matches("options(carrierMethod,").count(), 9);
-        let requests: Vec<_> = page
-            .body
-            .lines()
-            .filter(|line| {
-                line.contains("request('/api/v1/up'") || line.contains("request('/api/v1/down'")
-            })
-            .collect();
-        assert_eq!(requests.len(), 9);
-        assert!(
-            requests
-                .iter()
-                .all(|line| line.contains("options(carrierMethod,"))
-        );
+        // Execute the rendered POST/PUT page, including retries, instead of counting call sites.
+        behavior_tests::run(&page);
         assert_eq!(page.body.matches("options('POST',bootstrap,").count(), 2);
         assert!(
             page.body
@@ -67,6 +55,9 @@ fn carrier_method_is_page_owned_and_used_by_every_https_request() {
         assert!(!page.body.contains("port.postMessage({t:'status',state,"));
     }
 }
+
+#[path = "behavior_tests.rs"]
+mod behavior_tests;
 
 fn render_page(bootstrap: &str, candidate_count: usize) -> BridgePage {
     render(
@@ -289,8 +280,9 @@ fn disabled_negotiation_does_not_arm_a_carrier_deadline() {
 fn retry_and_attempt_state_are_frozen_before_fetch() {
     let page = render_page("EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE", 4);
     assert!(
-        page.body
-            .contains("async function send(path,frozenOptions,remainingBudget,maxAttempts)")
+        page.body.contains(
+            "async function send(path,frozenOptions,remainingBudget,maxAttempts,receiver)"
+        )
     );
     assert!(!page.body.contains("makeOptions"));
     assert!(page.body.contains(

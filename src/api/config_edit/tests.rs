@@ -176,7 +176,8 @@ async fn patch_web_debug_is_hot_and_limits_are_process_deferred() {
     assert!(desired.web.debug.sideband);
 
     let limits_patch: Json = serde_json::json!({
-        "web": {"limits": {"max_http_connections": 2049}}
+        // Extra HTTP heads must fit alongside the default-on conveyor metadata reservation.
+        "web": {"limits": {"max_http_connections": 2049, "memory_envelope_bytes": 1610612736u64}}
     });
     let limits = apply_patch_to_path(&path, &limits_patch, None)
         .await

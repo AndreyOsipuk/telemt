@@ -337,6 +337,11 @@ impl Drop for WebSocketBudgetLease {
 }
 
 impl WebProcessRuntime {
+    /// Reserves a parked future uplink without consuming the head request's capacity.
+    pub(crate) fn try_conveyor_waiter(&self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.conveyor_waiters).try_acquire_owned().ok()
+    }
+
     /// Reserves one body reader and its declared bounded body allocation.
     pub(crate) fn try_body_budget(
         &self,

@@ -104,6 +104,7 @@ impl WebProcessRuntime {
             replacement.old_session.timeouts().clone(),
             Some(user_registration),
         );
+        session.configure_conveyor(replacement.old_session.conveyor_offer());
         let Some(supersede) = replacement.old_session.prepare_carrier_supersede() else {
             drop(user_publication);
             drop(state);
@@ -149,6 +150,7 @@ impl WebProcessRuntime {
             crate::web::session::SessionCloseReason::CarrierSuperseded,
         );
         let result = CreateResult {
+            up_window: replacement.request.up_window().map(|_| session.up_window()),
             token: session_token,
             carrier: replacement.carrier,
             attempt: Some(replacement.attempt),

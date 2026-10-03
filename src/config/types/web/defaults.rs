@@ -2,6 +2,11 @@ pub(super) fn default_web_static_index() -> String {
     "index.html".to_string()
 }
 
+/// Enables explicitly negotiated HTTP pipelining unless the operator disables it.
+pub(super) fn default_web_conveyor() -> bool {
+    true
+}
+
 macro_rules! usize_default {
     ($name:ident, $value:expr) => {
         pub(super) fn $name() -> usize {

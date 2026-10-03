@@ -177,6 +177,8 @@ impl ManagerError {
 
 /// Successful idempotent session creation result.
 pub(crate) struct CreateResult {
+    /// HTTP window echoed only to bridge pages advertising the extension.
+    pub(crate) up_window: Option<u8>,
     /// Opaque bearer token for the created or replayed session.
     pub(crate) token: String,
     /// Carrier frozen into the created or replayed session.
@@ -230,6 +232,7 @@ pub(crate) struct WebProcessRuntime {
     lane_aux_polls: Arc<Semaphore>,
     body_readers: Arc<Semaphore>,
     body_bytes: Arc<Semaphore>,
+    conveyor_waiters: Arc<Semaphore>,
     stream_handshakes: Arc<Semaphore>,
     websocket_connections: Arc<Semaphore>,
     websockets: Mutex<websocket::WebSocketRegistry>,
@@ -299,6 +302,9 @@ impl WebProcessRuntime {
             lane_aux_polls: Arc::new(Semaphore::new(lane_aux_poll_limit)),
             body_readers: Arc::new(Semaphore::new(limits.max_body_readers)),
             body_bytes: Arc::new(Semaphore::new(limits.max_body_bytes_global)),
+            conveyor_waiters: Arc::new(Semaphore::new(crate::web::session::conveyor_waiter_limit(
+                &limits,
+            ))),
             stream_handshakes: Arc::new(Semaphore::new(limits.max_stream_handshakes)),
             websocket_connections: Arc::new(Semaphore::new(websocket_connections)),
             websockets: Mutex::new(websocket::WebSocketRegistry::default()),

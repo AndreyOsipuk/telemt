@@ -136,6 +136,7 @@ impl WebProcessRuntime {
         self.lane_aux_polls.close();
         self.body_readers.close();
         self.body_bytes.close();
+        self.conveyor_waiters.close();
         self.stream_handshakes.close();
         self.websocket_connections.close();
         let sessions = {

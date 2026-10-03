@@ -7,6 +7,9 @@ mod base_path_tests;
 #[path = "web_tests/carrier_method_tests.rs"]
 mod carrier_method_tests;
 
+#[path = "web_tests/conveyor_tests.rs"]
+mod conveyor_tests;
+
 const WEB_CONFIG: &str = r#"
 [access.users]
 alice = "000102030405060708090a0b0c0d0e0f"

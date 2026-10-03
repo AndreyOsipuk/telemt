@@ -2,6 +2,9 @@ use super::super::session_policy_tests::{open_keepalive, read_http_response};
 use super::super::*;
 use crate::config::WebCarrierMethod;
 
+#[path = "conveyor_tests.rs"]
+mod conveyor_tests;
+
 fn carrier_request(method: &str, path: &str, token: &str, headers: &str, body: &[u8]) -> Vec<u8> {
     let mut bytes = format!(
         "{method} {path} HTTP/1.1\r\nHost: proxy.example.com\r\nX-Forwarded-For: 192.0.2.60\r\nAuthorization: Bearer {token}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n",

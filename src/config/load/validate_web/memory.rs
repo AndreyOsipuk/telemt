@@ -4,7 +4,8 @@ const WEB_DEBUG_RENDERERS: usize = 2;
 const WEB_DEBUG_STATUS_PAGE_BYTES: usize = 8 * 1024 * 1024;
 const WEB_DEBUG_GROUP_SCRATCH_BYTES: usize = 4 * 1024 * 1024;
 const WEB_CARRIER_LEARNING_ENTRY_BYTES: usize = 512;
-const WEB_LANE_STATE_BYTES: usize = 512;
+// Includes the lane plus bounded conveyor slots, Notify ownership, and both hash tables.
+const WEB_LANE_STATE_BYTES: usize = 1024;
 const WEB_OVERLOAD_CONNECTION_BYTES: usize = 4 * 1024;
 // Each profile capability is stored in its vhost and in the global containment table.
 const WEB_CAPABILITY_INDEX_ENTRY_BYTES: usize = 64;

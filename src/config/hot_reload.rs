@@ -72,3 +72,7 @@ mod tests;
 #[cfg(test)]
 #[path = "hot_reload/carrier_method_tests.rs"]
 mod carrier_method_tests;
+
+#[cfg(test)]
+#[path = "hot_reload/conveyor_tests.rs"]
+mod conveyor_tests;

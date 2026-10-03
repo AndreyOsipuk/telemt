@@ -125,6 +125,7 @@ impl WebProcessRuntime {
                     entry.carrier_phase.as_str()
                 };
                 let result = CreateResult {
+                    up_window: carrier_request.up_window().map(|_| session.up_window()),
                     token: entry.session_token.as_str().to_owned(),
                     carrier: session.carrier(),
                     attempt: carrier_request.attempt(),
@@ -357,6 +358,11 @@ impl WebProcessRuntime {
             issued_timeouts.clone(),
             Some(user_registration),
         );
+        session.configure_conveyor(if config.web.conveyor {
+            carrier_request.up_window().unwrap_or(1)
+        } else {
+            1
+        });
         state.sessions.insert(session_hash, Arc::clone(&session));
         *state.sessions_per_ip.entry(client_ip).or_insert(0) += 1;
         *state.sessions_per_profile.entry(profile_key).or_insert(0) += 1;
@@ -399,6 +405,7 @@ impl WebProcessRuntime {
         }
         let identity = session.trace_identity();
         let result = CreateResult {
+            up_window: carrier_request.up_window().map(|_| session.up_window()),
             token: session_token,
             carrier,
             attempt: carrier_request.attempt(),
