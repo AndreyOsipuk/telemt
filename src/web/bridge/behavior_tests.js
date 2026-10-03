@@ -228,7 +228,7 @@ test('multiple precommit lanes survive fallback without losing stream ordering',
  env.send(join(frame(2,2,[2]),frame(2,1,[1])));await flush();await env.tick(3001);
  const next=env.pending('/api/v1/session')[0];env.answer(next,200,frame(17),{'X-Session-Token':'C'.repeat(43),'X-Down-Cursor':'0','X-Carrier-Mode':'https','X-Carrier-Attempt':'2','X-Carrier-Candidate-Count':'4','X-Carrier-Deadline':'12','X-Carrier-State':'provisional','X-Telemt-Up-Window':'4'});await flush();
  const requests=env.requests.filter(r=>r.url.endsWith('/api/v1/up')&&r.options.headers.Authorization==='Bearer '+'C'.repeat(43));
- const frames=[];for(const request of requests){const bytes=new Uint8Array(request.options.body);for(let offset=0;offset<bytes.length;){const view=new DataView(bytes.buffer,offset);frames.push([bytes[offset],bytes[offset+3]]);offset+=8+view.getUint32(4)}}
+ const frames=[];for(const request of requests){const bytes=new Uint8Array(request.options.body);for(let offset=0;offset<bytes.length;){const view=new DataView(bytes.buffer,offset);frames.push([bytes[offset],bytes[offset+3]]);offset+=8+view.getUint32(4);}}
  for(const id of [1,2])assert.deepEqual(frames.filter(value=>value[1]===id),[[1,id],[2,id]]);
  assert.equal(frames.length,4);env.close();await flush();
 });
@@ -246,6 +246,20 @@ test('receiver retirement releases shared prefix capacity without exposing a par
  a.owner.close();a.controller.abort();a.stream.error(new Error('retired'));await a.result;await b.result;
  assert.equal(received.length,3);assert.equal(b.cursor(),'1');assert.equal(budget.used(),0);
  b.owner.close();env.close();await flush();
+});
+
+test('native close cancels every HTTP request and pagehide cannot repeat cleanup',async page=>{
+ for(const android of [false,true])for(const carrier of ['https','https-lanes']){
+  const env=await session(page,carrier,4,android);env.send(frame(1,1));await flush();env.send(frame(2,1,[7]));await flush();
+  const up=env.pending('/api/v1/up'),down=env.pending('/api/v1/down'),requests=up.concat(down);
+  assert.equal(up.length,2);assert.equal(down.length,1);assert.ok(requests.every(request=>!request.options.signal.aborted));
+  env.send({t:'close'});await flush();
+  assert.ok(requests.every(request=>request.options.signal.aborted));
+  assert.equal(env.requests.filter(request=>request.options.method==='DELETE').length,1);
+  const count=env.requests.length;env.close();await env.tick(120000);
+  assert.equal(env.requests.filter(request=>request.options.method==='DELETE').length,1);
+  assert.equal(env.requests.length,count);
+ }
 });
 
 (async()=>{const page=renderedPage();let failed=0;for(const {name,run} of tests){let timer;try{await Promise.race([run(page),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('test made no bounded progress')),5000)})]);console.log('ok - '+name)}catch(error){failed++;console.error('not ok - '+name+'\n'+error.stack)}finally{clearTimeout(timer)}}if(failed)process.exitCode=1})();

@@ -38,11 +38,11 @@ function create(settings){
   const next=response.headers.get('X-Down-Cursor')||'',base=settings.cursor();
   if(!/^[1-9]\d*$/.test(next)||BigInt(next)!==BigInt(base)+1n||BigInt(next)>18446744073709551615n)throw protocol('invalid downlink cursor');
   const length=response.headers.get('Content-Length');let declared=null;
-  if(length!==null){if(!/^(0|[1-9]\d*)$/.test(length))throw protocol('invalid response length');declared=Number(length);if(!Number.isSafeInteger(declared)||declared===0||declared>settings.limit())throw protocol('response body overflow')}
+  if(length!==null){if(!/^(0|[1-9]\d*)$/.test(length))throw protocol('invalid response length');declared=Number(length);if(!Number.isSafeInteger(declared)||declared===0||declared>settings.limit())throw protocol('response body overflow');}
   if(transaction&&(transaction.base!==base||transaction.next!==next||(transaction.declared!==null&&declared!==null&&transaction.declared!==declared)))throw protocol('changed replay metadata');
   if(!transaction){
    const capacity=declared===null?settings.limit():declared,release=await settings.budget.acquire(capacity,signal);
-   if(!current(signal)){release();throw new Error('downlink retired')}
+   if(!current(signal)){release();throw new Error('downlink retired');}
    transaction={base,next,declared,bytes:new Uint8Array(capacity),retained:0,delivered:0,release};
   }
   const owner=transaction;
@@ -53,7 +53,7 @@ function create(settings){
   const reader=response.body.getReader();let position=0,offset=0,frames=0,chunks=0,complete=false;
   try{
    for(;;){
-    let part;try{part=await reader.read()}catch(error){throw settings.failure('network','response stream interrupted')}
+    let part;try{part=await reader.read();}catch(error){throw settings.failure('network','response stream interrupted');}
     if(!current(signal)||transaction!==owner)throw new Error('downlink retired');
     if(part.done)break;
     const data=part.value;if(!(data instanceof Uint8Array)||++chunks>65536||data.byteLength>owner.bytes.byteLength-position)throw protocol('response body overflow');
@@ -76,7 +76,7 @@ function create(settings){
    if(!position||offset!==position||position<owner.retained||(owner.declared!==null&&position!==owner.declared))throw protocol('incomplete downlink batch');
    settings.advance(next);complete=true;dispose();return new ArrayBuffer(0);
   }finally{
-   if(!complete)try{const cancelled=reader.cancel();if(cancelled)cancelled.catch(()=>{})}catch(error){}
+   if(!complete)try{const cancelled=reader.cancel();if(cancelled)cancelled.catch(()=>{});}catch(error){}
    reader.releaseLock();
   }
  }

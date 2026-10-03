@@ -19,7 +19,7 @@ let laneQueueLimit=Math.min(queueLimit,8388608),laneItemLimit=Math.min(queueItem
 const fragment=location.hash,androidNonce=/^#android=([A-Za-z0-9_-]{43})$/.exec(fragment)?.[1]||'',recoveryPath=location.pathname+location.search;
 history.replaceState(null,'',location.pathname);
 let initialized=false,closed=false,port=null,sessionToken='',cleanupToken='',createStarted=false,socket=null,socketReady=false,carrier='';
-let upSequence=1,downCursor='0',upRunning=false,upLease=null,pollController=null,httpCarrier=null,upWindow=1;
+let upSequence=1,downCursor='0',upRunning=false,upLease=null,httpCarrier=null,upWindow=1;
 let helloFrame=null,helloTimer=null,welcomeSent=false,carrierAttempt=1,carrierFailure='',carrierCommitted=false,terminalFailure='';
 let negotiationStartedAt=0,carrierTimer=null,probeTimer=null,attemptController=null,attemptEpoch=1,candidateRunning=false,switching=false,currentAttempt=null;
 let recoveryController=null,recoveryCommit=null,recoveryReplaced=false,lastSchedulerWall=Date.now(),lastSchedulerMonotonic=performance.now(),schedulerGapPending=0,schedulerTimer=null;
@@ -60,7 +60,7 @@ function resolveRecoveryCommit(){
 function retireCarrier(policy){
  stopHttp(false);upWindow=1;
  recoveryReplaced=true;attemptEpoch++;if(carrierTimer)clearTimeout(carrierTimer);carrierTimer=null;clearProbeTimer();
- if(attemptController)attemptController.abort();attemptController=null;if(pollController)pollController.abort();pollController=null;
+ if(attemptController)attemptController.abort();attemptController=null;
  if(socket){const previous=socket;socket=null;previous.close()}socketReady=false;cancelBatch(upLease);releasePending(upPending,null);
  for(const lane of lanes.values()){
   if(lane.controller)lane.controller.abort();cancelBatch(lane.upLease);releasePending(lane.pending,lane);if(lane.socket)lane.socket.close();
@@ -144,7 +144,6 @@ function clearProbeTimer(){if(probeTimer){clearTimeout(probeTimer.timer);probeTi
 function resetCandidate(){
  stopHttp(true);upWindow=1;
  clearProbeTimer();
- if(pollController)pollController.abort();pollController=null;
  if(socket){const previous=socket;socket=null;previous.close()}socketReady=false;
  cancelBatch(upLease);releasePending(upPending,null);
  for(const lane of lanes.values()){
@@ -384,7 +383,7 @@ function deleteSession(){
  if(token)fetch(relayBase+'/api/v1/session',options('DELETE',token,null,headers,undefined,true)).catch(()=>{});
 }
 function close(notifyServer){
- if(closed)return;closed=true;stopHttp(false);if(recoveryController)recoveryController.cancel();rejectRecoveryCommit(failure('network','bridge closed'));if(helloTimer)clearTimeout(helloTimer);helloTimer=null;if(carrierTimer)clearTimeout(carrierTimer);clearProbeTimer();if(schedulerTimer)clearTimeout(schedulerTimer);schedulerTimer=null;if(attemptController)attemptController.abort();if(pollController)pollController.abort();
+ if(closed)return;closed=true;stopHttp(false);if(recoveryController)recoveryController.cancel();rejectRecoveryCommit(failure('network','bridge closed'));if(helloTimer)clearTimeout(helloTimer);helloTimer=null;if(carrierTimer)clearTimeout(carrierTimer);clearProbeTimer();if(schedulerTimer)clearTimeout(schedulerTimer);schedulerTimer=null;if(attemptController)attemptController.abort();
  if(socket)socket.close();cancelBatch(upLease);releasePending(upPending,null);
  for(const lane of lanes.values()){
   if(lane.controller)lane.controller.abort();cancelBatch(lane.upLease);releasePending(lane.pending,lane);if(lane.socket)lane.socket.close();

@@ -92,7 +92,7 @@ function create(settings){
  function retire(channel,restore){
   channel.closed=true;if(channel.controller)channel.controller.abort();channel.receiver.close();
   const saved=[];
-  for(const lease of channel.flights.values()){if(restore)saved.push({order:lease.order,data:lease.body});settings.buffers.cancelBatch(lease)}
+  for(const lease of channel.flights.values()){if(restore)saved.push({order:lease.order,data:lease.body});settings.buffers.cancelBatch(lease);}
   channel.flights.clear();channel.acks.clear();
   for(const data of channel.pending)if(restore)saved.push({order:order++,data});
   settings.buffers.releasePending(channel.pending,channel.lane);return saved;

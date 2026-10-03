@@ -46,7 +46,7 @@ function create(settings){
      lastReason='http';wait=retryAfterMs(fetched);settings.cancel(fetched);
     }else{
      const policy=responsePolicy(path,fetched.status);let body;
-     try{body=receiver&&(fetched.status===200||fetched.status===204)?await receiver(fetched,controller.signal):await settings.read(fetched,policy.limit,policy.exact,controller.signal)}
+     try{body=receiver&&(fetched.status===200||fetched.status===204)?await receiver(fetched,controller.signal):await settings.read(fetched,policy.limit,policy.exact,controller.signal);}
      catch(error){
       controller.abort();
       if(external&&external.aborted)throw error;
