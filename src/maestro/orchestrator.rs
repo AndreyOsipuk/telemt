@@ -375,17 +375,21 @@ pub(super) async fn run_telemt_core(
 
     #[cfg(target_os = "linux")]
     let conntrack_firewall = {
-        let authority = crate::conntrack_control::FirewallAuthority::spawn(&process_control_plane)
-            .map_err(std::io::Error::other)?;
-        if !authority
-            .publish_initial(1, runtime.config.clone(), stats.clone())
-            .await
+        let authority = crate::conntrack_control::FirewallAuthority::spawn(
+            &process_control_plane,
+            &runtime.config,
+        )
+        .map_err(std::io::Error::other)?;
+        if let Some(authority) = &authority
+            && !authority
+                .publish_initial(1, runtime.config.clone(), stats.clone())
+                .await
         {
             warn!(
                 "Initial conntrack firewall reconciliation failed; background retries remain active"
             );
         }
-        Some(authority)
+        authority
     };
     #[cfg(not(target_os = "linux"))]
     let conntrack_firewall = None::<crate::conntrack_control::FirewallAuthority>;

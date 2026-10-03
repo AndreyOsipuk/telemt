@@ -61,13 +61,13 @@ impl Drop for WriterOpenReservation<'_> {
 }
 
 impl MePool {
-    /// Computes the authoritative active-writer floor across enabled families and DCs.
+    /// Computes reservation coverage across configured families, including suppressed ones.
     pub(in crate::transport::middle_proxy) async fn active_coverage_required_total(&self) -> usize {
-        let now_epoch_secs = Self::now_epoch_secs();
         let mut required_total = 0usize;
         let endpoint_snapshot = self.endpoint_snapshot.load_full();
 
-        if self.family_enabled_for_drain_coverage(IpFamily::V4, now_epoch_secs) {
+        // Suppression must not remove the capacity needed to recover active coverage.
+        if self.decision.ipv4_me {
             for addrs in endpoint_snapshot.map_v4.values() {
                 let mut endpoints = HashSet::<SocketAddr>::new();
                 for (ip, port) in addrs.iter().copied() {
@@ -79,7 +79,7 @@ impl MePool {
             }
         }
 
-        if self.family_enabled_for_drain_coverage(IpFamily::V6, now_epoch_secs) {
+        if self.decision.ipv6_me {
             for addrs in endpoint_snapshot.map_v6.values() {
                 let mut endpoints = HashSet::<SocketAddr>::new();
                 for (ip, port) in addrs.iter().copied() {

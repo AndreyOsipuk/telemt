@@ -13,6 +13,11 @@ use super::generation::RuntimeTaskScope;
 const STARTUP_FALLBACK_AFTER: Duration = Duration::from_secs(80);
 const RUNTIME_FALLBACK_AFTER: Duration = Duration::from_secs(6);
 
+// Admission regressions cover notification loss without network startup.
+#[cfg(test)]
+mod tests;
+
+/// Keeps generation admission and routing synchronized with periodic ME readiness.
 pub(crate) async fn configure_admission_gate(
     config: &Arc<ProxyConfig>,
     me_pool: Option<Arc<MePool>>,
@@ -76,11 +81,18 @@ pub(crate) async fn configure_admission_gate(
                 } else {
                     Some(Instant::now())
                 };
+                let mut config_watch_open = true;
+                let mut me_ready_watch_open = true;
                 loop {
                     tokio::select! {
-                        changed = config_rx_gate.changed() => {
+                        changed = config_rx_gate.changed(), if config_watch_open => {
                             if changed.is_err() {
-                                break;
+                                config_watch_open = false;
+                                warn!(
+                                    watch_channel = "config",
+                                    "Admission config watch closed; continuing readiness polling with last configuration"
+                                );
+                                continue;
                             }
                             let cfg = config_rx_gate.borrow_and_update().clone();
                             admission_poll_ms = cfg.general.me_admission_poll_ms.max(1);
@@ -88,9 +100,13 @@ pub(crate) async fn configure_admission_gate(
                             fast_fallback_enabled = cfg.general.me2dc_fallback && cfg.general.me2dc_fast;
                             continue;
                         }
-                        changed = me_ready_rx_gate.changed() => {
+                        changed = me_ready_rx_gate.changed(), if me_ready_watch_open => {
                             if changed.is_err() {
-                                break;
+                                me_ready_watch_open = false;
+                                warn!(
+                                    watch_channel = "me_ready",
+                                    "Admission ME readiness watch closed; continuing periodic polling"
+                                );
                             }
                         }
                         _ = tokio::time::sleep(Duration::from_millis(admission_poll_ms)) => {}

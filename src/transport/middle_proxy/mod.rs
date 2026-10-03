@@ -49,6 +49,11 @@ mod send;
 mod send_adversarial_tests;
 mod wire;
 
+/// Network-free writer fixtures shared by admission and recovery regressions.
+#[cfg(test)]
+#[path = "tests/admission_test_support.rs"]
+pub(crate) mod admission_test_support;
+
 use bytes::Bytes;
 use tokio::sync::OwnedSemaphorePermit;
 

@@ -1,6 +1,7 @@
 use super::*;
 
-async fn open_keepalive(
+/// Opens one reusable private HTTP connection for integration scenarios.
+pub(super) async fn open_keepalive(
     listener: &TcpListener,
     runtime: &Arc<WebProcessRuntime>,
 ) -> (TcpStream, CancellationToken, tokio::task::JoinHandle<()>) {
@@ -21,7 +22,8 @@ async fn open_keepalive(
     (client.unwrap(), cancellation, task)
 }
 
-async fn read_http_response(client: &mut TcpStream) -> Vec<u8> {
+/// Reads one length-delimited response without waiting for connection closure.
+pub(super) async fn read_http_response(client: &mut TcpStream) -> Vec<u8> {
     let mut response = Vec::new();
     while !response.ends_with(b"\r\n\r\n") {
         assert!(response.len() < 16 * 1024);

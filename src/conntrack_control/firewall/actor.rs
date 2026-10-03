@@ -26,15 +26,21 @@ const RETRY_DELAYS: [Duration; 6] = [
     Duration::from_secs(30),
 ];
 
+/// Reports whether a generation's desired firewall policy was confirmed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ReconcileOutcome {
+    /// The applied policy matches the accepted generation's desired policy.
     Applied,
+    /// The attempt failed without confirming the desired policy.
     Failed,
 }
 
+/// Associates a reconciliation result with its accepted runtime generation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ReconcileStatus {
+    /// Runtime generation whose desired policy was attempted.
     pub(super) generation: u64,
+    /// Result of the latest completed attempt for this generation.
     pub(super) outcome: ReconcileOutcome,
 }
 
@@ -51,25 +57,14 @@ pub(crate) struct FirewallAuthority {
 }
 
 impl FirewallAuthority {
-    /// Starts the single process-owned firewall reconciler.
-    pub(crate) fn spawn(control_plane: &ProcessControlPlane) -> Result<Self, String> {
-        let (desired_tx, desired_rx) = watch::channel(None);
-        let (status_tx, status_rx) = watch::channel(None);
-        let terminal = CancellationToken::new();
-        let closed = Arc::new(AtomicBool::new(false));
-        let completed_flag = Arc::new(AtomicBool::new(false));
-        let cleanup_succeeded = Arc::new(AtomicBool::new(false));
-        let completed = Arc::new(Notify::new());
-        let actor = FirewallReconciler::new(
-            SystemCommandRunner,
-            desired_rx,
-            status_tx,
-            terminal.clone(),
-            Arc::clone(&closed),
-            Arc::clone(&completed_flag),
-            Arc::clone(&cleanup_succeeded),
-            Arc::clone(&completed),
-        );
+    /// Starts reconciliation only when enabled and CAP_NET_ADMIN is available.
+    pub(crate) fn spawn(
+        control_plane: &ProcessControlPlane,
+        config: &ProxyConfig,
+    ) -> Result<Option<Self>, String> {
+        let Some((authority, actor)) = Self::prepare(config, SystemCommandRunner) else {
+            return Ok(None);
+        };
         control_plane
             .spawn_cooperative(move |process_cancellation| async move {
                 actor.run(process_cancellation).await;
@@ -78,7 +73,37 @@ impl FirewallAuthority {
                 "process control-plane admission closed before conntrack firewall startup"
                     .to_string()
             })?;
-        Ok(Self {
+        Ok(Some(authority))
+    }
+
+    // Admission precedes allocation so an opted-out process never owns firewall cleanup.
+    // Keeping construction separate permits fake runners without changing async Send bounds.
+    fn prepare<R>(config: &ProxyConfig, runner: R) -> Option<(Self, FirewallReconciler<R>)>
+    where
+        R: FirewallCommandRunner + 'static,
+    {
+        if !config.server.conntrack_control.inline_conntrack_control || !runner.has_cap_net_admin()
+        {
+            return None;
+        }
+        let (desired_tx, desired_rx) = watch::channel(None);
+        let (status_tx, status_rx) = watch::channel(None);
+        let terminal = CancellationToken::new();
+        let closed = Arc::new(AtomicBool::new(false));
+        let completed_flag = Arc::new(AtomicBool::new(false));
+        let cleanup_succeeded = Arc::new(AtomicBool::new(false));
+        let completed = Arc::new(Notify::new());
+        let actor = FirewallReconciler::new(
+            runner,
+            desired_rx,
+            status_tx,
+            terminal.clone(),
+            Arc::clone(&closed),
+            Arc::clone(&completed_flag),
+            Arc::clone(&cleanup_succeeded),
+            Arc::clone(&completed),
+        );
+        let authority = Self {
             desired_tx,
             status_rx,
             terminal,
@@ -86,7 +111,8 @@ impl FirewallAuthority {
             completed_flag,
             cleanup_succeeded,
             completed,
-        })
+        };
+        Some((authority, actor))
     }
 
     /// Publishes policy only after its runtime generation becomes active.
@@ -169,6 +195,7 @@ impl Drop for CompletionGuard {
     }
 }
 
+/// Serializes confirmed-state transitions and retains cleanup ownership until shutdown.
 pub(super) struct FirewallReconciler<R> {
     runner: R,
     desired_rx: watch::Receiver<Option<DesiredState>>,
@@ -186,6 +213,7 @@ impl<R> FirewallReconciler<R>
 where
     R: FirewallCommandRunner + 'static,
 {
+    /// Constructs an admitted actor with unknown state pending startup recovery.
     pub(super) fn new(
         runner: R,
         desired_rx: watch::Receiver<Option<DesiredState>>,
@@ -214,6 +242,7 @@ where
         }
     }
 
+    /// Reconciles accepted generations and completes bounded cleanup on cancellation.
     pub(super) async fn run(mut self, process_cancellation: CancellationToken) {
         let mut current = None;
         let mut retry_index = 0usize;
@@ -337,6 +366,7 @@ where
         let _completion = &self.completion;
     }
 
+    /// Accepts fenced publications without replacing telemetry with stale desired state.
     pub(super) fn take_latest_desired(&mut self) -> Option<DesiredState> {
         let next = self.desired_rx.borrow_and_update().clone()?;
         if next.generation < self.last_generation {
@@ -369,3 +399,8 @@ where
         Some(next)
     }
 }
+
+// Exercises startup admission and cleanup ownership with fake helper processes.
+#[cfg(test)]
+#[path = "tests/startup_admission.rs"]
+mod startup_admission_tests;

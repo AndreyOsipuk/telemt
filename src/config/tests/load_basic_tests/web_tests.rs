@@ -3,6 +3,10 @@ use super::*;
 #[path = "web_tests/base_path_tests.rs"]
 mod base_path_tests;
 
+// Method selection must not alter capability identity or accepted config literals.
+#[path = "web_tests/carrier_method_tests.rs"]
+mod carrier_method_tests;
+
 const WEB_CONFIG: &str = r#"
 [access.users]
 alice = "000102030405060708090a0b0c0d0e0f"

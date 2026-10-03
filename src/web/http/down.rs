@@ -22,7 +22,7 @@ pub(super) async fn handle_down(
     vhost: Arc<WebRuntimeVhost>,
     token_hash: TokenHash,
 ) -> HttpResponse {
-    if request.method() != hyper::Method::POST
+    if !matches!(*request.method(), hyper::Method::POST | hyper::Method::PUT)
         || request.headers().contains_key(header::CONTENT_TYPE)
     {
         return serve_decoy(request, vhost, true, &runtime).await;

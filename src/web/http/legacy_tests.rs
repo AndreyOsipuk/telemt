@@ -1,5 +1,9 @@
 use super::*;
 
+// HTTP method compatibility keeps platform workarounds outside session state.
+#[path = "carrier_method_tests.rs"]
+mod carrier_method_tests;
+
 #[tokio::test]
 async fn windows_restricted_webview_empty_cookie_preserves_the_carrier_flow() {
     for (index, carrier) in [WebCarrier::Https, WebCarrier::HttpsLanes]

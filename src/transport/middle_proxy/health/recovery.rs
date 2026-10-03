@@ -1,5 +1,10 @@
 use super::*;
 
+// Outage regressions use loopback sockets and explicit family-state snapshots.
+#[cfg(test)]
+mod tests;
+
+/// Reports whether replacing an endpoint could disrupt a bound client.
 pub(super) fn has_bound_clients_on_endpoint(
     writer_ids: &[u64],
     bound_clients_by_writer: &HashMap<u64, usize>,
@@ -9,6 +14,7 @@ pub(super) fn has_bound_clients_on_endpoint(
         .any(|writer_id| bound_clients_by_writer.get(writer_id).copied().unwrap_or(0) > 0)
 }
 
+/// Restores missing single-endpoint coverage under the bounded outage retry policy.
 pub(super) async fn recover_single_endpoint_outage(
     pool: &Arc<MePool>,
     rng: &Arc<SecureRandom>,
@@ -53,13 +59,21 @@ pub(super) async fn recover_single_endpoint_outage(
     pool.stats
         .increment_me_single_endpoint_outage_reconnect_attempt_total();
 
+    let generation = pool.current_generation();
     let bypass_quarantine = pool.single_endpoint_outage_disable_quarantine();
     let attempt_ok = if bypass_quarantine {
         pool.stats
             .increment_me_single_endpoint_quarantine_bypass_total();
         match tokio::time::timeout(
             pool.reconnect_runtime.me_one_timeout,
-            pool.connect_one_for_dc(endpoint, key.0, rng.as_ref()),
+            pool.connect_one_with_generation_contour_for_dc_with_intent(
+                endpoint,
+                rng.as_ref(),
+                generation,
+                WriterContour::Active,
+                key.0,
+                WriterOpenIntent::Coverage,
+            ),
         )
         .await
         {
@@ -88,7 +102,14 @@ pub(super) async fn recover_single_endpoint_outage(
         let one_endpoint = [endpoint];
         match tokio::time::timeout(
             pool.reconnect_runtime.me_one_timeout,
-            pool.connect_endpoints_round_robin(key.0, &one_endpoint, rng.as_ref()),
+            pool.connect_endpoints_round_robin_with_generation_contour(
+                key.0,
+                &one_endpoint,
+                rng.as_ref(),
+                generation,
+                WriterContour::Active,
+                WriterOpenIntent::Coverage,
+            ),
         )
         .await
         {
@@ -142,6 +163,7 @@ pub(super) async fn recover_single_endpoint_outage(
     );
 }
 
+/// Rotates an idle single-endpoint shadow without removing the existing coverage first.
 pub(super) async fn maybe_rotate_single_endpoint_shadow(
     pool: &Arc<MePool>,
     rng: &Arc<SecureRandom>,

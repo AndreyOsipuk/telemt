@@ -104,11 +104,12 @@ pub fn generate_service_file(init_system: InitSystem, opts: &ServiceOptions) -> 
         InitSystem::Systemd => generate_systemd_unit(opts),
         InitSystem::OpenRC => generate_openrc_script(opts),
         InitSystem::FreeBSDRc => generate_freebsd_rc_script(opts),
-        InitSystem::Unknown => generate_systemd_unit(opts), // Default to systemd format
+        // Preserve systemd generation when init detection is unavailable.
+        InitSystem::Unknown => generate_systemd_unit(opts),
     }
 }
 
-/// Generates an enhanced systemd unit file.
+/// Generates a hardened systemd unit with Netlink access for optional firewall helpers.
 fn generate_systemd_unit(opts: &ServiceOptions) -> String {
     let user_line = opts.user.map(|u| format!("User={}", u)).unwrap_or_default();
     let group_line = opts
@@ -151,14 +152,14 @@ PrivateDevices=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 RestrictNamespaces=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
 MemoryDenyWriteExecute=true
 LockPersonality=true
 
-# Allow binding to privileged ports and writing to specific paths
+# Allow privileged port binding, optional firewall helpers, and runtime state writes
 AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
 ReadWritePaths=/etc/telemt /var/run /var/lib/telemt
@@ -233,9 +234,11 @@ fn generate_freebsd_rc_script(opts: &ServiceOptions) -> String {
 # Add the following lines to /etc/rc.conf to enable telemt:
 #
 # telemt_enable="YES"
-# telemt_config="/etc/telemt/config.toml"  # optional
-# telemt_user="telemt"                      # optional
-# telemt_group="telemt"                     # optional
+# The configuration path can be overridden in rc.conf.
+# telemt_config="/etc/telemt/config.toml"
+# The service user and group can be overridden in rc.conf.
+# telemt_user="telemt"
+# telemt_group="telemt"
 #
 
 . /etc/rc.subr
@@ -353,6 +356,28 @@ mod tests {
         assert!(unit.contains("[Install]"));
         assert!(unit.contains("ExecReload="));
         assert!(unit.contains("PIDFile="));
+    }
+
+    #[test]
+    fn systemd_unit_allows_netlink_without_removing_hardening() {
+        let unit = generate_systemd_unit(&ServiceOptions::default());
+        let families = unit
+            .lines()
+            .find_map(|line| line.strip_prefix("RestrictAddressFamilies="))
+            .unwrap();
+        assert_eq!(
+            families.split_whitespace().collect::<Vec<_>>(),
+            ["AF_INET", "AF_INET6", "AF_UNIX", "AF_NETLINK"],
+        );
+        for directive in [
+            "NoNewPrivileges=true",
+            "ProtectSystem=strict",
+            "RestrictNamespaces=true",
+            "AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN",
+            "CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN",
+        ] {
+            assert!(unit.lines().any(|line| line == directive), "{directive}");
+        }
     }
 
     #[test]
