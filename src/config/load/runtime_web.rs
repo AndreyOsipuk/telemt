@@ -47,8 +47,10 @@ pub(super) fn rebuild(config: &mut ProxyConfig) -> Result<()> {
     let mut static_bytes = 0usize;
 
     let carrier_candidates: Arc<[WebCarrier]> = config.web.carrier_candidates().into();
-    for vhost in &config.web.vhosts {
+    for (vhost_idx, vhost) in config.web.vhosts.iter().enumerate() {
         let decoy = build_decoy(
+            config,
+            vhost_idx,
             vhost,
             &config.web.limits,
             &mut static_files,
@@ -182,42 +184,16 @@ fn client_secret(secret: [u8; 16], mode: WebSecretMode) -> ([u8; 17], usize) {
 }
 
 fn build_decoy(
+    config: &ProxyConfig,
+    vhost_idx: usize,
     vhost: &WebVhostConfig,
     limits: &WebLimitsConfig,
     static_files: &mut usize,
     static_bytes: &mut usize,
 ) -> Result<WebRuntimeDecoy> {
     match &vhost.decoy {
-        WebDecoyConfig::HttpUpstream { upstream } => {
-            let parsed = url::Url::parse(upstream).map_err(|error| {
-                ProxyError::Config(format!(
-                    "WEB decoy upstream for `{}` is invalid: {error}",
-                    vhost.host
-                ))
-            })?;
-            let ip = match parsed.host() {
-                Some(url::Host::Ipv4(ip)) => std::net::IpAddr::V4(ip),
-                Some(url::Host::Ipv6(ip)) => std::net::IpAddr::V6(ip),
-                _ => {
-                    return Err(ProxyError::Config(
-                        "WEB decoy host must be an IP literal".to_string(),
-                    ));
-                }
-            };
-            let host = ip.to_string();
-            let port = parsed.port_or_known_default().ok_or_else(|| {
-                ProxyError::Config("WEB decoy port cannot be resolved".to_string())
-            })?;
-            let authority = match (ip, parsed.port()) {
-                (std::net::IpAddr::V6(_), Some(_)) => format!("[{host}]:{port}"),
-                (std::net::IpAddr::V6(_), None) => format!("[{host}]"),
-                (std::net::IpAddr::V4(_), Some(_)) => format!("{host}:{port}"),
-                (std::net::IpAddr::V4(_), None) => host.clone(),
-            };
-            Ok(WebRuntimeDecoy::HttpUpstream {
-                addr: SocketAddr::new(ip, port),
-                authority,
-            })
+        WebDecoyConfig::HttpUpstream { upstream, resolve } => {
+            decoy_dns::build_upstream(config, vhost_idx, upstream, *resolve)
         }
         WebDecoyConfig::StaticDirectory { directory, index } => {
             let site = load_static_site(directory, index, limits, static_files, static_bytes)?;

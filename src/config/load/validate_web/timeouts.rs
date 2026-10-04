@@ -26,6 +26,7 @@ pub(super) fn validate(timeouts: &WebTimeoutsConfig) -> Result<()> {
         ("http_idle_secs", timeouts.http_idle_secs),
         ("shutdown_secs", timeouts.shutdown_secs),
         ("decoy_header_secs", timeouts.decoy_header_secs),
+        ("decoy_resolve_secs", timeouts.decoy_resolve_secs),
     ];
     if let Some((field, _)) = values
         .into_iter()

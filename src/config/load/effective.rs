@@ -1,5 +1,6 @@
 use super::*;
 
+/// Normalizes source policy and authentication data before external decoy preparation.
 pub(super) fn apply(config: &mut ProxyConfig) -> Result<()> {
     // Normalize optional TLS fetch scope: whitespace-only values disable scoped routing.
     config.censorship.tls_fetch_scope = config.censorship.tls_fetch_scope.trim().to_string();
@@ -217,6 +218,5 @@ pub(super) fn apply(config: &mut ProxyConfig) -> Result<()> {
     validate_logging_config(&config.logging)?;
     validate_upstreams(config)?;
     config.rebuild_runtime_user_auth()?;
-    config.rebuild_runtime_web()?;
     Ok(())
 }

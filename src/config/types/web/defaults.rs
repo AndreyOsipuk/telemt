@@ -115,3 +115,4 @@ u64_default!(default_web_http_idle_secs, 75);
 u64_default!(default_web_http_overload_timeout_ms, 250);
 u64_default!(default_web_shutdown_secs, 15);
 u64_default!(default_web_decoy_header_timeout_secs, 30);
+u64_default!(default_web_decoy_resolve_secs, 5);

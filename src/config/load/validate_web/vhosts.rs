@@ -150,45 +150,8 @@ pub(super) fn web_host_last_label_is_numeric(host: &str) -> bool {
 
 pub(super) fn validate_decoy(vhost_idx: usize, decoy: &WebDecoyConfig) -> Result<()> {
     match decoy {
-        WebDecoyConfig::HttpUpstream { upstream } => {
-            let parsed = url::Url::parse(upstream).map_err(|error| {
-                ProxyError::Config(format!(
-                    "web.vhosts[{vhost_idx}].decoy.upstream is invalid: {error}"
-                ))
-            })?;
-            if parsed.scheme() != "http"
-                || parsed.host_str().is_none()
-                || !parsed.username().is_empty()
-                || parsed.password().is_some()
-                || parsed.query().is_some()
-                || parsed.fragment().is_some()
-                || parsed.path() != "/"
-                || parsed.port() == Some(0)
-            {
-                return config_error(&format!(
-                    "web.vhosts[{vhost_idx}].decoy.upstream must be an http origin without credentials, path, query, or fragment"
-                ));
-            }
-            let ip = match parsed.host() {
-                Some(url::Host::Ipv4(ip)) => IpAddr::V4(ip),
-                Some(url::Host::Ipv6(ip)) => IpAddr::V6(ip),
-                _ => {
-                    return config_error(&format!(
-                        "web.vhosts[{vhost_idx}].decoy.upstream host must be a loopback or private IP literal"
-                    ));
-                }
-            };
-            let private = match ip {
-                IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
-                IpAddr::V6(ip) => {
-                    ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
-                }
-            };
-            if !private {
-                return config_error(&format!(
-                    "web.vhosts[{vhost_idx}].decoy.upstream must remain inside loopback or a private network"
-                ));
-            }
+        WebDecoyConfig::HttpUpstream { upstream, resolve } => {
+            decoy_dns::parse_origin(vhost_idx, upstream, *resolve)?;
         }
         WebDecoyConfig::StaticDirectory { directory, index } => {
             if !directory.is_absolute() {

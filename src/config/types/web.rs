@@ -18,6 +18,10 @@ pub use fasttrack::WebDecoyFastTrackMode;
 // Accepted-socket overload policy remains separate from the bulky WEB data model.
 mod overload;
 pub use overload::WebHttpConnectionCapacityAction;
+// DNS evidence belongs to configuration generations, never request-time routing.
+mod decoy_dns;
+pub(crate) use decoy_dns::WebDecoyDnsSnapshot;
+pub use decoy_dns::WebDecoyResolve;
 
 /// Client-facing secret representation used to derive a WEB capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -55,6 +59,9 @@ pub enum WebDecoyConfig {
     HttpUpstream {
         /// Origin URL without a query or fragment.
         upstream: String,
+        /// Opt-in configuration-time resolution; literal addresses never require DNS.
+        #[serde(default)]
+        resolve: WebDecoyResolve,
     },
     /// Serve an immutable, bounded snapshot of a local directory.
     StaticDirectory {
@@ -358,6 +365,9 @@ pub struct WebTimeoutsConfig {
     /// Deadline for connecting to and receiving headers from an HTTP decoy.
     #[serde(default = "default_web_decoy_header_timeout_secs")]
     pub decoy_header_secs: u64,
+    /// Maximum wait for each unique HTTP decoy hostname during preparation.
+    #[serde(default = "default_web_decoy_resolve_secs")]
+    pub decoy_resolve_secs: u64,
 }
 
 impl Default for WebTimeoutsConfig {
@@ -387,6 +397,7 @@ impl Default for WebTimeoutsConfig {
             http_overload_timeout_ms: default_web_http_overload_timeout_ms(),
             shutdown_secs: default_web_shutdown_secs(),
             decoy_header_secs: default_web_decoy_header_timeout_secs(),
+            decoy_resolve_secs: default_web_decoy_resolve_secs(),
         }
     }
 }
@@ -449,6 +460,9 @@ pub struct WebConfig {
     /// Validated immutable runtime snapshot built during configuration loading.
     #[serde(skip)]
     pub(crate) runtime: Option<Arc<WebRuntimeConfig>>,
+    /// Immutable DNS evidence omitted from serialized configuration and revisions.
+    #[serde(skip)]
+    pub(crate) decoy_dns: Arc<WebDecoyDnsSnapshot>,
 }
 
 impl WebConfig {
@@ -489,6 +503,7 @@ impl Default for WebConfig {
             timeouts: WebTimeoutsConfig::default(),
             vhosts: Vec::new(),
             runtime: None,
+            decoy_dns: Arc::default(),
         }
     }
 }

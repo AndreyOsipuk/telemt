@@ -346,6 +346,10 @@ fn remove_hop_by_hop(headers: &mut hyper::HeaderMap) {
 }
 
 #[cfg(test)]
+#[path = "decoy_dns_tests.rs"]
+mod decoy_dns_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

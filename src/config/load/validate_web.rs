@@ -27,6 +27,12 @@ const MAX_WEB_MEMORY_ENVELOPE_BYTES: usize = 4 * 1024 * 1024 * 1024;
 
 /// Validates WEB policy and resource bounds before building runtime state.
 pub(super) fn validate(config: &mut ProxyConfig) -> Result<()> {
+    validate_source(config)?;
+    validate_decoy_listener_separation(config)
+}
+
+/// Validates source policy without requiring DNS evidence for opted-in origins.
+pub(super) fn validate_source(config: &mut ProxyConfig) -> Result<()> {
     let web_listener_count = config
         .server
         .listeners
@@ -83,12 +89,19 @@ pub(super) fn validate(config: &mut ProxyConfig) -> Result<()> {
     timeouts::validate(&config.web.timeouts)?;
     websocket::validate(&carriers, &config.web.limits, &config.web.timeouts)?;
     validate_vhosts(config)?;
-    validate_decoy_listener_separation(config)?;
+    validate_decoy_listener_separation_inner(config, false)?;
     Ok(())
 }
 
 /// Rejects a direct decoy recursion into an effective WEB listener.
 pub(super) fn validate_decoy_listener_separation(config: &ProxyConfig) -> Result<()> {
+    validate_decoy_listener_separation_inner(config, true)
+}
+
+fn validate_decoy_listener_separation_inner(
+    config: &ProxyConfig,
+    require_resolved: bool,
+) -> Result<()> {
     let web_listeners = config
         .server
         .listeners
@@ -101,30 +114,19 @@ pub(super) fn validate_decoy_listener_separation(config: &ProxyConfig) -> Result
         .map(|listener| SocketAddr::new(listener.ip, listener.port.unwrap_or(config.server.port)))
         .collect::<Vec<_>>();
     for (vhost_idx, vhost) in config.web.vhosts.iter().enumerate() {
-        let WebDecoyConfig::HttpUpstream { upstream } = &vhost.decoy else {
+        let WebDecoyConfig::HttpUpstream { upstream, resolve } = &vhost.decoy else {
             continue;
         };
-        let parsed = url::Url::parse(upstream).map_err(|error| {
-            ProxyError::Config(format!(
-                "web.vhosts[{vhost_idx}].decoy.upstream is invalid: {error}"
-            ))
-        })?;
-        let Some(port) = parsed.port_or_known_default() else {
-            continue;
-        };
-        let upstream_ip = match parsed.host() {
-            Some(url::Host::Ipv4(ip)) => IpAddr::V4(ip),
-            Some(url::Host::Ipv6(ip)) => IpAddr::V6(ip),
-            _ => continue,
-        };
-        let upstream_addr = SocketAddr::new(upstream_ip, port);
-        if web_listeners
-            .iter()
-            .any(|listener| listener_covers(*listener, upstream_addr))
-        {
-            return config_error(&format!(
-                "web.vhosts[{vhost_idx}].decoy upstream overlaps WEB listener {upstream_addr}"
-            ));
+        let parsed = decoy_dns::parse_origin(vhost_idx, upstream, *resolve)?;
+        for upstream_addr in decoy_dns::addresses(config, vhost_idx, &parsed, require_resolved)? {
+            if web_listeners
+                .iter()
+                .any(|listener| listener_covers(*listener, upstream_addr))
+            {
+                return config_error(&format!(
+                    "web.vhosts[{vhost_idx}].decoy upstream overlaps WEB listener {upstream_addr}"
+                ));
+            }
         }
     }
     Ok(())

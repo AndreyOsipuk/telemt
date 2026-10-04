@@ -95,8 +95,8 @@ pub(super) async fn bootstrap(
         std::process::exit(1);
     }
 
-    let mut config = match ProxyConfig::load(&config_path) {
-        Ok(c) => c,
+    let mut config = match ProxyConfig::load_prepared(config_path.clone()).await {
+        Ok(loaded) => loaded.config,
         Err(e) => {
             if config_path.exists() {
                 eprintln!("[telemt] Error: {}", e);
