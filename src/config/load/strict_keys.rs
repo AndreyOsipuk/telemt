@@ -365,10 +365,11 @@ const WEB_TIMEOUTS_CONFIG_KEYS: &[&str] = &[
     "http_overload_timeout_ms",
     "shutdown_secs",
     "decoy_header_secs",
+    "decoy_resolve_secs",
 ];
 
 const WEB_VHOST_CONFIG_KEYS: &[&str] = &["host", "base_path", "public_addr", "decoy", "profiles"];
-const WEB_DECOY_CONFIG_KEYS: &[&str] = &["mode", "upstream", "directory", "index"];
+const WEB_DECOY_CONFIG_KEYS: &[&str] = &["mode", "upstream", "directory", "index", "resolve"];
 const WEB_PROFILE_CONFIG_KEYS: &[&str] = &[
     "user",
     "secret_mode",

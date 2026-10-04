@@ -113,7 +113,7 @@ pub(in crate::api) async fn save_access_sections_to_disk_if_revision(
     expected_revision: Option<&str>,
 ) -> Result<String, ApiFailure> {
     let loaded = load_config_snapshot(config_path, false).await?;
-    let loaded_revision = compute_snapshot_revision(&loaded);
+    let loaded_revision = compute_snapshot_revision(&loaded.source_contents);
     if expected_revision.is_some_and(|expected| expected != loaded_revision) {
         return Err(revision_conflict());
     }
@@ -159,7 +159,7 @@ pub(in crate::api) async fn save_access_sections_to_disk_if_revision(
         owner_contents.clone(),
     )
     .await?;
-    let _candidate_revision = compute_snapshot_revision(&candidate);
+    let _candidate_revision = compute_snapshot_revision(&candidate.source_contents);
     let revision = write_atomic_if_unchanged(
         config_path.to_path_buf(),
         loaded_revision,

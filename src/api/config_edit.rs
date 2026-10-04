@@ -158,7 +158,7 @@ async fn prepare_patch_to_path(
 ) -> Result<PreparedConfigPatch, ApiFailure> {
     // 1. optimistic concurrency
     let loaded = load_config_snapshot(config_path, false).await?;
-    let current = compute_snapshot_revision(&loaded);
+    let current = compute_snapshot_revision(&loaded.source_contents);
     if expected_revision.is_some_and(|expected| expected != current) {
         return Err(ApiFailure::new(
             hyper::StatusCode::CONFLICT,
@@ -208,6 +208,8 @@ async fn prepare_patch_to_path(
     let mut merged = Toml::try_from(&old_cfg)
         .map_err(|e| ApiFailure::internal(format!("failed to serialize config: {}", e)))?;
     deep_merge(&mut merged, &patch_toml);
+    ProxyConfig::validate_decoy_source_keys(&merged)
+        .map_err(|error| ApiFailure::bad_request(format!("invalid patched config: {error}")))?;
 
     let requested_cfg: ProxyConfig = merged
         .clone()
@@ -263,7 +265,7 @@ async fn prepare_patch_to_path(
     }
 
     // 4. classify the validated, normalized candidate.
-    let revision = compute_snapshot_revision(&candidate);
+    let revision = compute_snapshot_revision(&candidate.source_contents);
     let new_cfg = candidate.config;
     let class = classify_config_changes(&old_cfg, &new_cfg);
     let deferred_process_fields =
@@ -306,7 +308,7 @@ fn reload_submit_failure(error: ReloadSubmitError) -> ApiFailure {
 /// Returns only the editable config sections and current revision.
 pub(super) async fn read_managed_config(config_path: &Path) -> Result<(Toml, String), ApiFailure> {
     let loaded = load_config_snapshot(config_path, false).await?;
-    let revision = compute_snapshot_revision(&loaded);
+    let revision = compute_snapshot_revision(&loaded.source_contents);
     let parsed = Toml::try_from(&loaded.config)
         .map_err(|error| ApiFailure::internal(format!("failed to serialize config: {error}")))?;
 
@@ -457,3 +459,7 @@ mod tests;
 #[cfg(test)]
 #[path = "config_edit/conveyor_tests.rs"]
 mod conveyor_tests;
+
+#[cfg(test)]
+#[path = "config_edit/decoy_dns_tests.rs"]
+mod decoy_dns_tests;

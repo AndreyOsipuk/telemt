@@ -512,6 +512,7 @@ pub(crate) fn deferred_process_fields(
 
 fn configs_equal(old: &ProxyConfig, new: &ProxyConfig) -> bool {
     serde_json::to_value(old).ok() == serde_json::to_value(new).ok()
+        && old.web_decoy_endpoints_equal(new)
 }
 
 #[cfg(test)]

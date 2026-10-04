@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use hyper::header::IF_MATCH;
 use sha2::{Digest, Sha256};
 
-use crate::config::{ConfigSourceGraph, LoadedConfig, ProxyConfig};
+use crate::config::{ConfigSourceGraph, LoadedConfig, ParsedConfigSource, ProxyConfig};
 
 use super::model::ApiFailure;
 
@@ -63,7 +63,7 @@ pub(super) async fn load_config_for_mutation(
     expected_revision: Option<&str>,
 ) -> Result<(ProxyConfig, String), ApiFailure> {
     let loaded = load_config_snapshot(config_path, false).await?;
-    let revision = compute_snapshot_revision(&loaded);
+    let revision = compute_snapshot_revision(&loaded.source_contents);
     if expected_revision.is_some_and(|expected| expected != revision) {
         return Err(ApiFailure::new(
             hyper::StatusCode::CONFLICT,
@@ -98,9 +98,10 @@ pub(super) fn compute_revision(content: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-pub(super) fn compute_snapshot_revision(loaded: &LoadedConfig) -> String {
+/// Hashes source documents only; prepared DNS answers never change a revision.
+pub(super) fn compute_snapshot_revision(source_contents: &BTreeMap<PathBuf, String>) -> String {
     compute_source_revision(&ConfigSourceGraph {
-        source_contents: loaded.source_contents.clone(),
+        source_contents: source_contents.clone(),
         rendered: String::new(),
     })
 }
@@ -118,12 +119,13 @@ pub(super) fn compute_source_revision(graph: &ConfigSourceGraph) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Reads a normalized source snapshot without resolving decoys or loading static assets.
 pub(super) async fn load_config_snapshot(
     config_path: &Path,
     invalid_is_bad_request: bool,
-) -> Result<LoadedConfig, ApiFailure> {
+) -> Result<ParsedConfigSource, ApiFailure> {
     let config_path = config_path.to_path_buf();
-    tokio::task::spawn_blocking(move || ProxyConfig::load_with_metadata(config_path))
+    tokio::task::spawn_blocking(move || ProxyConfig::parse_source(config_path))
         .await
         .map_err(|error| ApiFailure::internal(format!("failed to join config loader: {error}")))?
         .map_err(|error| {
@@ -135,8 +137,9 @@ pub(super) async fn load_config_snapshot(
         })
 }
 
+/// Selects the single writable source document owning all requested sections.
 pub(super) fn resolve_single_source_owner(
-    loaded: &LoadedConfig,
+    loaded: &ParsedConfigSource,
     config_path: &Path,
     targets: &[&str],
 ) -> Result<PathBuf, ApiFailure> {
@@ -227,6 +230,7 @@ fn has_include_inside_table(content: &str) -> bool {
     false
 }
 
+/// Prepares the entire mutation candidate before any source file may be replaced.
 pub(super) async fn load_candidate_snapshot(
     config_path: &Path,
     base_sources: &BTreeMap<PathBuf, String>,
@@ -236,12 +240,16 @@ pub(super) async fn load_candidate_snapshot(
     let config_path = config_path.to_path_buf();
     let mut overrides = base_sources.clone();
     overrides.insert(owner_path, owner_contents);
-    tokio::task::spawn_blocking(move || {
-        ProxyConfig::load_with_source_overrides(config_path, &overrides)
+    let parsed = tokio::task::spawn_blocking(move || {
+        ProxyConfig::parse_source_with_overrides(config_path, &overrides)
     })
     .await
     .map_err(|error| ApiFailure::internal(format!("failed to join config loader: {error}")))?
-    .map_err(|error| ApiFailure::bad_request(format!("invalid patched config: {error}")))
+    .map_err(|error| ApiFailure::bad_request(format!("invalid patched config: {error}")))?;
+    parsed
+        .prepare()
+        .await
+        .map_err(|error| ApiFailure::bad_request(format!("invalid patched config: {error}")))
 }
 
 fn normalize_source_path(path: &Path) -> PathBuf {
@@ -265,19 +273,23 @@ fn normalize_source_path(path: &Path) -> PathBuf {
     normalized
 }
 
+/// Reads desired user and quota policy without acquiring runtime decoy state.
 pub(super) async fn load_config_from_disk(config_path: &Path) -> Result<ProxyConfig, ApiFailure> {
-    let config_path = config_path.to_path_buf();
-    tokio::task::spawn_blocking(move || ProxyConfig::load(config_path))
+    load_config_snapshot(config_path, false)
         .await
-        .map_err(|e| ApiFailure::internal(format!("failed to join config loader: {}", e)))?
-        .map_err(|e| ApiFailure::internal(format!("failed to load config: {}", e)))
+        .map(|source| source.config)
 }
 
+/// Acquires fresh decoy evidence for an explicit API reload, even at the same revision.
 pub(super) async fn load_config_for_reload(
     config_path: &Path,
 ) -> Result<(ProxyConfig, String), ApiFailure> {
     let loaded = load_config_snapshot(config_path, true).await?;
-    let revision = compute_snapshot_revision(&loaded);
+    let revision = compute_snapshot_revision(&loaded.source_contents);
+    let loaded = loaded
+        .prepare()
+        .await
+        .map_err(|error| ApiFailure::bad_request(format!("invalid runtime config: {error}")))?;
     Ok((loaded.config, revision))
 }
 

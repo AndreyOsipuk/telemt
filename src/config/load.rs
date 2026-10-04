@@ -29,6 +29,8 @@ mod runtime_web;
 mod decode;
 mod effective;
 mod pipeline;
+// Candidate-owned DNS preparation is separate from pure runtime reconstruction.
+mod decoy_dns;
 mod validate_core;
 mod validate_me;
 mod validate_runtime;
@@ -71,6 +73,19 @@ pub(crate) struct LoadedConfig {
     /// Raw source bytes keyed by normalized absolute source path.
     pub(crate) source_contents: BTreeMap<PathBuf, String>,
     /// Legacy hash of the include-expanded rendered snapshot.
+    pub(crate) rendered_hash: u64,
+}
+
+/// Normalized source configuration that has not acquired runtime DNS or static snapshots.
+#[derive(Debug, Clone)]
+pub(crate) struct ParsedConfigSource {
+    /// Source-only configuration; must be prepared before runtime publication.
+    pub(crate) config: ProxyConfig,
+    /// Normalized paths in the captured include graph.
+    pub(crate) source_files: Vec<PathBuf>,
+    /// Exact source documents used for revisions and atomic mutation checks.
+    pub(crate) source_contents: BTreeMap<PathBuf, String>,
+    /// Source-only hash, independent of DNS answers.
     pub(crate) rendered_hash: u64,
 }
 
@@ -229,6 +244,33 @@ impl ProxyConfig {
         pipeline::load_source_graph(graph)
     }
 
+    /// Parses source without resolving decoys or creating runtime WEB snapshots.
+    pub(crate) fn parse_source<P: AsRef<Path>>(path: P) -> Result<ParsedConfigSource> {
+        Self::parse_source_with_overrides(path, &BTreeMap::new())
+    }
+
+    /// Checks decoy mode-specific keys before a source or API patch loses unknown fields.
+    pub(crate) fn validate_decoy_source_keys(document: &toml::Value) -> Result<()> {
+        decoy_dns::validate_mode_keys(document)
+    }
+
+    /// Parses an atomic mutation candidate without performing DNS.
+    pub(crate) fn parse_source_with_overrides<P: AsRef<Path>>(
+        path: P,
+        overrides: &BTreeMap<PathBuf, String>,
+    ) -> Result<ParsedConfigSource> {
+        pipeline::parse_source_graph(Self::read_source_graph_with_overrides(path, overrides)?)
+    }
+
+    /// Loads and prepares a complete runtime candidate without blocking async workers.
+    pub(crate) async fn load_prepared(path: PathBuf) -> Result<LoadedConfig> {
+        let parsed = tokio::task::spawn_blocking(move || Self::parse_source(path))
+            .await
+            .map_err(|error| ProxyError::Config(format!("config reader failed: {error}")))??;
+        parsed.prepare().await
+    }
+
+    /// Rebuilds immutable credential lookup data for this configuration.
     pub(crate) fn rebuild_runtime_user_auth(&mut self) -> Result<()> {
         let snapshot = UserAuthSnapshot::from_users(&self.access.users)?;
         self.runtime_user_auth = Some(Arc::new(snapshot));
@@ -250,6 +292,7 @@ impl ProxyConfig {
         validate_web::validate_decoy_listener_separation(self)
     }
 
+    /// Returns authentication data owned by this configuration generation.
     pub(crate) fn runtime_user_auth(&self) -> Option<&UserAuthSnapshot> {
         self.runtime_user_auth.as_deref()
     }

@@ -9,6 +9,8 @@ mod carrier_method_tests;
 
 #[path = "web_tests/conveyor_tests.rs"]
 mod conveyor_tests;
+#[path = "web_tests/decoy_dns_tests.rs"]
+mod decoy_dns_tests;
 
 const WEB_CONFIG: &str = r#"
 [access.users]
