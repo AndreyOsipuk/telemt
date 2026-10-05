@@ -100,6 +100,34 @@ impl WriterRegistrationGuard<'_> {
         tx: mpsc::Sender<WriterCommand>,
         byte_budget: Arc<Semaphore>,
     ) {
+        self.install_with_lifetime(
+            writer_id,
+            tx,
+            byte_budget,
+            super::super::pool_writer::overlap::ReplacementHandoff::new(),
+        );
+    }
+
+    /// Retrieves the physical lifetime while binding ownership fences victim replacement.
+    pub(in crate::transport::middle_proxy) fn writer_lifetime(
+        &self,
+        writer_id: u64,
+    ) -> Option<Arc<super::super::pool_writer::overlap::ReplacementHandoff>> {
+        self.registry
+            .writers
+            .map
+            .get(&writer_id)
+            .map(|route| route.lifetime.clone())
+    }
+
+    /// Publishes a route associated with its transport destruction authority.
+    pub(in crate::transport::middle_proxy) fn install_with_lifetime(
+        &mut self,
+        writer_id: u64,
+        tx: mpsc::Sender<WriterCommand>,
+        byte_budget: Arc<Semaphore>,
+        lifetime: Arc<super::super::pool_writer::overlap::ReplacementHandoff>,
+    ) {
         self.binding.conns_for_writer.entry(writer_id).or_default();
         self.registry
             .binding
@@ -117,6 +145,7 @@ impl WriterRegistrationGuard<'_> {
                 tx,
                 byte_budget,
                 replacement_state: Arc::new(AtomicU8::new(WriterReplacementState::Open as u8)),
+                lifetime,
             },
         );
     }

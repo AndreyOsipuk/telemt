@@ -305,6 +305,8 @@ impl MePool {
         if previous_writer_pick_mode != writer_pick_mode {
             self.stats.increment_me_writer_pick_mode_switch_total();
         }
+        let mut coordinator = self.reinit.coordinator.lock();
+        let previous_floor_policy = self.floor_policy_values();
         self.single_endpoint_runtime
             .me_single_endpoint_shadow_writers
             .store(single_endpoint_shadow_writers, Ordering::Relaxed);
@@ -381,6 +383,17 @@ impl MePool {
         self.floor_runtime
             .me_adaptive_floor_max_warm_writers_global
             .store(adaptive_floor_max_warm_writers_global, Ordering::Relaxed);
+        if previous_floor_policy != self.floor_policy_values() {
+            coordinator.floor_policy_revision = coordinator.floor_policy_revision.wrapping_add(1);
+            // Cached caps belong to the old policy until a new health plan is accepted.
+            self.floor_runtime
+                .me_adaptive_floor_active_cap_effective
+                .store(0, Ordering::Release);
+            self.floor_runtime
+                .me_adaptive_floor_warm_cap_effective
+                .store(0, Ordering::Release);
+        }
+        drop(coordinator);
         self.health_runtime
             .me_health_interval_ms_unhealthy
             .store(me_health_interval_ms_unhealthy.max(1), Ordering::Relaxed);

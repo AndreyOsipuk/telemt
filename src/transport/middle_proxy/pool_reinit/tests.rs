@@ -149,6 +149,7 @@ fn stale_concurrent_attempt_cannot_regress_active_generation() {
         active_generation: 1,
         desired_map_hash: 22,
         endpoint_revision: 7,
+        floor_policy_revision: 1,
         pending: Some(ReinitPendingState {
             generation: 3,
             started_at_epoch_secs: 1,

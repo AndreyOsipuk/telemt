@@ -491,7 +491,11 @@ impl MePool {
         rand::rng().random_range(min_ms..=max_ms)
     }
 
-    pub(super) fn hardswap_warmup_backoff_ms(&self, pass_idx: usize) -> u64 {
+    /// Returns capped exponential retry delay with bounded positive jitter.
+    pub(in crate::transport::middle_proxy) fn hardswap_warmup_backoff_ms(
+        &self,
+        pass_idx: usize,
+    ) -> u64 {
         let base_ms = self
             .reinit
             .me_hardswap_warmup_pass_backoff_base_ms

@@ -36,7 +36,7 @@ fn prepared<'a>(
     pool: &'a Arc<MePool>,
     writer: MeWriter,
     intent: WriterOpenIntent,
-    reservation: WriterOpenReservation<'a>,
+    reservation: WriterOpenReservation,
     task_started: Arc<AtomicBool>,
 ) -> PreparedWriter<'a> {
     let cancel = writer.cancel.clone();
@@ -45,12 +45,14 @@ fn prepared<'a>(
         byte_budget: writer.byte_budget.clone(),
         writer,
         task_registration: pool.lifecycle.try_register().unwrap(),
-        writer_task: Box::pin(async move {
-            task_started.store(true, Ordering::Release);
-            cancel.cancelled().await;
-        }),
+        writer_task: WriterTransport::new(
+            Box::pin(async move {
+                task_started.store(true, Ordering::Release);
+                cancel.cancelled().await;
+            }),
+            reservation,
+        ),
         intent,
-        _open_reservation: reservation,
     }
 }
 

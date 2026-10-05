@@ -26,6 +26,9 @@ const HTTP_FAILURE_TTL: Duration = Duration::from_secs(60);
 // Discovery ownership and source-bound cache admission for this pool generation.
 mod state;
 pub(super) use state::NatDiscovery;
+// Successful HTTP observations expire independently of failure backoff.
+mod http;
+pub(super) use http::HttpNatObservation;
 
 // Local network regressions exercise cancellation before discovery publication.
 #[cfg(test)]
@@ -167,14 +170,16 @@ impl MePool {
 
     /// Applies the configured or HTTP-detected NAT IP to non-public addresses.
     pub(super) fn translate_ip_for_nat(&self, ip: IpAddr) -> IpAddr {
-        let nat_ip = self.nat_runtime.nat_ip_cfg.or_else(|| {
+        Self::translate_ip_with_nat(
+            ip,
             self.nat_runtime
-                .nat_ip_detected
-                .try_read()
-                .ok()
-                .and_then(|g| *g)
-        });
+                .nat_ip_cfg
+                .or_else(|| self.cached_http_nat_ip()),
+        )
+    }
 
+    /// Applies a captured NAT observation without rereading mutable discovery state.
+    pub(super) fn translate_ip_with_nat(ip: IpAddr, nat_ip: Option<IpAddr>) -> IpAddr {
         let Some(nat_ip) = nat_ip else {
             return ip;
         };
@@ -198,6 +203,16 @@ impl MePool {
         addr: std::net::SocketAddr,
         reflected: Option<std::net::SocketAddr>,
     ) -> std::net::SocketAddr {
+        self.translate_our_addr_with_nat(addr, reflected, self.cached_http_nat_ip())
+    }
+
+    /// Retains the actual TCP port while using one handshake-local NAT snapshot.
+    pub(super) fn translate_our_addr_with_nat(
+        &self,
+        addr: std::net::SocketAddr,
+        reflected: Option<std::net::SocketAddr>,
+        detected: Option<IpAddr>,
+    ) -> std::net::SocketAddr {
         let ip = if let Some(nat_ip) = self.nat_runtime.nat_ip_cfg {
             match (addr.ip(), nat_ip) {
                 (IpAddr::V4(_), IpAddr::V4(dst)) => IpAddr::V4(dst),
@@ -209,61 +224,14 @@ impl MePool {
             if is_bogon(addr.ip()) || addr.ip().is_loopback() || addr.ip().is_unspecified() {
                 r.ip()
             } else {
-                self.translate_ip_for_nat(addr.ip())
+                Self::translate_ip_with_nat(addr.ip(), detected)
             }
         } else {
-            self.translate_ip_for_nat(addr.ip())
+            Self::translate_ip_with_nat(addr.ip(), detected)
         };
 
         // Keep the kernel-assigned TCP source port; STUN port can differ.
         std::net::SocketAddr::new(ip, addr.port())
-    }
-
-    /// Waits for pool-owned HTTP discovery without owning its cancellation.
-    pub(super) async fn maybe_detect_nat_ip(self: &Arc<Self>, local_ip: IpAddr) -> Option<IpAddr> {
-        if self.nat_runtime.nat_ip_cfg.is_some() {
-            return self.nat_runtime.nat_ip_cfg;
-        }
-
-        if !self.nat_runtime.nat_probe {
-            return None;
-        }
-
-        if !(is_bogon(local_ip) || local_ip.is_loopback() || local_ip.is_unspecified()) {
-            return None;
-        }
-
-        if let Some(ip) = *self.nat_runtime.nat_ip_detected.read().await {
-            return Some(ip);
-        }
-
-        let mut flight = self.nat_runtime.discovery.http.clone().lock_owned().await;
-        if let Some(ip) = *self.nat_runtime.nat_ip_detected.read().await {
-            return Some(ip);
-        }
-        if flight.is_some_and(|until| Instant::now() < until) {
-            return None;
-        }
-
-        let pool = self.clone();
-        let (send, receive) = oneshot::channel();
-        // Transfer singleflight ownership before the producer can be cancelled or polled.
-        self.lifecycle
-            .spawn_producer(async move {
-                let detected = detect_public_ipv4_http(&pool.nat_runtime.http_ip_detect_urls)
-                    .await
-                    .map(IpAddr::V4);
-                if let Some(ip) = detected {
-                    *pool.nat_runtime.nat_ip_detected.write().await = Some(ip);
-                    *flight = None;
-                    info!(public_ip = %ip, "Auto-detected public IP for NAT translation");
-                } else {
-                    *flight = Some(Instant::now() + HTTP_FAILURE_TTL);
-                }
-                let _ = send.send(detected);
-            })
-            .ok()?;
-        receive.await.ok().flatten()
     }
 
     /// Waits for a pool-owned STUN refresh in the exact source-address context.

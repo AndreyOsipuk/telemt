@@ -81,6 +81,7 @@ struct WriterRoute {
     tx: mpsc::Sender<WriterCommand>,
     byte_budget: Arc<Semaphore>,
     replacement_state: Arc<AtomicU8>,
+    lifetime: Arc<super::pool_writer::overlap::ReplacementHandoff>,
 }
 
 #[derive(Clone)]

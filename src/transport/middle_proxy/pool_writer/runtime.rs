@@ -291,9 +291,8 @@ impl MePool {
             tx,
             byte_budget,
             task_registration,
-            writer_task,
+            writer_task: WriterTransport::new(writer_task, writer_open_reservation),
             intent,
-            _open_reservation: writer_open_reservation,
         })
     }
 

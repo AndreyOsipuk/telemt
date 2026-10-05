@@ -169,11 +169,21 @@ impl MePool {
         }
     }
 
+    /// Reconciles one immutable endpoint snapshot without draining uncovered groups.
     pub async fn zero_downtime_reinit_after_map_change(
         self: &Arc<Self>,
         rng: &SecureRandom,
     ) -> bool {
         let endpoint_snapshot = self.endpoint_snapshot.load_full();
+        self.reinit_endpoint_snapshot(rng, endpoint_snapshot).await
+    }
+
+    /// Reconciles exactly the revision owned by the scheduler's retry objective.
+    pub(in crate::transport::middle_proxy) async fn reinit_endpoint_snapshot(
+        self: &Arc<Self>,
+        rng: &SecureRandom,
+        endpoint_snapshot: Arc<EndpointSnapshot>,
+    ) -> bool {
         let desired_by_dc = self.desired_dc_endpoints_from_snapshot(&endpoint_snapshot);
         let now_epoch_secs = Self::now_epoch_secs();
         let v4_suppressed = self.is_family_temporarily_suppressed(IpFamily::V4, now_epoch_secs);
@@ -407,6 +417,7 @@ impl MePool {
         true
     }
 
+    /// Applies periodic rotation using the same coverage and generation fences as map changes.
     pub async fn zero_downtime_reinit_periodic(self: &Arc<Self>, rng: &SecureRandom) -> bool {
         self.zero_downtime_reinit_after_map_change(rng).await
     }

@@ -48,13 +48,13 @@ pub(in crate::transport::middle_proxy) enum WriterOpenIntent {
 }
 
 /// RAII ownership of one bounded in-flight writer open.
-pub(in crate::transport::middle_proxy) struct WriterOpenReservation<'a> {
-    counter: Option<&'a AtomicUsize>,
+pub(in crate::transport::middle_proxy) struct WriterOpenReservation {
+    counter: Option<Arc<AtomicUsize>>,
 }
 
-impl Drop for WriterOpenReservation<'_> {
+impl Drop for WriterOpenReservation {
     fn drop(&mut self) {
-        if let Some(counter) = self.counter {
+        if let Some(counter) = &self.counter {
             counter.fetch_sub(1, Ordering::AcqRel);
         }
     }
@@ -172,7 +172,7 @@ impl MePool {
         intent: WriterOpenIntent,
         writer_dc: i32,
         target_addr: SocketAddr,
-    ) -> Option<WriterOpenReservation<'_>> {
+    ) -> Option<WriterOpenReservation> {
         let counter = match contour {
             WriterContour::Active => &self.writer_connect_active_reserved,
             WriterContour::Warm => &self.writer_connect_warm_reserved,
@@ -182,6 +182,8 @@ impl MePool {
         };
 
         if intent == WriterOpenIntent::Replacement {
+            // Policy reload and replacement admission share the same linearization point.
+            let _coordinator = self.reinit.coordinator.lock();
             let configured_cap = match contour {
                 WriterContour::Active => self.adaptive_floor_active_cap_configured_total(),
                 WriterContour::Warm => self.adaptive_floor_warm_cap_configured_total(),
@@ -220,7 +222,7 @@ impl MePool {
                     .is_ok()
                 {
                     return Some(WriterOpenReservation {
-                        counter: Some(&self.writer_replacement_open_reserved),
+                        counter: Some(self.writer_replacement_open_reserved.clone()),
                     });
                 }
             }
@@ -266,7 +268,7 @@ impl MePool {
                 .is_ok()
             {
                 return Some(WriterOpenReservation {
-                    counter: Some(counter),
+                    counter: Some(counter.clone()),
                 });
             }
         }

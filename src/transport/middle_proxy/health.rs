@@ -20,6 +20,8 @@ use super::pool::{
     MeFamilyRuntimeState, RefillTargetKey, WriterContour, WriterOpenIntent, WriterRole,
 };
 use super::pool_writer::WriterReplacementPurpose;
+// Bounded cross-family coverage transfers preserve the donor's current base floor.
+mod coverage;
 
 // Bounds reconnect jitter to at most half of the current backoff.
 const JITTER_FRAC_NUM: u64 = 2;
@@ -110,6 +112,8 @@ impl Drop for ScheduledReconnects<'_> {
 
 // Periodic family health monitor orchestration.
 mod monitor;
+// Shared-family fair scheduling and independently tracked writer-operation quanta.
+mod scheduler;
 // Draining-writer deadline enforcement.
 mod drain;
 // Per-family reconnect scheduling and health state.

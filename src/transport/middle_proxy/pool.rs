@@ -342,6 +342,8 @@ pub(super) struct ReinitCoordinatorState {
     /// Latest endpoint authority revision accepted by the coordinator.
     pub(super) endpoint_revision: u64,
     pub(super) pending: Option<ReinitPendingState>,
+    /// Revision of the coherent floor and capacity policy.
+    pub(super) floor_policy_revision: u64,
     pub(super) attempts: HashMap<u64, ReinitAttemptState>,
 }
 
@@ -409,7 +411,7 @@ pub(super) struct BindingPolicyCore {
 pub(super) struct NatRuntimeCore {
     pub(super) discovery: super::pool_nat::NatDiscovery,
     pub(super) nat_ip_cfg: Option<IpAddr>,
-    pub(super) nat_ip_detected: Arc<RwLock<Option<IpAddr>>>,
+    pub(super) nat_ip_detected: Arc<RwLock<Option<super::pool_nat::HttpNatObservation>>>,
     pub(super) nat_probe: bool,
     pub(super) nat_stun: Option<String>,
     pub(super) nat_stun_servers: Vec<String>,
@@ -503,10 +505,10 @@ pub struct MePool {
     pub(super) proxy_secret: Arc<RwLock<SecretSnapshot>>,
     pub(super) default_dc: AtomicI32,
     pub(super) next_writer_id: AtomicU64,
-    pub(super) writer_connect_active_reserved: AtomicUsize,
-    pub(super) writer_connect_warm_reserved: AtomicUsize,
-    /// Replacement connections opened but not yet committed to writer visibility.
-    pub(super) writer_replacement_open_reserved: AtomicUsize,
+    pub(super) writer_connect_active_reserved: Arc<AtomicUsize>,
+    pub(super) writer_connect_warm_reserved: Arc<AtomicUsize>,
+    /// Physical replacement overlap: preparation plus victims awaiting transport destruction.
+    pub(super) writer_replacement_open_reserved: Arc<AtomicUsize>,
     pub(super) rtt_stats: Arc<Mutex<HashMap<u64, (f64, f64)>>>,
     /// Coalesced refill state keyed by exact generation and contour ownership.
     pub(super) refill_states: Arc<ParkingMutex<HashMap<RefillTargetKey, RefillTargetState>>>,
@@ -545,6 +547,8 @@ mod transport_policy;
 mod selection_policy;
 // Bounded writer-open admission and coverage accounting.
 mod writer_admission;
+// Coherent policy revisions fence derived health plans and replacement decisions.
+mod floor_authority;
 pub(super) use writer_admission::{WriterOpenIntent, WriterOpenReservation, WriterRole};
 // Endpoint-to-DC routing and health timing policy.
 mod routing;
