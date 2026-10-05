@@ -230,8 +230,10 @@ impl MePool {
         configured
     }
 
+    /// Publishes derived caps only while both endpoint and floor-policy authority remain current.
     pub(in crate::transport::middle_proxy) fn set_adaptive_floor_runtime_caps(
         &self,
+        authority: (u64, u64),
         active_cap_configured: usize,
         active_cap_effective: usize,
         warm_cap_configured: usize,
@@ -240,6 +242,15 @@ impl MePool {
         active_writers_current: usize,
         warm_writers_current: usize,
     ) {
+        let coordinator = self.reinit.coordinator.lock();
+        if authority
+            != (
+                coordinator.endpoint_revision,
+                coordinator.floor_policy_revision,
+            )
+        {
+            return;
+        }
         self.floor_runtime
             .me_adaptive_floor_global_cap_raw
             .store(active_cap_configured as u64, Ordering::Relaxed);

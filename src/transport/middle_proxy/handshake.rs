@@ -265,7 +265,6 @@ impl MePool {
         let transport_peer_addr = stream.peer_addr().map_err(ProxyError::Io)?;
         let peer_addr = addr;
 
-        let _ = self.maybe_detect_nat_ip(local_addr.ip()).await;
         let family = if local_addr.ip().is_ipv4() {
             IpFamily::V4
         } else {
@@ -324,9 +323,34 @@ impl MePool {
             None
         };
 
-        let local_addr_nat = self.translate_our_addr_with_reflection(local_addr, reflected);
-        let peer_addr_nat =
-            SocketAddr::new(self.translate_ip_for_nat(peer_addr.ip()), peer_addr.port());
+        // Authoritative sources do not wait behind unrelated HTTP discovery. Capture once
+        // before deriving either side of the tuple so a refresh cannot mix observations.
+        let detected = if socks_bound_kdf_addr.is_some()
+            || self.nat_runtime.nat_ip_cfg.is_some()
+            || reflected.is_some()
+        {
+            self.cached_http_nat_ip()
+        } else {
+            self.maybe_detect_nat_ip(local_addr.ip()).await
+        };
+        if self.nat_runtime.nat_probe
+            && local_addr.is_ipv4()
+            && is_bogon(local_addr.ip())
+            && socks_bound_kdf_addr.is_none()
+            && self.nat_runtime.nat_ip_cfg.is_none()
+            && reflected.is_none()
+            && detected.is_none()
+        {
+            return Err(ProxyError::Io(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "ME NAT source observation is unavailable or expired",
+            )));
+        }
+        let local_addr_nat = self.translate_our_addr_with_nat(local_addr, reflected, detected);
+        let peer_addr_nat = SocketAddr::new(
+            Self::translate_ip_with_nat(peer_addr.ip(), self.nat_runtime.nat_ip_cfg.or(detected)),
+            peer_addr.port(),
+        );
         let client_addr_for_kdf = socks_bound_kdf_addr.unwrap_or(local_addr_nat);
         if let Some(upstream_info) = upstream_egress {
             record_upstream_bnd_status(

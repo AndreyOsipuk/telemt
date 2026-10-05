@@ -11,9 +11,8 @@ impl MePool {
             tx,
             byte_budget,
             task_registration,
-            writer_task,
+            mut writer_task,
             intent,
-            _open_reservation,
         } = prepared;
         let writer_id = writer.id;
         let mut writers = self.writers.write().await;
@@ -22,9 +21,15 @@ impl MePool {
         let contour = self.authorize_writer_publication(&writer, &coordinator)?;
         self.authorize_writer_publication_capacity(&writer, contour, intent, writers.as_slice())?;
         writer.contour.store(contour.as_u8(), Ordering::Release);
-        registry_registration.install(writer_id, tx, byte_budget);
+        registry_registration.install_with_lifetime(
+            writer_id,
+            tx,
+            byte_budget,
+            writer_task.lifetime.clone(),
+        );
         writers.push(writer);
         self.conn_count.fetch_add(1, Ordering::Relaxed);
+        drop(writer_task.opening.take());
         self.lifecycle
             .spawn_registered_writer(task_registration, writer_task);
         drop(coordinator);

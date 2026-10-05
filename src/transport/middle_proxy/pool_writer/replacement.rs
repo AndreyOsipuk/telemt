@@ -44,9 +44,8 @@ impl MePool {
             tx,
             byte_budget,
             task_registration,
-            writer_task,
-            intent,
-            _open_reservation,
+            mut writer_task,
+            intent: _,
         } = prepared;
         let replacement_writer_id = writer.id;
         let victim_writer_id = reservation.writer_id();
@@ -57,7 +56,25 @@ impl MePool {
         let mut registry_registration = self.registry.prepare_writer_registration().await;
         let coordinator = self.reinit.coordinator.lock();
         let contour = self.authorize_writer_publication(&writer, &coordinator)?;
-        self.authorize_writer_publication_capacity(&writer, contour, intent, writers.as_slice())?;
+        // Only this victim-backed transaction may replace Active coverage during suppression.
+        let family = if writer.addr.is_ipv4() {
+            crate::network::IpFamily::V4
+        } else {
+            crate::network::IpFamily::V6
+        };
+        let configured = if writer.addr.is_ipv4() {
+            self.decision.ipv4_me
+        } else {
+            self.decision.ipv6_me
+        };
+        if !configured
+            || (contour != WriterContour::Active
+                && self.is_family_temporarily_suppressed(family, Self::now_epoch_secs()))
+        {
+            return Err(ProxyError::Proxy(
+                "ME replacement family lost publication authority".into(),
+            ));
+        }
         writer.contour.store(contour.as_u8(), Ordering::Release);
         let Some(victim_pos) = writers
             .iter()
@@ -71,6 +88,17 @@ impl MePool {
         if victim.draining.load(Ordering::Acquire) || !expected_victim_role.matches(victim) {
             return Err(ProxyError::Proxy(
                 "ME replacement victim changed role before commit".into(),
+            ));
+        }
+        if !matches!(
+            purpose,
+            WriterReplacementPurpose::FloorRebalance { .. }
+                | WriterReplacementPurpose::CoverageTransfer { .. }
+        ) && (expected_victim_role.dc != writer.writer_dc
+            || expected_victim_role.family != family)
+        {
+            return Err(ProxyError::Proxy(
+                "ME replacement purpose cannot move coverage between groups".into(),
             ));
         }
         if let WriterReplacementPurpose::FloorRebalance {
@@ -122,19 +150,103 @@ impl MePool {
                         }) == receiver_family
                 })
                 .count();
-            if donor_count <= donor_floor || receiver_count >= receiver_floor {
+            let protected_floor = self.required_writers_for_dc_with_floor_mode(
+                endpoint_snapshot
+                    .endpoints_for_dc_family(expected_victim_role.dc, expected_victim_role.family)
+                    .len(),
+                false,
+            );
+            let current_receiver_floor = self.required_writers_for_dc_with_floor_mode(
+                endpoint_snapshot
+                    .endpoints_for_dc_family(writer.writer_dc, receiver_family)
+                    .len(),
+                false,
+            );
+            if donor_count <= donor_floor.max(protected_floor)
+                || receiver_count >= receiver_floor.min(current_receiver_floor)
+            {
                 return Err(ProxyError::Proxy(
                     "ME floor rebalance became unnecessary before commit".into(),
                 ));
             }
         }
-        if !registry_registration.prepare_replacement_commit(reservation) {
+        if let WriterReplacementPurpose::CoverageTransfer {
+            authority,
+            receiver_floor,
+        } = purpose
+        {
+            if authority
+                != (
+                    coordinator.endpoint_revision,
+                    coordinator.floor_policy_revision,
+                )
+                || contour != WriterContour::Active
+                || expected_victim_role.contour != WriterContour::Active
+            {
+                return Err(ProxyError::Proxy(
+                    "ME coverage transfer lost policy authority".into(),
+                ));
+            }
+            let endpoints = self.endpoint_snapshot.load();
+            let count = |dc, family| {
+                writers
+                    .iter()
+                    .filter(|candidate| {
+                        !candidate.draining.load(Ordering::Acquire)
+                            && candidate.generation == coordinator.active_generation
+                            && candidate.writer_dc == dc
+                            && WriterContour::from_u8(candidate.contour.load(Ordering::Acquire))
+                                == WriterContour::Active
+                            && candidate.addr.is_ipv4()
+                                == matches!(family, crate::network::IpFamily::V4)
+                            && endpoints.contains_dc_endpoint(dc, candidate.addr)
+                    })
+                    .count()
+            };
+            let donor_is_current = victim.generation == coordinator.active_generation
+                && endpoints.contains_dc_endpoint(victim.writer_dc, victim.addr);
+            let donor_floor = self.required_writers_for_dc_with_floor_mode(
+                endpoints
+                    .endpoints_for_dc_family(victim.writer_dc, expected_victim_role.family)
+                    .len(),
+                false,
+            );
+            if (donor_is_current
+                && count(victim.writer_dc, expected_victim_role.family) <= donor_floor)
+                || count(writer.writer_dc, family)
+                    >= receiver_floor.min(
+                        self.required_writers_for_dc_with_floor_mode(
+                            endpoints
+                                .endpoints_for_dc_family(writer.writer_dc, family)
+                                .len(),
+                            false,
+                        ),
+                    )
+            {
+                return Err(ProxyError::Proxy(
+                    "ME coverage transfer no longer preserves floors".into(),
+                ));
+            }
+        }
+        let lifetime = registry_registration
+            .writer_lifetime(victim_writer_id)
+            .ok_or_else(|| {
+                ProxyError::Proxy("ME replacement victim transport disappeared".into())
+            })?;
+        if !lifetime.commit(&mut writer_task.opening, || {
+            registry_registration.prepare_replacement_commit(reservation)
+        }) {
             return Err(ProxyError::Proxy(
                 "ME replacement victim became active before commit".into(),
             ));
         }
 
-        registry_registration.install(replacement_writer_id, tx, byte_budget);
+        registry_registration.install_with_lifetime(
+            replacement_writer_id,
+            tx,
+            byte_budget,
+            writer_task.lifetime.clone(),
+        );
         writers.push(writer);
         self.conn_count.fetch_add(1, Ordering::Relaxed);
         writers.publish_current();
@@ -158,6 +270,7 @@ impl MePool {
 
 #[cfg(test)]
 mod tests {
+    mod convergence;
     use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -248,12 +361,52 @@ mod tests {
             tx,
             byte_budget,
             task_registration,
-            writer_task: Box::pin(async move {
-                drop(rx);
-            }),
+            writer_task: WriterTransport::new(
+                Box::pin(async move {
+                    drop(rx);
+                }),
+                open_reservation,
+            ),
             intent: WriterOpenIntent::Replacement,
-            _open_reservation: open_reservation,
         }
+    }
+
+    #[tokio::test]
+    async fn suppressed_victim_backed_replacement_keeps_coverage() {
+        let pool = make_pool().await;
+        let addr = endpoint(8);
+        pool.update_proxy_maps(HashMap::from([(2, vec![(addr.ip(), addr.port())])]), None)
+            .await;
+        let victim = install_writer(&pool, 8001, 2, addr).await;
+        pool.set_family_runtime_state(
+            crate::network::IpFamily::V4,
+            crate::transport::middle_proxy::pool::MeFamilyRuntimeState::Suppressed,
+            MePool::now_epoch_secs(),
+            MePool::now_epoch_secs() + 3600,
+            5,
+            0,
+        );
+        let mut reservation = pool
+            .registry
+            .try_reserve_writer_replacement(victim.id)
+            .await
+            .unwrap();
+        let prepared = prepared_writer(&pool, 8002, 2, addr).await;
+        pool.publish_prepared_replacement_writer(
+            prepared,
+            WriterRole::from_writer(&victim),
+            WriterReplacementPurpose::IdleRefresh,
+            &mut reservation,
+        )
+        .await
+        .expect("a reserved active victim must remain replaceable during suppression");
+        assert!(victim.draining.load(Ordering::Acquire));
+        assert_eq!(
+            pool.writer_replacement_open_reserved
+                .load(Ordering::Acquire),
+            1,
+            "overlap is owned until the victim transport is destroyed"
+        );
     }
 
     #[tokio::test]

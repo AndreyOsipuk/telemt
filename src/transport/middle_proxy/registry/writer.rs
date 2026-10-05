@@ -415,15 +415,10 @@ impl ConnRegistry {
             .map
             .get(&conn_id)
             .map(|entry| entry.writer_id)?;
-        let writer = self
-            .writers
-            .map
-            .get(&writer_id)
-            .map(|entry| entry.value().clone())?;
-        Some(ConnWriter {
+        self.writers.map.get(&writer_id).map(|entry| ConnWriter {
             writer_id,
-            tx: writer.tx,
-            byte_budget: writer.byte_budget,
+            tx: entry.tx.clone(),
+            byte_budget: entry.byte_budget.clone(),
         })
     }
 
@@ -436,19 +431,12 @@ impl ConnRegistry {
         let hot = self.hot_binding.map.get(&conn_id)?;
         let writer_id = hot.writer_id;
         let meta = hot.meta.clone();
-        let writer = self
-            .writers
-            .map
-            .get(&writer_id)
-            .map(|entry| entry.value().clone())?;
-        Some((
-            ConnWriter {
-                writer_id,
-                tx: writer.tx,
-                byte_budget: writer.byte_budget,
-            },
-            meta,
-        ))
+        let writer = self.writers.map.get(&writer_id).map(|entry| ConnWriter {
+            writer_id,
+            tx: entry.tx.clone(),
+            byte_budget: entry.byte_budget.clone(),
+        })?;
+        Some((writer, meta))
     }
 
     pub async fn active_conn_ids(&self) -> Vec<u64> {

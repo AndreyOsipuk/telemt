@@ -111,6 +111,31 @@ impl MePoolLifecycle {
         self.admission.try_register()
     }
 
+    /// Registers a cancellation-aware producer for a caller-owned JoinSet without a second spawn.
+    pub(super) fn track_producer<F>(
+        &self,
+        future: F,
+    ) -> Result<impl Future<Output = Option<F::Output>> + Send + 'static + use<F>, F>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let Some(registration) = self.try_register() else {
+            return Err(future);
+        };
+        let cancel = self.producer_cancel.clone();
+        let tracked = self.producer_tasks.track_future(async move {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => None,
+                output = future => Some(output),
+            }
+        });
+        // The tracker owns destruction before shutdown can observe no registrations.
+        drop(registration);
+        Ok(tracked)
+    }
+
     /// Registers and spawns one cancellation-aware ME producer.
     pub(super) fn spawn_producer<F>(&self, future: F) -> Result<(), F>
     where

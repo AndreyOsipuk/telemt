@@ -18,6 +18,7 @@ pub(super) const PUBLIC_IP: Ipv4Addr = Ipv4Addr::new(91, 108, 56, 1);
 pub(super) const TEST_DEADLINE: Duration = Duration::from_secs(2);
 
 // Concurrency and end-to-end regressions share gated local discovery servers.
+mod freshness;
 pub(super) mod lifecycle;
 mod recovery;
 
@@ -243,7 +244,11 @@ async fn http_discovery_survives_reconnect_timeout() {
     .await
     .expect("pool-owned HTTP discovery must publish after caller cancellation");
     assert_eq!(
-        *pool.nat_runtime.nat_ip_detected.read().await,
+        pool.nat_runtime
+            .nat_ip_detected
+            .read()
+            .await
+            .map(|observation| observation.ip),
         Some(PUBLIC_IP.into())
     );
     assert_eq!(http.requests.load(Ordering::Relaxed), 1);

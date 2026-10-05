@@ -24,7 +24,11 @@ impl Drop for MiddlePeer {
 
 impl MiddlePeer {
     async fn new(server_ip: Ipv4Addr) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        Self::with_bind("127.0.0.1:0", server_ip.into(), PUBLIC_IP.into()).await
+    }
+
+    async fn with_bind(bind: &str, server_ip: IpAddr, client_ip: IpAddr) -> Self {
+        let listener = TcpListener::bind(bind).await.unwrap();
         let addr = listener.local_addr().unwrap();
         let handshakes = Arc::new(AtomicUsize::new(0));
         let cancelled = Arc::new(AtomicUsize::new(0));
@@ -37,7 +41,7 @@ impl MiddlePeer {
                 tokio::select! {
                     accepted = listener.accept() => {
                         let (stream, _) = accepted.unwrap();
-                        pending.spawn(accept_handshake(stream, server_ip));
+                        pending.spawn(accept_handshake(stream, server_ip, client_ip));
                     }
                     completed = pending.join_next(), if !pending.is_empty() => {
                         match completed.unwrap().expect("fake ME handshake task must not panic") {
@@ -60,7 +64,11 @@ impl MiddlePeer {
     }
 }
 
-async fn accept_handshake(mut stream: TcpStream, server_ip: Ipv4Addr) -> Option<TcpStream> {
+async fn accept_handshake(
+    mut stream: TcpStream,
+    server_ip: IpAddr,
+    client_ip: IpAddr,
+) -> Option<TcpStream> {
     let client_port = stream.peer_addr().unwrap().port();
     let server_port = stream.local_addr().unwrap().port();
     let (seq, payload) = match read_rpc_frame_plaintext(&mut stream).await {
@@ -79,35 +87,43 @@ async fn accept_handshake(mut stream: TcpStream, server_ip: Ipv4Addr) -> Option<
         .write_all(&build_rpc_frame(-2, &nonce, RpcChecksumMode::Crc32))
         .await
         .unwrap();
-    let mut client_ip = PUBLIC_IP.octets();
-    client_ip.reverse();
-    let mut server_ip = server_ip.octets();
-    server_ip.reverse();
+    let split = |ip: IpAddr| match ip {
+        IpAddr::V4(ip) => {
+            let mut octets = ip.octets();
+            octets.reverse();
+            (Some(octets), None)
+        }
+        IpAddr::V6(ip) => (None, Some(ip.octets())),
+    };
+    let (client_v4, client_v6) = split(client_ip);
+    let (server_v4, server_v6) = split(server_ip);
+    let client_ip = client_v4.unwrap_or([0; 4]);
+    let server_ip = server_v4.unwrap_or([0; 4]);
     let (read_key, read_iv) = derive_middleproxy_keys(
         &server_nonce,
         &client_nonce,
         &timestamp.to_le_bytes(),
-        Some(&server_ip),
+        server_v4.as_ref().map(|ip| ip.as_slice()),
         &client_port.to_le_bytes(),
         b"CLIENT",
-        Some(&client_ip),
+        client_v4.as_ref().map(|ip| ip.as_slice()),
         &server_port.to_le_bytes(),
         &[1u8; 32],
-        None,
-        None,
+        client_v6.as_ref(),
+        server_v6.as_ref(),
     );
     let (write_key, write_iv) = derive_middleproxy_keys(
         &server_nonce,
         &client_nonce,
         &timestamp.to_le_bytes(),
-        Some(&server_ip),
+        server_v4.as_ref().map(|ip| ip.as_slice()),
         &client_port.to_le_bytes(),
         b"SERVER",
-        Some(&client_ip),
+        client_v4.as_ref().map(|ip| ip.as_slice()),
         &server_port.to_le_bytes(),
         &[1u8; 32],
-        None,
-        None,
+        client_v6.as_ref(),
+        server_v6.as_ref(),
     );
     let mut encrypted = [0u8; 48];
     stream.read_exact(&mut encrypted).await.unwrap();
@@ -151,12 +167,8 @@ async fn suppressed_pool_recovers_after_delayed_discovery(http_slow: bool) {
     let http = http_server_with_delay("91.108.56.1", delay).await;
     stun.release.add_permits(64);
     http.release.add_permits(64);
-    let peer = MiddlePeer::new(if http_slow {
-        PUBLIC_IP
-    } else {
-        Ipv4Addr::LOCALHOST
-    })
-    .await;
+    // A valid STUN source bypasses HTTP; the peer remains the configured loopback endpoint.
+    let peer = MiddlePeer::new(Ipv4Addr::LOCALHOST).await;
     let urls = if http_slow {
         vec![format!("http://{}/", http.addr)]
     } else {
@@ -177,6 +189,9 @@ async fn suppressed_pool_recovers_after_delayed_discovery(http_slow: bool) {
         .store(100, Ordering::Relaxed);
     pool.single_endpoint_runtime
         .me_single_endpoint_shadow_writers
+        .store(0, Ordering::Relaxed);
+    pool.single_endpoint_runtime
+        .me_single_endpoint_shadow_rotate_every_secs
         .store(0, Ordering::Relaxed);
     pool.update_proxy_maps(
         HashMap::from([(2, vec![(peer.addr.ip(), peer.addr.port())])]),
@@ -206,20 +221,18 @@ async fn suppressed_pool_recovers_after_delayed_discovery(http_slow: bool) {
         Arc::new(SecureRandom::new()),
         0,
     ));
-    if http_slow {
-        http.received().await;
-    } else {
+    if !http_slow {
         stun.received().await;
+        timeout(Duration::from_secs(5), async {
+            while peer.cancelled.load(Ordering::Acquire) == 0 {
+                assert!(!peer.task.is_finished());
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the actual 1200ms reconnect must cancel a pre-KDF TCP connection");
+        assert_eq!(peer.handshakes.load(Ordering::Acquire), 0);
     }
-    timeout(Duration::from_secs(5), async {
-        while peer.cancelled.load(Ordering::Acquire) == 0 {
-            assert!(!peer.task.is_finished());
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the actual 1200ms reconnect must cancel at least one pre-KDF TCP connection");
-    assert_eq!(peer.handshakes.load(Ordering::Acquire), 0);
     let expected = 2 * pool.required_writers_for_dc(1);
     timeout(Duration::from_secs(10), async {
         while !pool.admission_ready_full_floor().await
@@ -244,10 +257,7 @@ async fn suppressed_pool_recovers_after_delayed_discovery(http_slow: bool) {
     );
     assert_eq!(pool.writers.read().await.len(), expected);
     assert!(peer.handshakes.load(Ordering::Acquire) >= expected);
-    assert_eq!(
-        http.requests.load(Ordering::Relaxed),
-        usize::from(http_slow)
-    );
+    assert_eq!(http.requests.load(Ordering::Relaxed), 0);
     assert_eq!(
         stun.requests.load(Ordering::Relaxed),
         usize::from(!http_slow)
@@ -263,4 +273,59 @@ async fn suppressed_pool_recovers_full_floor_after_expired_stun_refresh() {
 #[tokio::test]
 async fn suppressed_pool_recovers_full_floor_after_slow_http_with_fresh_stun() {
     suppressed_pool_recovers_after_delayed_discovery(true).await;
+}
+
+#[tokio::test]
+async fn stalled_ipv4_does_not_delay_real_ipv6_handshakes() {
+    let stalled = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let stalled_addr = stalled.local_addr().unwrap();
+    let healthy =
+        MiddlePeer::with_bind("[::1]:0", "::1".parse().unwrap(), "::1".parse().unwrap()).await;
+    let mut pool = make_pool_with_decision(NetworkDecision {
+        ipv4_me: true,
+        ipv6_me: true,
+        ..NetworkDecision::default()
+    })
+    .await;
+    Arc::get_mut(&mut Arc::get_mut(&mut pool).unwrap().reconnect_runtime)
+        .unwrap()
+        .me_one_timeout = Duration::from_secs(5);
+    pool.health_runtime
+        .me_health_interval_ms_unhealthy
+        .store(10, Ordering::Relaxed);
+    pool.single_endpoint_runtime
+        .me_single_endpoint_shadow_rotate_every_secs
+        .store(0, Ordering::Relaxed);
+    pool.update_proxy_maps(
+        HashMap::from([(2, vec![(stalled_addr.ip(), stalled_addr.port())])]),
+        Some(HashMap::from([(
+            2,
+            vec![(healthy.addr.ip(), healthy.addr.port())],
+        )])),
+    )
+    .await;
+    let monitor = tokio::spawn(me_health_monitor(pool.clone(), pool.rng.clone(), 0));
+    let (blocked_stream, _) = timeout(TEST_DEADLINE, stalled.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    timeout(TEST_DEADLINE, async {
+        while healthy.handshakes.load(Ordering::Acquire) < pool.required_writers_for_dc(1) {
+            assert!(!healthy.task.is_finished());
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("IPv6 must restore coverage while IPv4 still owns a stalled handshake");
+    monitor.abort();
+    let _ = monitor.await;
+    assert!(
+        pool.shutdown_until(TEST_DEADLINE).await,
+        "tracked child transports must join on shutdown"
+    );
+    drop(blocked_stream);
+    assert_eq!(
+        pool.writer_connect_active_reserved.load(Ordering::Acquire),
+        0
+    );
 }

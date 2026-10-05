@@ -32,6 +32,9 @@ use super::wire::build_proxy_req_payload;
 mod publication;
 mod replacement;
 mod runtime;
+// Physical replacement overlap survives logical writer removal until transport destruction.
+pub(super) mod overlap;
+use overlap::WriterTransport;
 
 // Recovery regressions exercise the serialized production publication boundary.
 #[cfg(test)]
@@ -42,9 +45,8 @@ struct PreparedWriter<'a> {
     tx: mpsc::Sender<WriterCommand>,
     byte_budget: Arc<tokio::sync::Semaphore>,
     task_registration: MeTaskRegistration<'a>,
-    writer_task: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+    writer_task: WriterTransport,
     intent: WriterOpenIntent,
-    _open_reservation: WriterOpenReservation<'a>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +59,13 @@ pub(super) enum WriterReplacementPurpose {
         /// Minimum writer count that must remain in the donor group.
         donor_floor: usize,
         /// Target count above which the receiver no longer needs the slot.
+        receiver_floor: usize,
+    },
+    /// Transfers one slot without taking a current donor below its protected base floor.
+    CoverageTransfer {
+        /// Endpoint and floor-policy authority captured before selecting the donor.
+        authority: (u64, u64),
+        /// Planned receiver target, revalidated against current policy at commit.
         receiver_floor: usize,
     },
     /// Replaces a stale-generation writer with an active-generation writer.
@@ -72,6 +81,7 @@ impl WriterReplacementPurpose {
         match self {
             Self::IdleRefresh => "idle_refresh",
             Self::FloorRebalance { .. } => "floor_rebalance",
+            Self::CoverageTransfer { .. } => "coverage_transfer",
             Self::GenerationConvergence => "generation_convergence",
             Self::ShadowRotation => "shadow_rotation",
             Self::SecretRotation => "secret_rotation",
