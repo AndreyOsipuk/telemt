@@ -130,14 +130,20 @@ impl ProxySharedState {
             direct_buffer_budget,
             TrafficLimiter::new(),
             user_admission,
+            Arc::new(PendingHandshakeLimiter::default()),
         )
     }
 
     /// Creates generation-local caches around process-owned data-plane authorities.
+    ///
+    /// `pending_handshakes` is process-owned as well: a drain-reload passes the
+    /// old generation's limiter on, so handshakes still in progress in the old
+    /// generation keep counting against `server.max_pending_handshakes_per_ip`.
     pub(crate) fn new_with_process_authorities(
         direct_buffer_budget: Arc<DirectBufferBudget>,
         traffic_limiter: Arc<TrafficLimiter>,
         user_admission: Arc<UserAdmissionAuthority>,
+        pending_handshakes: Arc<PendingHandshakeLimiter>,
     ) -> Arc<Self> {
         Arc::new(Self {
             handshake: HandshakeSharedState {
@@ -184,7 +190,7 @@ impl ProxySharedState {
             conntrack_pressure_active: AtomicBool::new(false),
             conntrack_close_tx: Mutex::new(None),
             masking_fallback_permits: Arc::new(Semaphore::new(MASKING_FALLBACK_MAX_CONCURRENT)),
-            pending_handshakes: Arc::new(PendingHandshakeLimiter::default()),
+            pending_handshakes,
         })
     }
 

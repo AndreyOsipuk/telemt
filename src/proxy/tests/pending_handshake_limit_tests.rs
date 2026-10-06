@@ -22,7 +22,18 @@ struct Harness {
 }
 
 fn harness(limit: u32, dry_run: bool) -> Harness {
+    harness_with_first_byte_idle(limit, dry_run, None)
+}
+
+fn harness_with_first_byte_idle(
+    limit: u32,
+    dry_run: bool,
+    first_byte_idle: Option<u64>,
+) -> Harness {
     let mut cfg = ProxyConfig::default();
+    if let Some(secs) = first_byte_idle {
+        cfg.timeouts.client_first_byte_idle_secs = secs;
+    }
     cfg.censorship.mask = false;
     cfg.general.modes.classic = true;
     cfg.general.modes.secure = true;
@@ -43,7 +54,17 @@ async fn stalled_connection(
     h: &Harness,
     peer: &str,
 ) -> (DuplexStream, JoinHandle<crate::error::Result<()>>) {
-    let (server_side, mut client_side) = duplex(4096);
+    let (mut client_side, task) = silent_connection(h, peer);
+    client_side.write_all(&[0xef]).await.unwrap();
+    (client_side, task)
+}
+
+/// Opens a connection that never sends a byte.
+fn silent_connection(
+    h: &Harness,
+    peer: &str,
+) -> (DuplexStream, JoinHandle<crate::error::Result<()>>) {
+    let (server_side, client_side) = duplex(4096);
     let peer: SocketAddr = peer.parse().unwrap();
     let stats = h.stats.clone();
     let task = tokio::spawn(handle_client_stream_with_shared(
@@ -63,7 +84,6 @@ async fn stalled_connection(
         h.shared.clone(),
         false,
     ));
-    client_side.write_all(&[0xef]).await.unwrap();
     (client_side, task)
 }
 
@@ -136,4 +156,66 @@ async fn disabled_by_default_tracks_nothing() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(h.shared.pending_handshakes.tracked_ips(), 0);
     assert_eq!(h.stats.get_pending_handshake_per_ip_rejected_total(), 0);
+}
+
+// Review: with client_first_byte_idle_secs = 0 the idle wait is skipped, and
+// the slot used to be taken before any byte arrived, so two silent connections
+// from one IP with limit 1 got the second one closed. Silent connections must
+// not hold a slot; the slot is taken once the first byte is actually received.
+#[tokio::test]
+async fn silent_connections_do_not_hold_slots_when_first_byte_idle_is_zero() {
+    let h = harness_with_first_byte_idle(1, false, Some(0));
+
+    let (_a, ta) = silent_connection(&h, "198.51.100.50:40001");
+    let (_b, tb) = silent_connection(&h, "198.51.100.50:40002");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert_eq!(
+        h.shared
+            .pending_handshakes
+            .pending_for("198.51.100.50".parse().unwrap()),
+        0
+    );
+    assert_eq!(h.stats.get_pending_handshake_per_ip_rejected_total(), 0);
+    assert!(!ta.is_finished(), "a silent connection must stay open");
+    assert!(!tb.is_finished(), "a silent connection must stay open");
+
+    // Once a byte arrives, the connection is in the handshake and counted.
+    let (_c, _tc) = stalled_connection(&h, "198.51.100.50:40003").await;
+    wait_pending(&h, "198.51.100.50", 1).await;
+}
+
+// Review: a drain-reload created a new limiter for the new runtime generation,
+// so with limit N one IP could hold up to 2N slots while the old generation was
+// still finishing handshakes. The limiter is process-owned and shared.
+#[test]
+fn runtime_generations_share_the_pending_handshake_limiter() {
+    use crate::proxy::direct_buffer_budget::{
+        DirectBufferBudget, fallback_direct_buffer_hard_limit,
+    };
+    use crate::proxy::pending_handshake::{PendingHandshakeAdmission, PendingHandshakeLimiter};
+    use crate::proxy::traffic_limiter::TrafficLimiter;
+    use crate::proxy::user_admission::UserAdmissionAuthority;
+
+    let limiter = Arc::new(PendingHandshakeLimiter::default());
+    let generation = || {
+        ProxySharedState::new_with_process_authorities(
+            DirectBufferBudget::new(fallback_direct_buffer_hard_limit()),
+            TrafficLimiter::new(),
+            UserAdmissionAuthority::new(),
+            limiter.clone(),
+        )
+    };
+    let old_generation = generation();
+    let new_generation = generation();
+    let ip = "198.51.100.60".parse().unwrap();
+
+    let _held = match old_generation.pending_handshakes.try_acquire(ip, 1, false) {
+        PendingHandshakeAdmission::Admitted(guard) => guard,
+        other => panic!("expected admission, got {other:?}"),
+    };
+    assert!(matches!(
+        new_generation.pending_handshakes.try_acquire(ip, 1, false),
+        PendingHandshakeAdmission::Rejected
+    ));
 }
