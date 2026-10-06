@@ -208,6 +208,15 @@ where
         }
     };
 
+    // Per-IP limit on concurrent unauthenticated handshakes, see
+    // server.max_pending_handshakes_per_ip. Released right after the handshake
+    // outcome is known, before the relay starts.
+    let Ok(pending_handshake) =
+        admit_pending_handshake(&shared, &config, &stats, &beobachten, real_peer)
+    else {
+        return Ok(());
+    };
+
     let handshake_timeout = handshake_timeout_with_mask_grace(&config);
     let stats_for_timeout = stats.clone();
     let config_for_timeout = config.clone();
@@ -496,6 +505,7 @@ where
             return Err(ProxyError::TgHandshakeTimeout);
         }
     };
+    drop(pending_handshake);
 
     // Phase 2: relay (WITHOUT handshake timeout — relay has its own activity timeouts)
     match outcome {

@@ -159,6 +159,20 @@ impl RunningClientHandler {
             }
         };
 
+        // Per-IP limit on concurrent unauthenticated handshakes. Taken after
+        // the first client byte, so pooled idle connections that have not
+        // started a handshake are not counted, and released when this function
+        // returns: on success, failure, timeout and masking fallback alike.
+        let Ok(_pending_handshake) = admit_pending_handshake(
+            &self.shared,
+            &self.config,
+            &self.stats,
+            &self.beobachten,
+            self.peer,
+        ) else {
+            return Ok(None);
+        };
+
         let handshake_timeout = handshake_timeout_with_mask_grace(&self.config);
         let stats = self.stats.clone();
         let config_for_timeout = self.config.clone();

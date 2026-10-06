@@ -11,6 +11,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use crate::proxy::direct_buffer_budget::{DirectBufferBudget, fallback_direct_buffer_hard_limit};
 use crate::proxy::handshake::{AuthProbeSaturationState, AuthProbeState};
 use crate::proxy::middle_relay::{DesyncDedupRotationState, RelayIdleCandidateRegistry};
+use crate::proxy::pending_handshake::PendingHandshakeLimiter;
 use crate::proxy::traffic_limiter::TrafficLimiter;
 use crate::proxy::user_admission::{
     UserAdmissionAuthority, UserAdmissionPublication, UserCredentialId, UserIncarnation,
@@ -100,6 +101,7 @@ pub(crate) struct ProxySharedState {
     pub(crate) conntrack_pressure_active: AtomicBool,
     pub(crate) conntrack_close_tx: Mutex<Option<mpsc::Sender<ConntrackCloseEvent>>>,
     masking_fallback_permits: Arc<Semaphore>,
+    pub(crate) pending_handshakes: Arc<PendingHandshakeLimiter>,
 }
 
 impl ProxySharedState {
@@ -182,6 +184,7 @@ impl ProxySharedState {
             conntrack_pressure_active: AtomicBool::new(false),
             conntrack_close_tx: Mutex::new(None),
             masking_fallback_permits: Arc::new(Semaphore::new(MASKING_FALLBACK_MAX_CONCURRENT)),
+            pending_handshakes: Arc::new(PendingHandshakeLimiter::default()),
         })
     }
 
