@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use super::*;
 
 // Source polling and explicit reloads have distinct DNS preparation lifecycles.
@@ -36,12 +38,37 @@ impl WatchManifest {
 #[derive(Debug, Default)]
 pub(super) struct ReloadState {
     applied_snapshot_hash: Option<u64>,
+    reporter: Option<ConfigReloadReporter>,
 }
 
 impl ReloadState {
     pub(super) fn new(applied_snapshot_hash: Option<u64>) -> Self {
         Self {
             applied_snapshot_hash,
+            reporter: None,
+        }
+    }
+
+    fn with_reporter(mut self, reporter: Option<ConfigReloadReporter>) -> Self {
+        self.reporter = reporter;
+        self
+    }
+
+    /// Publishes the revision of a snapshot that the watcher accepted.
+    fn report_applied(
+        &self,
+        source_contents: &BTreeMap<PathBuf, String>,
+        restart_required_sections: Vec<String>,
+    ) {
+        if let Some(reporter) = &self.reporter {
+            reporter.record_applied(source_contents, restart_required_sections);
+        }
+    }
+
+    /// Publishes a refused snapshot; the active config is left untouched.
+    fn report_rejected(&self, stage: &'static str, reason: &str, revision: Option<String>) {
+        if let Some(reporter) = &self.reporter {
+            reporter.record_rejected(stage, reason, revision);
         }
     }
 
@@ -162,7 +189,7 @@ fn reload_config_with_resolver(
     let LoadedConfig {
         config: new_cfg,
         source_files,
-        source_contents: _,
+        source_contents,
         rendered_hash,
     } = loaded;
     let next_manifest = WatchManifest::from_source_files(&source_files);
@@ -174,15 +201,19 @@ fn reload_config_with_resolver(
     let hot_changed =
         !config_equal(&old_cfg, &applied_cfg) || !old_cfg.web_decoy_endpoints_equal(&applied_cfg);
 
-    if non_hot_changed {
+    let restart_required_sections = if non_hot_changed {
         warn_non_hot_changes(&old_cfg, &new_cfg, non_hot_changed);
-    }
+        changed_sections(&applied_cfg, &new_cfg)
+    } else {
+        Vec::new()
+    };
 
     if !hot_changed {
         if refresh_quota_source {
             config_tx.send(Arc::new(applied_cfg)).ok();
         }
         reload_state.mark_applied(rendered_hash);
+        reload_state.report_applied(&source_contents, restart_required_sections);
         return Some(next_manifest);
     }
 
@@ -193,6 +224,11 @@ fn reload_config_with_resolver(
         error!(
             "config reload: invalid network.dns_overrides: {}; keeping old config",
             e
+        );
+        reload_state.report_rejected(
+            "dns_overrides",
+            &e.to_string(),
+            Some(crate::config::source_revision(&source_contents)),
         );
         return Some(next_manifest);
     }
@@ -207,6 +243,7 @@ fn reload_config_with_resolver(
     );
     config_tx.send(Arc::new(applied_cfg)).ok();
     reload_state.mark_applied(rendered_hash);
+    reload_state.report_applied(&source_contents, restart_required_sections);
     Some(next_manifest)
 }
 
@@ -255,6 +292,7 @@ pub fn spawn_config_watcher(
     mut activation: Option<watch::Receiver<bool>>,
     quota_mutation: Option<Arc<tokio::sync::Mutex<()>>>,
     quota_source_refresh: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    reload_reporter: Option<ConfigReloadReporter>,
 ) -> (
     watch::Receiver<Arc<ProxyConfig>>,
     watch::Receiver<LogLevel>,
@@ -281,7 +319,7 @@ pub fn spawn_config_watcher(
                 }
             }
         }
-        let initial_loaded = preparation::read_source(&config_path).await;
+        let initial_loaded = preparation::read_source(&config_path).await.ok();
         let initial_manifest = initial_loaded
             .as_ref()
             .map(|loaded| WatchManifest::from_source_files(&loaded.source_files))
@@ -297,7 +335,15 @@ pub fn spawn_config_watcher(
             .map(|loaded| loaded.rendered_hash);
         let (notify_tx, mut notify_rx) = mpsc::channel::<()>(4);
         let manifest_state = Arc::new(StdRwLock::new(WatchManifest::default()));
-        let mut reload_state = ReloadState::new(initial_snapshot_hash);
+        let mut reload_state =
+            ReloadState::new(initial_snapshot_hash).with_reporter(reload_reporter);
+        // The active snapshot is the disk source only when hot fields already match it.
+        if let Some(source) = initial_loaded.as_ref().filter(|_| initial_matches_disk) {
+            reload_state.report_applied(
+                &source.source_contents,
+                preparation::restart_required_sections(&config_tx.borrow(), source),
+            );
+        }
 
         let tx_inotify = notify_tx.clone();
         let manifest_for_inotify = manifest_state.clone();
@@ -425,7 +471,7 @@ pub fn spawn_config_watcher(
                 quota_source_refresh.as_deref(),
             )
             .await;
-            if next_manifest.is_none() {
+            if next_manifest.is_err() {
                 tokio::time::sleep(HOT_RELOAD_DEBOUNCE).await;
                 while notify_rx.try_recv().is_ok() {}
                 next_manifest = preparation::reload(
@@ -443,13 +489,15 @@ pub fn spawn_config_watcher(
                 .await;
             }
 
-            if let Some(next_manifest) = next_manifest {
-                apply_watch_manifest(
+            // Only the retry is reported: the first read can observe a partial editor write.
+            match next_manifest {
+                Ok(next_manifest) => apply_watch_manifest(
                     inotify_watcher.as_mut(),
                     poll_watcher.as_mut(),
                     &manifest_state,
                     next_manifest,
-                );
+                ),
+                Err((reason, revision)) => reload_state.report_rejected("parse", &reason, revision),
             }
         }
     };
@@ -480,3 +528,6 @@ mod decoy_dns_tests;
 
 #[cfg(test)]
 mod quota_period_tests;
+
+#[cfg(test)]
+mod report_tests;

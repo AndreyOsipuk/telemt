@@ -25,9 +25,24 @@ pub(super) struct SystemInfoData {
     pub(super) uptime_seconds: f64,
     pub(super) config_path: String,
     pub(super) config_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) applied_config_hash: Option<String>,
+    pub(super) restart_required_sections: Vec<String>,
     pub(super) config_reload_count: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) last_config_reload_epoch_secs: Option<u64>,
+    pub(super) config_reload_rejected_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) last_config_reload_rejection: Option<ConfigReloadRejectionData>,
+}
+
+#[derive(Serialize)]
+pub(super) struct ConfigReloadRejectionData {
+    pub(super) stage: &'static str,
+    pub(super) reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) config_hash: Option<String>,
+    pub(super) at_epoch_secs: u64,
 }
 
 #[derive(Serialize)]
@@ -142,6 +157,7 @@ pub(super) fn build_system_info_data(
         .load(Ordering::Relaxed);
     let last_config_reload_epoch_secs =
         (last_reload_epoch_secs > 0).then_some(last_reload_epoch_secs);
+    let reload_report = shared.stats.config_reload_reporter().snapshot();
 
     let git_commit = option_env!("TELEMT_GIT_COMMIT")
         .or(option_env!("VERGEN_GIT_SHA"))
@@ -166,11 +182,22 @@ pub(super) fn build_system_info_data(
         uptime_seconds: process_uptime_seconds(shared.runtime_state.process_started_at_epoch_secs),
         config_path: shared.config_path.display().to_string(),
         config_hash: revision.to_string(),
+        applied_config_hash: reload_report.applied_revision,
+        restart_required_sections: reload_report.restart_required_sections,
         config_reload_count: shared
             .runtime_state
             .config_reload_count
             .load(Ordering::Relaxed),
         last_config_reload_epoch_secs,
+        config_reload_rejected_count: reload_report.rejected_total,
+        last_config_reload_rejection: reload_report.last_rejection.map(|rejection| {
+            ConfigReloadRejectionData {
+                stage: rejection.stage,
+                reason: rejection.reason,
+                config_hash: rejection.revision,
+                at_epoch_secs: rejection.at_epoch_secs,
+            }
+        }),
     }
 }
 

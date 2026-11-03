@@ -30,6 +30,7 @@ use self::telemetry::TelemetryPolicy;
 pub use self::tls_fingerprints::TlsFingerprintSnapshotRow;
 pub(crate) use self::users::UserConnectionObservation;
 use crate::config::MeWriterPickMode;
+use crate::config::hot_reload::ConfigReloadReporter;
 use crate::proxy::user_connection_authority::UserConnectionAuthority;
 
 const ME_HANDSHAKE_ERROR_CODE_MAX: usize = 64;
@@ -360,6 +361,7 @@ pub struct Stats {
     user_stats: DashMap<String, Arc<UserStats>>,
     quota_store: Arc<QuotaStore>,
     connection_authority: Arc<UserConnectionAuthority>,
+    config_reload: ConfigReloadReporter,
     user_stats_last_cleanup_epoch_secs: AtomicU64,
     start_time: parking_lot::RwLock<Option<Instant>>,
 }
@@ -462,6 +464,11 @@ impl Stats {
     /// Returns process-owned per-user connection admission.
     pub(crate) fn connection_authority(&self) -> Arc<UserConnectionAuthority> {
         Arc::clone(&self.connection_authority)
+    }
+
+    /// Returns the outcome channel of this generation's config watcher.
+    pub(crate) fn config_reload_reporter(&self) -> &ConfigReloadReporter {
+        &self.config_reload
     }
 }
 

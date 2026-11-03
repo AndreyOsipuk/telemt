@@ -25,6 +25,28 @@ pub(super) fn render(
     let _ = writeln!(out, "# TYPE telemt_uptime_seconds gauge");
     let _ = writeln!(out, "telemt_uptime_seconds {:.1}", stats.uptime_secs());
 
+    let reload_report = stats.config_reload_reporter().snapshot();
+    let _ = writeln!(
+        out,
+        "# HELP telemt_config_reload_rejected_total Config hot reloads refused while the previous config stayed active"
+    );
+    let _ = writeln!(out, "# TYPE telemt_config_reload_rejected_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_config_reload_rejected_total {}",
+        reload_report.rejected_total
+    );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_config_restart_required_sections Config sections with accepted changes that apply only after restart"
+    );
+    let _ = writeln!(out, "# TYPE telemt_config_restart_required_sections gauge");
+    let _ = writeln!(
+        out,
+        "telemt_config_restart_required_sections {}",
+        reload_report.restart_required_sections.len()
+    );
+
     let _ = writeln!(
         out,
         "# HELP telemt_telemetry_core_enabled Runtime core telemetry switch"

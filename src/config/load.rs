@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::warn;
 
 use crate::crypto::sha256;
@@ -96,6 +97,20 @@ pub(crate) struct ConfigSourceGraph {
     pub(crate) source_contents: BTreeMap<PathBuf, String>,
     /// Include-expanded TOML used for typed deserialization.
     pub(crate) rendered: String,
+}
+
+/// Revision of a recursive source snapshot, reported by the API as `config_hash`.
+pub(crate) fn source_revision(source_contents: &BTreeMap<PathBuf, String>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"telemt-config-manifest-v1\0");
+    for (path, content) in source_contents {
+        let path = path.as_os_str().as_encoded_bytes();
+        hasher.update((path.len() as u64).to_le_bytes());
+        hasher.update(path);
+        hasher.update((content.len() as u64).to_le_bytes());
+        hasher.update(content.as_bytes());
+    }
+    hex::encode(hasher.finalize())
 }
 
 /// Main runtime configuration loaded from TOML.

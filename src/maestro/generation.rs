@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::config::ProxyConfig;
+use crate::config::hot_reload::ConfigReloadReport;
 use crate::crypto::SecureRandom;
 use crate::ip_tracker::UserIpTracker;
 use crate::proxy::authenticated::ClientRuntimeDeps;
@@ -108,6 +109,7 @@ pub(crate) struct RuntimeWatchState {
     pub(crate) generation_id: u64,
     pub(crate) config_rx: watch::Receiver<Arc<ProxyConfig>>,
     pub(crate) admission_rx: watch::Receiver<bool>,
+    pub(crate) config_reload_rx: watch::Receiver<ConfigReloadReport>,
 }
 
 /// Cancellation and join ownership for one generation's background tasks.
@@ -247,6 +249,7 @@ impl RuntimeGeneration {
             generation_id: self.id,
             config_rx: self.config_rx.clone(),
             admission_rx: self.admission_rx.clone(),
+            config_reload_rx: self.stats.config_reload_reporter().subscribe(),
         }
     }
 

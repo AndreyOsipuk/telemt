@@ -49,15 +49,18 @@ const HOT_RELOAD_DEBOUNCE: Duration = Duration::from_millis(50);
 
 mod diff;
 mod fields;
+// Watcher outcomes published to the API and metrics.
+mod outcome;
 mod reporting;
 mod watcher;
 
 #[allow(unused_imports)]
 pub use diff::{ChangeClassification, classify_config_changes};
 pub use fields::HotFields;
+pub(crate) use outcome::{ConfigReloadReport, ConfigReloadReporter};
 pub use watcher::spawn_config_watcher;
 
-use diff::{config_equal, warn_non_hot_changes};
+use diff::{changed_sections, config_equal, warn_non_hot_changes};
 use fields::overlay_hot_fields;
 use reporting::log_changes;
 #[cfg(test)]

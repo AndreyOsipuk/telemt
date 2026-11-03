@@ -23,11 +23,12 @@ pub(super) fn spawn_runtime_watchers(
         control_plane,
     );
     spawn_admission_watcher(
-        runtime_watch_rx,
+        runtime_watch_rx.clone(),
         runtime_state,
-        runtime_events,
+        runtime_events.clone(),
         control_plane,
     );
+    spawn_config_rejection_watcher(runtime_watch_rx, runtime_events, control_plane);
 }
 
 fn spawn_config_watcher(
@@ -136,6 +137,78 @@ fn spawn_admission_watcher(
     });
 }
 
+/// Records refused hot reloads; the active config is unchanged, so no reload counter moves.
+fn spawn_config_rejection_watcher(
+    mut runtime_watch_rx: watch::Receiver<Option<RuntimeWatchState>>,
+    runtime_events: Arc<ApiEventStore>,
+    control_plane: &ProcessControlPlane,
+) {
+    let _ = control_plane.spawn(async move {
+        let Some(mut current) = runtime_watch_rx.borrow().clone() else {
+            return;
+        };
+        // Each generation owns a fresh watcher report, so its rejections start at zero.
+        let mut seen_rejections = 0;
+        record_config_rejection(&runtime_events, &mut current, &mut seen_rejections);
+        loop {
+            tokio::select! {
+                biased;
+                changed = runtime_watch_rx.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    let Some(next) = runtime_watch_rx.borrow().clone() else {
+                        continue;
+                    };
+                    if next.generation_id != current.generation_id {
+                        current = next;
+                        seen_rejections = 0;
+                        record_config_rejection(&runtime_events, &mut current, &mut seen_rejections);
+                    }
+                }
+                changed = current.config_reload_rx.changed() => {
+                    if changed.is_err() {
+                        let Some(next) = wait_for_new_generation(
+                            &mut runtime_watch_rx,
+                            current.generation_id,
+                        ).await else {
+                            break;
+                        };
+                        current = next;
+                        seen_rejections = 0;
+                    }
+                    record_config_rejection(&runtime_events, &mut current, &mut seen_rejections);
+                }
+            }
+        }
+    });
+}
+
+fn record_config_rejection(
+    runtime_events: &ApiEventStore,
+    current: &mut RuntimeWatchState,
+    seen_rejections: &mut u64,
+) {
+    let (rejected_total, last_rejection) = {
+        let report = current.config_reload_rx.borrow_and_update();
+        (report.rejected_total, report.last_rejection.clone())
+    };
+    if rejected_total <= *seen_rejections {
+        return;
+    }
+    *seen_rejections = rejected_total;
+    // Rejections coalesced by the watch channel are still counted in rejected_total.
+    if let Some(rejection) = last_rejection {
+        runtime_events.record(
+            "config.reload.rejected",
+            format!(
+                "generation={} stage={} reason={}",
+                current.generation_id, rejection.stage, rejection.reason
+            ),
+        );
+    }
+}
+
 fn active_generation_id(
     runtime_watch_rx: &watch::Receiver<Option<RuntimeWatchState>>,
 ) -> Option<u64> {
@@ -204,6 +277,7 @@ fn now_epoch_secs() -> u64 {
 mod tests {
     use super::*;
     use crate::config::ProxyConfig;
+    use crate::config::hot_reload::ConfigReloadReporter;
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::time::Duration;
 
@@ -221,6 +295,7 @@ mod tests {
                 generation_id,
                 config_rx,
                 admission_rx,
+                config_reload_rx: ConfigReloadReporter::default().subscribe(),
             },
             config_tx,
             admission_tx,
@@ -334,5 +409,65 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    async fn wait_for_rejections(events: &ApiEventStore, expected: usize) -> Vec<String> {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let contexts: Vec<String> = events
+                    .snapshot(16)
+                    .events
+                    .into_iter()
+                    .filter(|event| event.event_type == "config.reload.rejected")
+                    .map(|event| event.context)
+                    .collect();
+                if contexts.len() >= expected {
+                    break contexts;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn rejected_reloads_are_recorded_for_the_active_generation_only() {
+        let (mut initial, _initial_config_tx, _initial_admission_tx) = state(1);
+        let initial_reporter = ConfigReloadReporter::default();
+        initial.config_reload_rx = initial_reporter.subscribe();
+        let (runtime_watch_tx, runtime_watch_rx) = watch::channel(Some(initial));
+        let runtime_state = runtime_state();
+        let events = Arc::new(ApiEventStore::new(16));
+        let control_plane = ProcessControlPlane::new();
+        spawn_runtime_watchers(
+            runtime_watch_rx,
+            runtime_state.clone(),
+            events.clone(),
+            &control_plane,
+        );
+        tokio::task::yield_now().await;
+
+        initial_reporter.record_rejected("validate", "unknown user in web profile", None);
+        let contexts = wait_for_rejections(&events, 1).await;
+        assert_eq!(
+            contexts,
+            vec!["generation=1 stage=validate reason=unknown user in web profile".to_string()]
+        );
+        // A refused snapshot never reaches the config receiver.
+        assert_eq!(runtime_state.config_reload_count.load(Ordering::Relaxed), 0);
+
+        let (mut next, _next_config_tx, _next_admission_tx) = state(2);
+        let next_reporter = ConfigReloadReporter::default();
+        next.config_reload_rx = next_reporter.subscribe();
+        runtime_watch_tx.send_replace(Some(next));
+        initial_reporter.record_rejected("parse", "retired generation", None);
+        next_reporter.record_rejected("parse", "expected `=`", None);
+        let contexts = wait_for_rejections(&events, 2).await;
+        assert_eq!(contexts.len(), 2);
+        assert_eq!(contexts[1], "generation=2 stage=parse reason=expected `=`");
+
+        drop(runtime_watch_tx);
+        assert!(control_plane.shutdown(Duration::from_secs(1)).await);
     }
 }

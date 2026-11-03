@@ -258,7 +258,7 @@ pub fn classify_config_changes(old: &ProxyConfig, new: &ProxyConfig) -> ChangeCl
 
 /// Top-level config sections whose canonical serialized form differs between
 /// old and new. Uses the same serialize+canonicalize path as `config_equal`.
-fn changed_sections(old: &ProxyConfig, new: &ProxyConfig) -> Vec<String> {
+pub(super) fn changed_sections(old: &ProxyConfig, new: &ProxyConfig) -> Vec<String> {
     let mut lhs = serde_json::to_value(old).unwrap_or(serde_json::Value::Null);
     let mut rhs = serde_json::to_value(new).unwrap_or(serde_json::Value::Null);
     canonicalize_json(&mut lhs);

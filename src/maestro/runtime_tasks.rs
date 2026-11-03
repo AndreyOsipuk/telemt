@@ -169,6 +169,7 @@ pub(crate) async fn spawn_runtime_tasks(
         Some(Arc::new(move || {
             quota_source_authority.has_fresh_quota_schedules()
         })),
+        Some(stats.config_reload_reporter().clone()),
     );
     task_scope.spawn(config_watcher_task);
     startup_tracker

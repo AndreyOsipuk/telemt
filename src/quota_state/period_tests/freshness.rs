@@ -259,6 +259,7 @@ async fn quota_period_b11_rejected_source_gets_fresh_evidence_from_unchanged_wat
         None,
         Some(store.mutation_gate()),
         Some(Arc::new(move || refresh_store.has_fresh_schedules())),
+        None,
     );
     let task = tokio::spawn(task);
     tokio::time::timeout(Duration::from_secs(5), rx.changed())

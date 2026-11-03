@@ -534,3 +534,36 @@ async fn test_endpoint_integration() {
         .unwrap();
     assert_eq!(resp404.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn test_render_config_reload_outcome_metrics() {
+    let stats = Stats::new();
+    let shared_state = ProxySharedState::new();
+    let tracker = UserIpTracker::new();
+    let config = ProxyConfig::default();
+    let reporter = stats.config_reload_reporter();
+    let sources = std::collections::BTreeMap::from([(
+        std::path::PathBuf::from("/etc/telemt/config.toml"),
+        "[censorship]\n".to_string(),
+    )]);
+    reporter.record_applied(&sources, vec!["censorship".to_string()]);
+    reporter.record_rejected("validate", "unknown user", None);
+    reporter.record_rejected("parse", "expected `=`", None);
+
+    let output = render_metrics(
+        &stats,
+        shared_state.as_ref(),
+        &config,
+        &tracker,
+        None,
+        &TlsFullCertBudget::new(),
+        &test_web_publication(),
+        None,
+    )
+    .await;
+
+    assert!(output.contains("# TYPE telemt_config_reload_rejected_total counter"));
+    assert!(output.contains("telemt_config_reload_rejected_total 2"));
+    assert!(output.contains("# TYPE telemt_config_restart_required_sections gauge"));
+    assert!(output.contains("telemt_config_restart_required_sections 1"));
+}

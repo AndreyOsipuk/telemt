@@ -89,6 +89,7 @@ async fn quota_period_watcher_initialization_refreshes_pending_identical_source(
         None,
         Some(Arc::new(tokio::sync::Mutex::new(()))),
         Some(Arc::new(|| true)),
+        None,
     );
     let task = tokio::spawn(task);
     tokio::time::timeout(Duration::from_secs(5), rx.changed())

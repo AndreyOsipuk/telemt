@@ -137,7 +137,7 @@ Notes:
 | --- | --- |
 | `GET /v1/health` | Returns basic API liveness and current `read_only` flag. |
 | `GET /v1/health/ready` | Returns readiness based on admission state and upstream health; returns `503` when not ready. |
-| `GET /v1/system/info` | Returns binary/build metadata, process uptime, config path/hash, and reload counters. |
+| `GET /v1/system/info` | Returns binary/build metadata, process uptime, config path/hash, the hash of the config accepted by hot reload, and reload/rejection counters. |
 | `GET /v1/runtime/gates` | Returns admission, ME readiness, fallback/reroute, and startup gate state. |
 | `GET /v1/runtime/initialization` | Returns startup progress, ME initialization status, and per-component timeline. |
 | `GET /v1/limits/effective` | Returns effective timeout, upstream, ME, unique-IP, and TCP policy values after config defaults/resolution. |
@@ -535,8 +535,22 @@ Returned by `PATCH /v1/config` on success (`200`, or `202` when a reload was acc
 | `uptime_seconds` | `f64` | Process uptime in seconds. |
 | `config_path` | `string` | Active config file path used by runtime. |
 | `config_hash` | `string` | SHA-256 hash of the canonical recursive configuration source manifest (same value as envelope `revision`). |
+| `applied_config_hash` | `string?` | Hash of the source manifest last accepted by the config watcher of the active runtime generation, in the same format as `config_hash`. It differs from `config_hash` while a newer source is rejected or not yet processed. Absent until the watcher has accepted a source. |
+| `restart_required_sections` | `string[]` | Top-level sections of the accepted source whose changes apply only after restart; empty when nothing is pending. |
 | `config_reload_count` | `u64` | Number of successfully observed config updates since process start. |
 | `last_config_reload_epoch_secs` | `u64?` | Unix epoch seconds of the latest observed config reload; null/absent before first reload. |
+| `config_reload_rejected_count` | `u64` | Number of hot reloads refused by the config watcher of the active runtime generation; the previous config stayed active. |
+| `last_config_reload_rejection` | `ConfigReloadRejectionData?` | Latest refused hot reload; absent when none was refused. |
+
+#### `ConfigReloadRejectionData`
+| Field | Type | Description |
+| --- | --- | --- |
+| `stage` | `string` | Watcher stage that refused the source: `parse` (TOML or config validation), `prepare` (decoy DNS preparation), `validate` (effective WEB snapshot), `runtime_builder`, or `dns_overrides`. |
+| `reason` | `string` | First line of the error, truncated to 160 bytes. The full error is logged. |
+| `config_hash` | `string?` | Hash of the refused source manifest; absent only when the source files themselves could not be read. |
+| `at_epoch_secs` | `u64` | Unix epoch seconds of the rejection. |
+
+`config_hash` describes the file on disk and `applied_config_hash` the source that is running. A config writer can confirm that its write took effect by comparing its own revision with `applied_config_hash`, and `last_config_reload_rejection.config_hash` tells it that this exact revision was refused. A `parse` failure is reported only after the watcher's retry, so a partially written file is not counted. The same rejections are recorded as `config.reload.rejected` runtime events with context `generation=<id> stage=<stage> reason=<reason>`, and exported as the `telemt_config_reload_rejected_total` counter; `telemt_config_restart_required_sections` reports the length of `restart_required_sections`.
 
 ### `RuntimeGatesData`
 | Field | Type | Description |

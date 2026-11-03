@@ -8,23 +8,50 @@ pub(super) fn source_matches_active(
     config_equal(active, &overlay_hot_fields(active, &source.config))
 }
 
+/// Top-level sections whose restart-only differences stay pending after a hot apply.
+pub(super) fn restart_required_sections(
+    active: &ProxyConfig,
+    source: &crate::config::ParsedConfigSource,
+) -> Vec<String> {
+    changed_sections(&overlay_hot_fields(active, &source.config), &source.config)
+}
+
+/// Source that could not be parsed: the error and, when the files were readable,
+/// the revision of the refused bytes.
+pub(super) type SourceReadError = (String, Option<String>);
+
 /// Reads only source state; watcher initialization and unchanged events never need DNS.
-pub(super) async fn read_source(path: &PathBuf) -> Option<crate::config::ParsedConfigSource> {
+pub(super) async fn read_source(
+    path: &PathBuf,
+) -> Result<crate::config::ParsedConfigSource, SourceReadError> {
     let path = path.clone();
-    match tokio::task::spawn_blocking(move || ProxyConfig::parse_source(path)).await {
-        Ok(Ok(source)) => Some(source),
-        Ok(Err(error)) => {
+    let parsed = tokio::task::spawn_blocking(move || {
+        ProxyConfig::parse_source(&path).map_err(|error| {
+            // Validation errors still leave readable bytes; identify them for the API.
+            let revision = ProxyConfig::read_source_graph(&path)
+                .ok()
+                .map(|graph| crate::config::source_revision(&graph.source_contents));
+            (error, revision)
+        })
+    })
+    .await;
+    match parsed {
+        Ok(Ok(source)) => Ok(source),
+        Ok(Err((error, revision))) => {
             error!("config reload: failed to parse: {}", error);
-            None
+            Err((error.to_string(), revision))
         }
         Err(error) => {
             error!("config reload: source reader failed: {}", error);
-            None
+            Err((error.to_string(), None))
         }
     }
 }
 
 /// Prepares fresh evidence only for changed sources or an explicit reload request.
+///
+/// Returns `Err` only when the source could not be parsed, so the caller can retry a
+/// partial write first; every later refusal is reported through `reload_state`.
 pub(super) async fn reload(
     path: &PathBuf,
     config_tx: &watch::Sender<Arc<ProxyConfig>>,
@@ -36,7 +63,7 @@ pub(super) async fn reload(
     force: bool,
     quota_mutation: Option<&Arc<tokio::sync::Mutex<()>>>,
     quota_source_refresh: Option<&(dyn Fn() -> bool + Send + Sync)>,
-) -> Option<WatchManifest> {
+) -> Result<WatchManifest, SourceReadError> {
     // Serialize source acquisition with API lifecycle commits, then release before DNS.
     // The source timestamp fences any later mutation during asynchronous preparation.
     let guard = match quota_mutation {
@@ -53,14 +80,17 @@ pub(super) async fn reload(
     {
         let mut refreshed = (**config_tx.borrow()).clone();
         refreshed.quota_source_read_at = source.config.quota_source_read_at;
+        let restart_sections = restart_required_sections(&refreshed, &source);
         config_tx.send(Arc::new(refreshed)).ok();
         reload_state.mark_applied(source.rendered_hash);
-        return Some(manifest);
+        reload_state.report_applied(&source.source_contents, restart_sections);
+        return Ok(manifest);
     }
     drop(guard);
     if !force && reload_state.is_applied(source.rendered_hash) {
-        return Some(manifest);
+        return Ok(manifest);
     }
+    let revision = crate::config::source_revision(&source.source_contents);
     let loaded = match source.prepare().await {
         Ok(loaded) => loaded,
         Err(error) => {
@@ -68,7 +98,8 @@ pub(super) async fn reload(
                 "config reload: preparation failed: {}; keeping old config",
                 error
             );
-            return Some(manifest);
+            reload_state.report_rejected("prepare", &error.to_string(), Some(revision));
+            return Ok(manifest);
         }
     };
     let old = config_tx.borrow().clone();
@@ -79,7 +110,7 @@ pub(super) async fn reload(
     })
     .await;
     match result {
-        Ok(Ok(prepared)) => reload_config_with_resolver(
+        Ok(Ok(prepared)) => Ok(reload_config_with_resolver(
             prepared,
             config_tx,
             log_tx,
@@ -88,20 +119,23 @@ pub(super) async fn reload(
             reload_state,
             dns_resolver.as_deref(),
             quota_source_refresh.is_some_and(|refresh| refresh()),
-        ),
+        )
+        .unwrap_or(manifest)),
         Ok(Err(error)) => {
             error!(
                 "config reload: effective WEB validation failed: {}; keeping old config",
                 error
             );
-            Some(manifest)
+            reload_state.report_rejected("validate", &error.to_string(), Some(revision));
+            Ok(manifest)
         }
         Err(error) => {
             error!(
                 "config reload: runtime builder failed: {}; keeping old config",
                 error
             );
-            Some(manifest)
+            reload_state.report_rejected("runtime_builder", &error.to_string(), Some(revision));
+            Ok(manifest)
         }
     }
 }
